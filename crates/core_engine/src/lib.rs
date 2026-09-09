@@ -6,5 +6,6 @@ pub mod dice;
 pub mod evaluator;
 pub mod hands;
 pub mod pool;
+pub mod relics;
 pub mod rng;
 pub mod scoring;
