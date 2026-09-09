@@ -2,6 +2,7 @@
 
 use crate::dice::{Die, DieId, MAX_DIE_SIDES};
 use crate::hands::YahtzeeHand;
+use crate::scoring::ScoreContext;
 
 /// Taille du tableau de fréquences. L'index est la valeur de face, l'index 0
 /// reste inutilisé : le comptage passe par un tableau et jamais par une table
@@ -99,12 +100,17 @@ impl HandEvaluator {
             }
         }
 
-        matches.push(HandMatch {
-            hand: YahtzeeHand::Chance,
-            scoring_dice: dice.iter().map(|die| die.id).collect(),
-            discarded_dice: Vec::new(),
-            // TASK-12: potential_score
-            potential_score: 0,
+        let all: Vec<DieId> = dice.iter().map(|die| die.id).collect();
+        matches.push(assemble(YahtzeeHand::Chance, dice, &all));
+
+        // Le tri ne sélectionne rien : la grille est consommable et le choix de
+        // la figure appartient au joueur. Il fige l'ordre d'affichage, et rien
+        // d'autre. `sort_by` est stable, et la clé de départage est totale.
+        matches.sort_by(|left, right| {
+            right
+                .potential_score
+                .cmp(&left.potential_score)
+                .then((left.hand as usize).cmp(&(right.hand as usize)))
         });
 
         matches
@@ -201,13 +207,44 @@ fn assemble(hand: YahtzeeHand, dice: &[Die], chosen: &[DieId]) -> HandMatch {
         }
     }
 
+    let potential_score = preview_score(hand, dice, &scoring_dice);
+
     HandMatch {
         hand,
         scoring_dice,
         discarded_dice,
-        // TASK-12: potential_score
-        potential_score: 0,
+        potential_score,
     }
+}
+
+/// Aperçu de score de la figure, calculé **au niveau 1**.
+///
+/// Ce n'est pas un score. Sceaux, modificateurs de dé et reliques n'entrent pas
+/// dans ce calcul : ils relèvent du pipeline de l'Étape 2, seul juge du score
+/// réel. Les ajouter ici dupliquerait le pipeline et ferait diverger les deux
+/// nombres, celui qu'on montre au joueur et celui qu'il encaisse.
+///
+/// L'aperçu sert au tri et à la surbrillance, jamais à choisir une figure.
+fn preview_score(hand: YahtzeeHand, dice: &[Die], scoring_dice: &[DieId]) -> u64 {
+    let (base_chips, base_mult) = hand.base_score();
+
+    let chips = scoring_dice.iter().fold(base_chips, |total, id| {
+        // Les dés se retrouvent par identifiant, jamais par position : la main
+        // perd et gagne des dés en cours de manche. Un identifiant absent vaut
+        // zéro Chip plutôt qu'un panic.
+        let face = dice
+            .iter()
+            .find(|die| die.id == *id)
+            .map_or(0, |die| u64::from(die.current_value));
+
+        total.saturating_add(face)
+    });
+
+    ScoreContext {
+        chips,
+        mult: base_mult,
+    }
+    .final_score()
 }
 
 #[cfg(test)]
@@ -342,13 +379,6 @@ mod tests {
 
         let three = find(&matches, YahtzeeHand::ThreeOfAKind).expect("Brelan attendu");
         assert_eq!(faces_of(&dice, &three.scoring_dice), [5, 5, 5]);
-    }
-
-    #[test]
-    fn test_potential_score_is_zero_until_task_12() {
-        for found in HandEvaluator::evaluate(&hand(&[2, 2, 2, 5, 5])) {
-            assert_eq!(found.potential_score, 0, "{:?}", found.hand);
-        }
     }
 
     #[test]
@@ -546,5 +576,125 @@ mod tests {
 
         let large = find(&matches, YahtzeeHand::LargeStraight).expect("Grande Suite attendue");
         assert_eq!(faces_of(&dice, &large.scoring_dice), [2, 3, 4, 5, 6]);
+    }
+
+    /// Les couples figure et aperçu, dans l'ordre du `Vec`.
+    fn scored(matches: &[HandMatch]) -> Vec<(YahtzeeHand, u64)> {
+        matches
+            .iter()
+            .map(|found| (found.hand, found.potential_score))
+            .collect()
+    }
+
+    #[test]
+    fn test_full_house_potential_score_is_184() {
+        // Base (30, 400), somme des faces 16, donc 46 Chips à ×4,00.
+        let matches = HandEvaluator::evaluate(&hand(&[2, 2, 2, 5, 5]));
+
+        let full = find(&matches, YahtzeeHand::FullHouse).expect("Full attendu");
+        assert_eq!(full.potential_score, 184);
+    }
+
+    #[test]
+    fn test_sort_is_reproducible() {
+        let dice = hand(&[2, 2, 2, 5, 5, 5]);
+        let reference = scored(&HandEvaluator::evaluate(&dice));
+
+        for _ in 0..100 {
+            assert_eq!(scored(&HandEvaluator::evaluate(&dice)), reference);
+        }
+    }
+
+    #[test]
+    fn test_tie_break_keeps_highest_face() {
+        let dice = hand(&[2, 2, 2, 5, 5, 5]);
+        let matches = HandEvaluator::evaluate(&dice);
+
+        let three = find(&matches, YahtzeeHand::ThreeOfAKind).expect("Brelan attendu");
+        assert_eq!(faces_of(&dice, &three.scoring_dice), [5, 5, 5]);
+        assert_eq!(three.discarded_dice, [DieId(0), DieId(1), DieId(2)]);
+        assert_eq!(three.potential_score, 50);
+
+        let full = find(&matches, YahtzeeHand::FullHouse).expect("Full attendu");
+        assert_eq!(full.potential_score, 196);
+    }
+
+    #[test]
+    fn test_full_house_restitutes_in_hand_order() {
+        // La sélection prend le triple de 5 et la paire de 2, mais la
+        // restitution suit l'ordre de la main : les deux 2 sortent en premier.
+        let dice = hand(&[2, 2, 2, 5, 5, 5]);
+        let matches = HandEvaluator::evaluate(&dice);
+
+        let full = find(&matches, YahtzeeHand::FullHouse).expect("Full attendu");
+        assert_eq!(faces_of(&dice, &full.scoring_dice), [2, 2, 5, 5, 5]);
+    }
+
+    #[test]
+    fn test_equal_scores_follow_declaration_order() {
+        let matches = HandEvaluator::evaluate(&hand(&[3, 3, 3, 4, 5]));
+        let pairs = scored(&matches);
+
+        let threes = pairs
+            .iter()
+            .position(|(hand, _)| *hand == YahtzeeHand::Threes)
+            .expect("Trois attendus");
+        let fours = pairs
+            .iter()
+            .position(|(hand, _)| *hand == YahtzeeHand::Fours)
+            .expect("Quatre attendus");
+
+        assert_eq!(pairs[threes].1, 48);
+        assert_eq!(pairs[fours].1, 48);
+        assert!(threes < fours, "à égalité, l'ordre de déclaration tranche");
+    }
+
+    #[test]
+    fn test_reference_scores_for_a_three_of_a_kind_hand() {
+        // Verrouille d'un coup le calcul, le tri décroissant, le départage par
+        // ordre de déclaration et le fait qu'aucune autre figure ne soit émise.
+        let matches = HandEvaluator::evaluate(&hand(&[3, 3, 3, 4, 5]));
+
+        assert_eq!(
+            scored(&matches),
+            [
+                (YahtzeeHand::Fives, 90),
+                (YahtzeeHand::Threes, 48),
+                (YahtzeeHand::Fours, 48),
+                (YahtzeeHand::ThreeOfAKind, 38),
+                (YahtzeeHand::Chance, 23),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_result_is_sorted_descending() {
+        let matches = HandEvaluator::evaluate(&hand(&[2, 2, 2, 5, 5, 5]));
+
+        for pair in matches.windows(2) {
+            assert!(
+                pair[0].potential_score >= pair[1].potential_score,
+                "{:?} devrait précéder {:?}",
+                pair[0].hand,
+                pair[1].hand
+            );
+        }
+    }
+
+    #[test]
+    fn test_scoring_dice_partition_is_preserved() {
+        let dice = hand(&[3, 3, 3, 4, 5]);
+
+        for found in HandEvaluator::evaluate(&dice) {
+            assert_eq!(
+                found.scoring_dice.len() + found.discarded_dice.len(),
+                dice.len(),
+                "{:?}",
+                found.hand
+            );
+            for id in &found.scoring_dice {
+                assert!(!found.discarded_dice.contains(id), "{:?}", found.hand);
+            }
+        }
     }
 }
