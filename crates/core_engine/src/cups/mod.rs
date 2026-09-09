@@ -4,6 +4,7 @@ pub mod definitions;
 
 /// Identité d'un gobelet. Le catalogue complet est arrêté à l'Étape 9 ; ces
 /// cinq variantes sont celles dont l'Étape 1 a besoin.
+#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CupId {
     Standard,
@@ -19,6 +20,7 @@ pub enum CupId {
 /// `starting_gold` et `sides` ne remontent pas dans `RunConfig` : le premier
 /// est écrit une fois dans l'or de la session, le second dimensionne les faces
 /// de la main active.
+#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CupDeck {
     pub id: CupId,

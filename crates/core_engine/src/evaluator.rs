@@ -36,6 +36,7 @@ const NUMERIC_HANDS: [(YahtzeeHand, u8); 6] = [
 /// `scoring_dice` et `discarded_dice` partitionnent exactement la main : leur
 /// union est la main, leur intersection est vide. C'est ce qui alimente
 /// l'animation séquentielle de l'Étape 4.
+#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HandMatch {
     pub hand: YahtzeeHand,

@@ -5,6 +5,7 @@ use crate::cups::CupDeck;
 /// Valeurs de gameplay d'une run, toutes dérivées du gobelet. Aucune n'est une
 /// constante du moteur : rien ici ne présuppose un nombre de dés ni un nombre
 /// de relances (ADR-007).
+#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RunConfig {
     pub dice_count: u8,

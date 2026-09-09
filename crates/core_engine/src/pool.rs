@@ -12,6 +12,7 @@ use rand::{Rng, RngExt};
 ///
 /// Ce type ne tient aucun compteur de relance : ce compteur appartient au
 /// contexte de main de l'Étape 3.
+#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DicePool {
     dice: Vec<Die>,

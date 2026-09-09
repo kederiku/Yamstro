@@ -1,11 +1,15 @@
 //! Figures du Yams : YahtzeeHand, HandLevels.
 
+#[cfg(feature = "bevy")]
+use bevy_ecs::reflect::ReflectComponent;
+
 /// Les treize figures du Yams.
 ///
 /// **L'ordre de déclaration est normatif.** Il sert de clé de départage au tri
 /// de l'évaluateur, et `hand as usize` donne la position `0..=12` qui indexera
 /// le tableau de niveaux de `HandLevels`.
 #[repr(u8)]
+#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -78,6 +82,11 @@ const LEVEL_MULT_STEP: i64 = 100;
 ///
 /// Le stockage est un tableau indexé par `hand as usize`, jamais une table de
 /// hachage, dont l'ordre d'itération n'est pas déterministe.
+#[cfg_attr(
+    feature = "bevy",
+    derive(bevy_ecs::resource::Resource, bevy_reflect::Reflect),
+    reflect(Component)
+)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HandLevels {
     levels: [u8; 13],

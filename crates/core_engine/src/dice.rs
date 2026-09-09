@@ -1,5 +1,8 @@
 //! Modèle de dé : DieId, Die, DieSeal, DieModifier.
 
+#[cfg(feature = "bevy")]
+use bevy_ecs::reflect::ReflectComponent;
+
 use rand::{Rng, RngExt};
 
 /// Nombre de faces maximal accepté par le moteur. Borne technique et non
@@ -7,12 +10,14 @@ use rand::{Rng, RngExt};
 pub const MAX_DIE_SIDES: u8 = 20;
 
 /// Identifiant d'un dé, unique et jamais réutilisé au sein d'une même run.
+#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
 pub struct DieId(pub u32);
 
 /// Sceau gravé sur un dé. Les effets sont spécifiés à l'Étape 9.
+#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DieSeal {
     Gold,
@@ -22,6 +27,7 @@ pub enum DieSeal {
 }
 
 /// Modificateur porté par un dé. Le catalogue s'étend à l'Étape 9.
+#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DieModifier {
     BonusChips(u64),
@@ -31,6 +37,11 @@ pub enum DieModifier {
 
 /// Un dé unitaire : sa valeur courante, son nombre de faces, son verrouillage,
 /// son sceau et ses modificateurs.
+#[cfg_attr(
+    feature = "bevy",
+    derive(bevy_ecs::component::Component, bevy_reflect::Reflect),
+    reflect(Component)
+)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Die {
     pub id: DieId,
@@ -171,5 +182,59 @@ mod tests {
         let decoded: Die = serde_json::from_str(&encoded).expect("désérialisation");
 
         assert_eq!(die, decoded);
+    }
+}
+
+// Les deux tests d'intégration ECS de TASK-14 vivent ici plutôt que dans un
+// neuvième module : `Die` est le sujet des deux, et c'est lui que le piège du
+// § 2.1 détruirait. `lib.rs` reste le bloc verbatim posé par TASK-01.
+#[cfg(all(test, feature = "bevy"))]
+mod bevy_tests {
+    use super::{Die, DieId};
+    use crate::hands::{HandLevels, YahtzeeHand};
+    use bevy_ecs::world::World;
+
+    #[test]
+    fn test_die_is_component_and_hand_levels_is_resource() {
+        let mut world = World::new();
+
+        let die = Die::new(DieId(7), 8);
+        let entity = world.spawn(die.clone()).id();
+
+        let mut levels = HandLevels::default();
+        levels.upgrade(YahtzeeHand::FullHouse);
+        world.insert_resource(levels.clone());
+
+        assert_eq!(world.get::<Die>(entity), Some(&die));
+        assert_eq!(world.resource::<HandLevels>(), &levels);
+        assert_eq!(
+            world.resource::<HandLevels>().level(YahtzeeHand::FullHouse),
+            2
+        );
+    }
+
+    #[test]
+    fn test_multiple_dice_entities_coexist() {
+        let mut world = World::new();
+
+        // Cinq dés distincts par identifiant et par face affichée : un `Resource`
+        // posé par erreur sur `Die` despawnerait les quatre premiers sans la
+        // moindre erreur de compilation.
+        let dice: Vec<Die> = (0..5)
+            .map(|index| {
+                let mut die = Die::new(DieId(index), 6);
+                die.current_value = (index as u8) + 1;
+                die
+            })
+            .collect();
+
+        let entities: Vec<_> = dice
+            .iter()
+            .map(|die| world.spawn(die.clone()).id())
+            .collect();
+
+        for (entity, die) in entities.iter().zip(&dice) {
+            assert_eq!(world.get::<Die>(*entity), Some(die));
+        }
     }
 }

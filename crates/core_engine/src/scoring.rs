@@ -6,6 +6,7 @@
 /// dans ce module. Une accumulation flottante sur huit antes diverge entre
 /// x86, ARM et WASM, ce qui rendrait les tests approximatifs et détruirait le
 /// partage de graines (ADR-003).
+#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ScoreContext {
     pub chips: u64,
