@@ -89,6 +89,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_add_chips_and_add_mult_saturate() {
+        // Le critère § 4.8 exige la saturation partout, mais le garde-fou de
+        // la CI ne vérifie que la présence du mot dans le source. Seul ce
+        // test vérifie le comportement, aux deux bornes.
+        let mut haut = ScoreContext {
+            chips: u64::MAX,
+            mult: i64::MAX,
+        };
+        haut.add_chips(1);
+        haut.add_mult(1);
+        assert_eq!(haut.chips, u64::MAX);
+        assert_eq!(haut.mult, i64::MAX);
+
+        let mut bas = ScoreContext {
+            chips: 0,
+            mult: i64::MIN,
+        };
+        bas.add_mult(-1);
+        assert_eq!(bas.mult, i64::MIN);
+    }
+
+    #[test]
     fn test_final_score_rounds_to_nearest() {
         // 23,31 tombe à 23 ; 1,50 monte à 2 ; 1,49 tombe à 1.
         assert_eq!(

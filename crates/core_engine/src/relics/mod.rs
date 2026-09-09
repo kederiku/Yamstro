@@ -112,6 +112,20 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "déborde le u8")]
+    fn test_iter_slots_asserts_beyond_the_u8_range() {
+        // Au-delà de 256 slots, deux slots distincts se présenteraient sous le
+        // même numéro. L'assertion est le seul garde-fou de cet invariant, et
+        // sans ce test rien ne vérifie qu'elle est encore là.
+        let inventory = RelicInventory {
+            slots: vec![None; 257],
+        };
+
+        let _ = inventory.iter_slots().count();
+    }
+
+    #[test]
     fn test_iter_slots_is_ordered_and_skips_empty() {
         let inventory = RelicInventory {
             slots: vec![

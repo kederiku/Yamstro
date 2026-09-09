@@ -92,6 +92,41 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
+    fn test_roll_reaches_every_face() {
+        // Une borne haute exclusive ferait qu'un D6 ne montre jamais 6. Le dé
+        // bougerait, les partitions resteraient justes, et rien d'autre dans
+        // la suite ne le verrait : c'est le seul test qui garde
+        // l'atteignabilité de la face la plus haute.
+        for sides in [2_u8, 6, 8, MAX_DIE_SIDES] {
+            let mut rng = ChaCha8Rng::seed_from_u64(u64::from(sides));
+            let mut die = Die::new(DieId(0), sides);
+            let mut seen = BTreeSet::new();
+
+            for _ in 0..1_000 {
+                die.roll(&mut rng, false);
+                seen.insert(die.current_value);
+            }
+
+            let attendu: BTreeSet<u8> = (1..=sides).collect();
+            assert_eq!(seen, attendu, "dé à {sides} faces");
+        }
+    }
+
+    #[test]
+    fn test_new_die_starts_unlocked_on_face_one() {
+        // L'état initial est un contrat documenté, et il s'affiche avant le
+        // premier lancer.
+        let die = Die::new(DieId(7), 8);
+
+        assert_eq!(die.id, DieId(7));
+        assert_eq!(die.current_value, 1);
+        assert_eq!(die.sides, 8);
+        assert!(!die.locked);
+        assert_eq!(die.seal, None);
+        assert!(die.modifiers.is_empty());
+    }
+
+    #[test]
     fn test_locked_die_is_not_rerolled() {
         let mut rng = ChaCha8Rng::seed_from_u64(0);
         let mut die = Die::new(DieId(0), 6);
