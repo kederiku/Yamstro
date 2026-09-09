@@ -14,6 +14,9 @@ smallvec     = { workspace = true }
 bevy_ecs     = { workspace = true, optional = true }
 bevy_reflect = { workspace = true, optional = true }
 
+[dev-dependencies]
+serde_json   = { workspace = true }
+
 [features]
 default = []
 bevy = ["dep:bevy_ecs", "dep:bevy_reflect"]
