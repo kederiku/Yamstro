@@ -1,0 +1,19 @@
+# crates/core_engine/Cargo.toml
+[package]
+name = "core_engine"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+rand         = { workspace = true }
+rand_chacha  = { workspace = true }
+serde        = { workspace = true }
+smallvec     = { workspace = true }
+bevy_ecs     = { workspace = true, optional = true }
+bevy_reflect = { workspace = true, optional = true }
+
+[features]
+default = []
+bevy = ["dep:bevy_ecs", "dep:bevy_reflect"]

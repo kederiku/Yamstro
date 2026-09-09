@@ -1,0 +1,17 @@
+# Cargo.toml — racine du workspace
+[workspace]
+resolver = "3"
+members = ["crates/core_engine"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+
+[workspace.dependencies]
+bevy         = "=0.19.1"
+bevy_ecs     = "=0.19.1"
+bevy_reflect = "=0.19.1"
+rand         = "0.10"
+rand_chacha  = { version = "0.10", features = ["serde"] }
+serde        = { version = "1", features = ["derive"] }
+smallvec     = { version = "1", features = ["serde", "union"] }
