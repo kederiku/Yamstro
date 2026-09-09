@@ -2,6 +2,8 @@
 
 mod context;
 mod effect;
+mod report;
 
 pub use context::ScoreContext;
 pub use effect::{ScoreAction, ScoreEffect, StepSource};
+pub use report::{ScoreStep, ScoringReport};
