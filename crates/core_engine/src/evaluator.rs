@@ -1,7 +1,9 @@
 //! Évaluateur de main : HandEvaluator, HandMatch.
 
+use core::cmp::Ordering;
+
 use crate::dice::{Die, DieId, MAX_DIE_SIDES};
-use crate::hands::YahtzeeHand;
+use crate::hands::{HandLevels, YahtzeeHand};
 use crate::scoring::ScoreContext;
 
 /// Taille du tableau de fréquences. L'index est la valeur de face, l'index 0
@@ -106,15 +108,47 @@ impl HandEvaluator {
         // Le tri ne sélectionne rien : la grille est consommable et le choix de
         // la figure appartient au joueur. Il fige l'ordre d'affichage, et rien
         // d'autre. `sort_by` est stable, et la clé de départage est totale.
-        matches.sort_by(|left, right| {
-            right
-                .potential_score
-                .cmp(&left.potential_score)
-                .then((left.hand as usize).cmp(&(right.hand as usize)))
-        });
+        matches.sort_by(compare_matches);
 
         matches
     }
+}
+
+/// Recalcule les aperçus selon les niveaux de figures, puis retrie.
+///
+/// Ne relance aucune détection : les figures émises et les dés retenus restent
+/// ceux qu'`evaluate` a décidés, dans le même ordre. Seuls le chiffrage et
+/// l'ordre d'affichage changent.
+///
+/// Sans cette fonction, la surbrillance de la meilleure figure encore
+/// disponible classe faux dès qu'un parchemin de grille a monté une figure :
+/// `evaluate` chiffre tout au niveau 1.
+///
+/// Le score est recalculé **depuis la base**, jamais accumulé sur la valeur
+/// courante : appeler la fonction deux fois de suite ne doit rien changer.
+pub fn rescore_with_levels(matches: &mut [HandMatch], dice: &[Die], levels: &HandLevels) {
+    for found in matches.iter_mut() {
+        found.potential_score =
+            score_from_base(levels.base_for(found.hand), dice, &found.scoring_dice);
+    }
+
+    matches.sort_by(compare_matches);
+}
+
+/// Ordre d'affichage : aperçu décroissant, départagé par l'ordre de
+/// déclaration de `YahtzeeHand`.
+///
+/// Partagé par `evaluate` et `rescore_with_levels` : deux implémentations
+/// finiraient par diverger. Le tri appelant est stable, et cette clé est
+/// totale, donc le résultat est identique à chaque exécution.
+///
+/// Ce comparateur ne sélectionne rien : la grille est consommable et la figure
+/// est choisie par le joueur.
+fn compare_matches(left: &HandMatch, right: &HandMatch) -> Ordering {
+    right
+        .potential_score
+        .cmp(&left.potential_score)
+        .then((left.hand as usize).cmp(&(right.hand as usize)))
 }
 
 /// Fréquence de chaque face. Une valeur nulle ou au-delà de `MAX_DIE_SIDES` est
@@ -207,7 +241,7 @@ fn assemble(hand: YahtzeeHand, dice: &[Die], chosen: &[DieId]) -> HandMatch {
         }
     }
 
-    let potential_score = preview_score(hand, dice, &scoring_dice);
+    let potential_score = score_from_base(hand.base_score(), dice, &scoring_dice);
 
     HandMatch {
         hand,
@@ -217,7 +251,11 @@ fn assemble(hand: YahtzeeHand, dice: &[Die], chosen: &[DieId]) -> HandMatch {
     }
 }
 
-/// Aperçu de score de la figure, calculé **au niveau 1**.
+/// Aperçu de score d'une figure, à partir de la base qu'on lui donne.
+///
+/// `evaluate` passe `hand.base_score()`, donc le niveau 1 ;
+/// `rescore_with_levels` passe `levels.base_for(hand)`. Une seule formule, un
+/// seul endroit où elle peut se tromper.
 ///
 /// Ce n'est pas un score. Sceaux, modificateurs de dé et reliques n'entrent pas
 /// dans ce calcul : ils relèvent du pipeline de l'Étape 2, seul juge du score
@@ -225,8 +263,8 @@ fn assemble(hand: YahtzeeHand, dice: &[Die], chosen: &[DieId]) -> HandMatch {
 /// nombres, celui qu'on montre au joueur et celui qu'il encaisse.
 ///
 /// L'aperçu sert au tri et à la surbrillance, jamais à choisir une figure.
-fn preview_score(hand: YahtzeeHand, dice: &[Die], scoring_dice: &[DieId]) -> u64 {
-    let (base_chips, base_mult) = hand.base_score();
+fn score_from_base(base: (u64, i64), dice: &[Die], scoring_dice: &[DieId]) -> u64 {
+    let (base_chips, base_mult) = base;
 
     let chips = scoring_dice.iter().fold(base_chips, |total, id| {
         // Les dés se retrouvent par identifiant, jamais par position : la main
@@ -696,5 +734,128 @@ mod tests {
                 assert!(!found.discarded_dice.contains(id), "{:?}", found.hand);
             }
         }
+    }
+
+    /// La plus petite main produisant à la fois un Full et une Grande Suite.
+    fn reference_hand() -> Vec<Die> {
+        hand(&[2, 2, 2, 3, 3, 4, 5, 6])
+    }
+
+    fn score_of(matches: &[HandMatch], wanted: YahtzeeHand) -> u64 {
+        find(matches, wanted)
+            .map(|found| found.potential_score)
+            .unwrap_or_else(|| panic!("{wanted:?} attendue"))
+    }
+
+    fn rank_of(matches: &[HandMatch], wanted: YahtzeeHand) -> usize {
+        matches
+            .iter()
+            .position(|found| found.hand == wanted)
+            .unwrap_or_else(|| panic!("{wanted:?} attendue"))
+    }
+
+    #[test]
+    fn test_rescore_at_level_one_is_idempotent() {
+        let dice = reference_hand();
+        let mut matches = HandEvaluator::evaluate(&dice);
+        let before = matches.clone();
+
+        rescore_with_levels(&mut matches, &dice, &HandLevels::default());
+
+        assert_eq!(matches, before);
+    }
+
+    #[test]
+    fn test_rescore_lifts_full_house_above_large_straight() {
+        let dice = reference_hand();
+        let mut matches = HandEvaluator::evaluate(&dice);
+
+        assert_eq!(score_of(&matches, YahtzeeHand::LargeStraight), 240);
+        assert_eq!(score_of(&matches, YahtzeeHand::FullHouse), 168);
+        assert!(
+            rank_of(&matches, YahtzeeHand::LargeStraight)
+                < rank_of(&matches, YahtzeeHand::FullHouse)
+        );
+
+        let mut levels = HandLevels::default();
+        levels.upgrade(YahtzeeHand::FullHouse);
+        levels.upgrade(YahtzeeHand::FullHouse);
+        assert_eq!(levels.level(YahtzeeHand::FullHouse), 3);
+
+        rescore_with_levels(&mut matches, &dice, &levels);
+
+        // Base (60, 600) au niveau 3, plus 12 de faces, soit 72 Chips à ×6,00.
+        assert_eq!(score_of(&matches, YahtzeeHand::FullHouse), 432);
+        // Une figure non montée ne bouge pas.
+        assert_eq!(score_of(&matches, YahtzeeHand::LargeStraight), 240);
+        assert!(
+            rank_of(&matches, YahtzeeHand::FullHouse)
+                < rank_of(&matches, YahtzeeHand::LargeStraight)
+        );
+    }
+
+    #[test]
+    fn test_rescore_does_not_touch_dice_partition() {
+        let dice = reference_hand();
+        let mut matches = HandEvaluator::evaluate(&dice);
+        let before: Vec<(YahtzeeHand, Vec<DieId>, Vec<DieId>)> = matches
+            .iter()
+            .map(|found| {
+                (
+                    found.hand,
+                    found.scoring_dice.clone(),
+                    found.discarded_dice.clone(),
+                )
+            })
+            .collect();
+
+        let mut levels = HandLevels::default();
+        levels.upgrade(YahtzeeHand::FullHouse);
+        levels.upgrade(YahtzeeHand::Sixes);
+        rescore_with_levels(&mut matches, &dice, &levels);
+
+        assert_eq!(matches.len(), before.len());
+        for (wanted, scoring, discarded) in before {
+            let found = find(&matches, wanted).expect("figure conservée");
+            assert_eq!(found.scoring_dice, scoring, "{wanted:?}");
+            assert_eq!(found.discarded_dice, discarded, "{wanted:?}");
+        }
+    }
+
+    #[test]
+    fn test_rescore_reorders_stably() {
+        // Trois montés au niveau 2 valent 108, comme Six resté au niveau 1.
+        // Avant la montée, Six précédait Trois ; après, l'ordre de déclaration
+        // doit l'emporter sur l'ordre entrant.
+        let dice = reference_hand();
+        let mut matches = HandEvaluator::evaluate(&dice);
+        assert!(rank_of(&matches, YahtzeeHand::Sixes) < rank_of(&matches, YahtzeeHand::Threes));
+
+        let mut levels = HandLevels::default();
+        levels.upgrade(YahtzeeHand::Threes);
+
+        rescore_with_levels(&mut matches, &dice, &levels);
+
+        assert_eq!(score_of(&matches, YahtzeeHand::Threes), 108);
+        assert_eq!(score_of(&matches, YahtzeeHand::Sixes), 108);
+        assert!(rank_of(&matches, YahtzeeHand::Threes) < rank_of(&matches, YahtzeeHand::Sixes));
+    }
+
+    #[test]
+    fn test_rescore_is_idempotent_on_second_call() {
+        // Le recalcul part de la base, jamais du score courant : une
+        // accumulation incrémentale doublerait le bonus au second appel.
+        let dice = reference_hand();
+        let mut matches = HandEvaluator::evaluate(&dice);
+        let mut levels = HandLevels::default();
+        levels.upgrade(YahtzeeHand::FullHouse);
+        levels.upgrade(YahtzeeHand::FullHouse);
+
+        rescore_with_levels(&mut matches, &dice, &levels);
+        let after_first = matches.clone();
+
+        rescore_with_levels(&mut matches, &dice, &levels);
+
+        assert_eq!(matches, after_first);
     }
 }
