@@ -65,6 +65,58 @@ impl YahtzeeHand {
     }
 }
 
+/// Niveau maximal atteignable par une figure.
+pub const MAX_HAND_LEVEL: u8 = 10;
+
+/// Chips conférés par chaque niveau supplémentaire, quelle que soit la figure.
+const LEVEL_CHIPS_STEP: u64 = 15;
+
+/// Mult conféré par chaque niveau supplémentaire, en centièmes.
+const LEVEL_MULT_STEP: i64 = 100;
+
+/// Niveau courant de chacune des treize figures, dans `1..=MAX_HAND_LEVEL`.
+///
+/// Le stockage est un tableau indexé par `hand as usize`, jamais une table de
+/// hachage, dont l'ordre d'itération n'est pas déterministe.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HandLevels {
+    levels: [u8; 13],
+}
+
+impl Default for HandLevels {
+    /// Les treize figures démarrent au niveau 1, jamais 0. `Default` ne peut
+    /// pas être dérivé : le dérivé rendrait `[0; 13]`.
+    fn default() -> Self {
+        Self { levels: [1; 13] }
+    }
+}
+
+impl HandLevels {
+    /// Niveau courant de la figure.
+    pub fn level(&self, hand: YahtzeeHand) -> u8 {
+        self.levels[hand as usize]
+    }
+
+    /// Monte la figure d'un niveau, en saturant à `MAX_HAND_LEVEL`. Le
+    /// Parchemin de grille est achetable en boucle : le plafond doit tenir.
+    pub fn upgrade(&mut self, hand: YahtzeeHand) {
+        let level = &mut self.levels[hand as usize];
+        *level = level.saturating_add(1).min(MAX_HAND_LEVEL);
+    }
+
+    /// Base de la figure au niveau courant : `(Chips, Mult en centièmes)`.
+    /// Au niveau 1, rend exactement `hand.base_score()`.
+    pub fn base_for(&self, hand: YahtzeeHand) -> (u64, i64) {
+        let (base_chips, base_mult) = hand.base_score();
+        let extra = self.level(hand).saturating_sub(1);
+
+        let chips = base_chips.saturating_add(u64::from(extra) * LEVEL_CHIPS_STEP);
+        let mult = base_mult.saturating_add(i64::from(extra) * LEVEL_MULT_STEP);
+
+        (chips, mult)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,8 +158,8 @@ mod tests {
     fn test_all_contains_thirteen_unique_hands() {
         assert_eq!(YahtzeeHand::ALL.len(), 13);
 
-        // BTreeSet et non HashSet : § 5 du glossaire proscrit les conteneurs à
-        // ordre d'itération non déterministe dans core_engine.
+        // BTreeSet plutôt qu'un ensemble à ordre d'itération non déterministe :
+        // le § 5 du glossaire proscrit ces derniers dans core_engine.
         let distinct: BTreeSet<YahtzeeHand> = YahtzeeHand::ALL.into_iter().collect();
         assert_eq!(distinct.len(), 13, "doublon dans ALL");
     }
@@ -146,5 +198,76 @@ mod tests {
             let decoded: YahtzeeHand = serde_json::from_str(&encoded).expect("désérialisation");
             assert_eq!(decoded, hand);
         }
+    }
+
+    #[test]
+    fn test_hand_level_up_adds_15_chips_and_100_mult() {
+        let mut levels = HandLevels::default();
+        levels.upgrade(YahtzeeHand::FullHouse);
+
+        assert_eq!(levels.level(YahtzeeHand::FullHouse), 2);
+        assert_eq!(levels.base_for(YahtzeeHand::FullHouse), (45, 500));
+    }
+
+    #[test]
+    fn test_upgrade_saturates_at_max_level() {
+        let mut levels = HandLevels::default();
+        for _ in 0..20 {
+            levels.upgrade(YahtzeeHand::Yahtzee);
+        }
+
+        assert_eq!(levels.level(YahtzeeHand::Yahtzee), MAX_HAND_LEVEL);
+        // Yams vaut (50, 600) au niveau 1 ; neuf niveaux de plus valent
+        // +135 Chips et +900 centièmes.
+        assert_eq!(levels.base_for(YahtzeeHand::Yahtzee), (185, 1500));
+    }
+
+    #[test]
+    fn test_initial_level_is_one_for_all_hands() {
+        let levels = HandLevels::default();
+
+        for hand in YahtzeeHand::ALL {
+            assert_eq!(levels.level(hand), 1, "{hand:?}");
+        }
+    }
+
+    #[test]
+    fn test_base_for_level_one_matches_base_score() {
+        let levels = HandLevels::default();
+
+        for hand in YahtzeeHand::ALL {
+            assert_eq!(levels.base_for(hand), hand.base_score(), "{hand:?}");
+        }
+    }
+
+    #[test]
+    fn test_upgrade_does_not_touch_other_hands() {
+        let mut levels = HandLevels::default();
+        levels.upgrade(YahtzeeHand::Yahtzee);
+
+        assert_eq!(levels.level(YahtzeeHand::Yahtzee), 2);
+        for hand in YahtzeeHand::ALL {
+            if hand == YahtzeeHand::Yahtzee {
+                continue;
+            }
+            assert_eq!(levels.level(hand), 1, "{hand:?}");
+        }
+    }
+
+    #[test]
+    fn test_hand_levels_roundtrip_serde() {
+        let mut levels = HandLevels::default();
+        levels.upgrade(YahtzeeHand::FullHouse);
+        for _ in 0..3 {
+            levels.upgrade(YahtzeeHand::Chance);
+        }
+
+        // FullHouse est en position 8, Chance en position 12 : la forme
+        // sérialisée part dans les sauvegardes de l'Étape 10.
+        let encoded = serde_json::to_string(&levels).expect("sérialisation");
+        assert_eq!(encoded, r#"{"levels":[1,1,1,1,1,1,1,1,2,1,1,1,4]}"#);
+
+        let decoded: HandLevels = serde_json::from_str(&encoded).expect("désérialisation");
+        assert_eq!(decoded, levels);
     }
 }
