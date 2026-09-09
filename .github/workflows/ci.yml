@@ -1,0 +1,79 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # `rustup show` n'installe plus la toolchain active depuis rustup 1.28.0.
+      # L'auto-installation est revenue en 1.28.1 et le runner porte 1.29.0,
+      # mais elle se coupe par RUSTUP_AUTO_INSTALL ou `rustup set auto-install
+      # disable`. On installe donc explicitement, forme recommandée par le
+      # changelog de rustup. Le canal et les composants viennent de
+      # rust-toolchain.toml (TASK-01).
+      - name: Toolchain (pilotée par rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+          cargo --version
+
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo test -p core_engine --no-default-features
+      - run: cargo build -p core_engine --features bevy
+
+      - name: cargo deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+
+      # Volet 1 de TASK-15. `ripgrep` n'est préinstallé sur aucune image de
+      # runner Ubuntu : cette étape emploie `grep`, présent partout.
+      - name: Invariants normatifs (volet 1)
+        run: |
+          set -euo pipefail
+          status=0
+
+          # grep rend 0 s'il trouve, 1 s'il ne trouve rien, 2 s'il a échoué.
+          # La forme « ! grep ... » confond 1 et 2 : un chemin devenu faux, ou
+          # un binaire absent, passerait pour du code propre. On lit donc le
+          # code de sortie au lieu de le nier.
+          forbid() {
+            label=$1; shift
+            out=$(grep "$@" 2>&1) && rc=0 || rc=$?
+            case $rc in
+              1) printf '  ok    %s\n' "$label" ;;
+              0) printf '  ECHEC %s\n%s\n' "$label" "$out"; status=1 ;;
+              *) printf '  ECHEC %s : grep a échoué (code %s)\n%s\n' "$label" "$rc" "$out"; status=1 ;;
+            esac
+          }
+
+          # Contre-épreuve : le motif DOIT être présent. Garde la saturation
+          # contre une suppression silencieuse.
+          require() {
+            label=$1; shift
+            out=$(grep "$@" 2>&1) && rc=0 || rc=$?
+            case $rc in
+              0) printf '  ok    %s\n' "$label" ;;
+              *) printf '  ECHEC %s : motif attendu absent (code %s)\n%s\n' "$label" "$rc" "$out"; status=1 ;;
+            esac
+          }
+
+          SRC=crates/core_engine/src
+
+          forbid  "critère 6  aucun f64"                 -RnwE 'f64' "$SRC"
+          forbid  "critère 7  littéraux de gameplay"     -RnE '(dice_count|base_rerolls|relic_capacity|consumable_capacity|max_interest|hands_per_blind)[[:space:]]*[:=][[:space:]]*[0-9]' --exclude-dir=definitions "$SRC"
+          forbid  "critère 7  fabriques de RunConfig"    -RnE 'RunConfig[[:space:]]*[{]' --exclude-dir=definitions --exclude=config.rs "$SRC"
+          forbid  "critère 8  soustraction nue"          -RnE '(reroll|hand|gold|slot|capacity|count|interest)[[:alnum:]_]*[[:space:]]*(-=|- )' "$SRC"
+          forbid  "critère 8  sub non saturants"         -RnE 'wrapping_sub|overflowing_sub|unchecked_sub' "$SRC"
+          require "critère 8  saturation présente"       -RnE 'saturating_(add|sub)' "$SRC"
+          forbid  "critère 9  aucun HashMap ni HashSet"  -RnE 'HashMap|HashSet' "$SRC"
+          forbid  "critère 10 noms proscrits"            -RnE 'evaluate_dice|evaluate_hand|HandEvaluation|RollSession|rerolls_remaining|rerolls_per_hand|ScoringDie|RoundContext' crates/
+          forbid  "critère 10 le mot défausse"           -RniE 'défausse|defausse' crates/
+          forbid  "critère 5  ReflectResource"           -RnE 'ReflectResource|reflect[(]Resource[)]' crates/
+
+          exit $status

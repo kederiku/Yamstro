@@ -139,8 +139,9 @@ mod tests {
     fn test_unlocked_die_actually_moves() {
         let mut rng = ChaCha8Rng::seed_from_u64(0);
         let mut die = Die::new(DieId(0), 6);
-        // BTreeSet et non HashSet : § 5 du glossaire proscrit les conteneurs
-        // à ordre d'itération non déterministe dans core_engine.
+        // Un ensemble ordonné, et non une table de hachage : le § 5 du
+        // glossaire proscrit dans core_engine tout conteneur dont l'ordre
+        // d'itération n'est pas déterministe.
         let mut seen = BTreeSet::new();
 
         for _ in 0..20 {
