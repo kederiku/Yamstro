@@ -8,6 +8,26 @@ use crate::hands::YahtzeeHand;
 /// de hachage, dont l'ordre d'itération détruirait le départage.
 const FACE_SLOTS: usize = MAX_DIE_SIDES as usize + 1;
 
+/// Longueur d'une Petite Suite, en valeurs consécutives. Seuil **absolu** : il
+/// ne se dérive jamais du nombre de dés en main ni de la configuration.
+const SMALL_STRAIGHT_LEN: u8 = 4;
+
+/// Longueur d'une Grande Suite. Même remarque : une main de quatre dés n'a pas
+/// de Grande Suite, et ce n'est pas une erreur.
+const LARGE_STRAIGHT_LEN: u8 = 5;
+
+/// Les six figures numériques et la face qu'elles retiennent. Elles restent
+/// définies sur 1 à 6 : une face au-delà n'y participe jamais, alors qu'elle
+/// participe pleinement aux figures de forme et aux suites.
+const NUMERIC_HANDS: [(YahtzeeHand, u8); 6] = [
+    (YahtzeeHand::Aces, 1),
+    (YahtzeeHand::Twos, 2),
+    (YahtzeeHand::Threes, 3),
+    (YahtzeeHand::Fours, 4),
+    (YahtzeeHand::Fives, 5),
+    (YahtzeeHand::Sixes, 6),
+];
+
 /// Une figure trouvée dans la main, et les dés qui y participent.
 ///
 /// `scoring_dice` et `discarded_dice` partitionnent exactement la main : leur
@@ -55,6 +75,28 @@ impl HandEvaluator {
             let mut chosen = lowest_ids_of_face(dice, triple, 3);
             chosen.extend(lowest_ids_of_face(dice, pair, 2));
             matches.push(assemble(YahtzeeHand::FullHouse, dice, &chosen));
+        }
+
+        for (hand, length) in [
+            (YahtzeeHand::SmallStraight, SMALL_STRAIGHT_LEN),
+            (YahtzeeHand::LargeStraight, LARGE_STRAIGHT_LEN),
+        ] {
+            if let Some(window) = highest_straight(&counts, length) {
+                let chosen: Vec<DieId> = window
+                    .iter()
+                    .filter_map(|face| lowest_ids_of_face(dice, *face, 1).first().copied())
+                    .collect();
+                matches.push(assemble(hand, dice, &chosen));
+            }
+        }
+
+        // Une figure numérique retient tous les dés de sa face, là où une
+        // figure de forme n'en retient que le seuil.
+        for (hand, face) in NUMERIC_HANDS {
+            let chosen = all_ids_of_face(dice, face);
+            if !chosen.is_empty() {
+                matches.push(assemble(hand, dice, &chosen));
+            }
         }
 
         matches.push(HandMatch {
@@ -108,6 +150,40 @@ fn lowest_ids_of_face(dice: &[Die], face: u8, count: u8) -> Vec<DieId> {
     ids.sort_unstable();
     ids.truncate(usize::from(count));
     ids
+}
+
+/// La fenêtre de `length` valeurs consécutives la plus haute, s'il en existe
+/// une. Les valeurs distinctes se lisent dans le tableau de fréquences par
+/// ordre croissant : aucun conteneur de hachage n'intervient, et le balayage
+/// ascendant fait que la dernière fenêtre trouvée est la plus haute.
+fn highest_straight(counts: &[u8; FACE_SLOTS], length: u8) -> Option<Vec<u8>> {
+    let mut best = None;
+    let mut run: Vec<u8> = Vec::new();
+
+    for face in 1..=MAX_DIE_SIDES {
+        if counts
+            .get(usize::from(face))
+            .is_some_and(|count| *count > 0)
+        {
+            run.push(face);
+        } else {
+            run.clear();
+        }
+
+        if run.len() >= usize::from(length) {
+            best = Some(run[run.len().saturating_sub(usize::from(length))..].to_vec());
+        }
+    }
+
+    best
+}
+
+/// Tous les dés affichant cette face, dans l'ordre de la main.
+fn all_ids_of_face(dice: &[Die], face: u8) -> Vec<DieId> {
+    dice.iter()
+        .filter(|die| die.current_value == face)
+        .map(|die| die.id)
+        .collect()
 }
 
 /// Assemble un `HandMatch` en rangeant les deux listes dans l'ordre de la main,
@@ -333,5 +409,142 @@ mod tests {
         let decoded: Vec<HandMatch> = serde_json::from_str(&encoded).expect("désérialisation");
 
         assert_eq!(decoded, matches);
+    }
+
+    #[test]
+    fn test_small_straight_unordered_with_duplicate() {
+        let dice = hand(&[3, 1, 4, 2, 4]);
+        let matches = HandEvaluator::evaluate(&dice);
+
+        let small = find(&matches, YahtzeeHand::SmallStraight).expect("Petite Suite attendue");
+        assert_eq!(small.scoring_dice.len(), 4);
+        // Le second dé de valeur 4 porte le plus grand identifiant : c'est lui
+        // qui est écarté, le doublon ne servant pas à la détection.
+        assert_eq!(small.discarded_dice, [DieId(4)]);
+    }
+
+    #[test]
+    fn test_large_straight_with_d8() {
+        let mut dice = hand(&[4, 5, 6, 7, 8]);
+        if let Some(last) = dice.last_mut() {
+            last.sides = 8;
+        }
+        let matches = HandEvaluator::evaluate(&dice);
+
+        let large = find(&matches, YahtzeeHand::LargeStraight).expect("Grande Suite attendue");
+        assert_eq!(large.scoring_dice.len(), 5);
+        assert!(large.discarded_dice.is_empty());
+    }
+
+    #[test]
+    fn test_faces_above_six_excluded_from_numeric_hands() {
+        let dice = hand(&[7, 7, 7, 2, 3]);
+        let matches = HandEvaluator::evaluate(&dice);
+
+        let three = find(&matches, YahtzeeHand::ThreeOfAKind).expect("Brelan attendu");
+        assert_eq!(faces_of(&dice, &three.scoring_dice), [7, 7, 7]);
+
+        let numeric = [
+            YahtzeeHand::Aces,
+            YahtzeeHand::Twos,
+            YahtzeeHand::Threes,
+            YahtzeeHand::Fours,
+            YahtzeeHand::Fives,
+            YahtzeeHand::Sixes,
+        ];
+        for wanted in numeric {
+            if let Some(found) = find(&matches, wanted) {
+                assert!(
+                    faces_of(&dice, &found.scoring_dice).iter().all(|f| *f <= 6),
+                    "{wanted:?} retient une face au-delà de six"
+                );
+            }
+        }
+
+        assert_eq!(
+            faces_of(
+                &dice,
+                &find(&matches, YahtzeeHand::Twos)
+                    .expect("Deux attendus")
+                    .scoring_dice
+            ),
+            [2]
+        );
+        assert_eq!(
+            faces_of(
+                &dice,
+                &find(&matches, YahtzeeHand::Threes)
+                    .expect("Trois attendus")
+                    .scoring_dice
+            ),
+            [3]
+        );
+    }
+
+    #[test]
+    fn test_small_and_large_straight_both_emitted() {
+        // Les deux cases de la grille sont distinctes et se consomment
+        // séparément : détecter la Grande n'écarte pas la Petite.
+        let matches = HandEvaluator::evaluate(&hand(&[1, 2, 3, 4, 5]));
+
+        assert!(find(&matches, YahtzeeHand::SmallStraight).is_some());
+        assert!(find(&matches, YahtzeeHand::LargeStraight).is_some());
+    }
+
+    #[test]
+    fn test_large_straight_two_to_six() {
+        let matches = HandEvaluator::evaluate(&hand(&[2, 3, 4, 5, 6]));
+
+        let large = find(&matches, YahtzeeHand::LargeStraight).expect("Grande Suite attendue");
+        assert_eq!(large.scoring_dice.len(), 5);
+    }
+
+    #[test]
+    fn test_gap_is_not_a_straight() {
+        let matches = HandEvaluator::evaluate(&hand(&[1, 2, 4, 5, 6]));
+
+        assert!(find(&matches, YahtzeeHand::SmallStraight).is_none());
+        assert!(find(&matches, YahtzeeHand::LargeStraight).is_none());
+    }
+
+    #[test]
+    fn test_four_dice_never_yield_large_straight() {
+        // Les seuils sont absolus : une main de quatre dés n'a pas de Grande
+        // Suite, et ce n'est pas une erreur.
+        let matches = HandEvaluator::evaluate(&hand(&[3, 4, 5, 6]));
+
+        assert!(find(&matches, YahtzeeHand::SmallStraight).is_some());
+        assert!(find(&matches, YahtzeeHand::LargeStraight).is_none());
+    }
+
+    #[test]
+    fn test_numeric_hand_keeps_all_matching_dice() {
+        let dice = hand(&[3, 3, 3, 4, 5]);
+        let matches = HandEvaluator::evaluate(&dice);
+
+        let threes = find(&matches, YahtzeeHand::Threes).expect("Trois attendus");
+        assert_eq!(threes.scoring_dice, [DieId(0), DieId(1), DieId(2)]);
+        assert_eq!(threes.discarded_dice, [DieId(3), DieId(4)]);
+    }
+
+    #[test]
+    fn test_numeric_hand_absent_when_no_die_matches() {
+        let matches = HandEvaluator::evaluate(&hand(&[2, 3, 4, 5, 6]));
+
+        assert!(find(&matches, YahtzeeHand::Aces).is_none());
+    }
+
+    #[test]
+    fn test_highest_straight_wins_the_tie() {
+        // Trois Petites Suites conviennent et deux Grandes : la fenêtre dont la
+        // valeur haute est la plus grande l'emporte.
+        let dice = hand(&[1, 2, 3, 4, 5, 6]);
+        let matches = HandEvaluator::evaluate(&dice);
+
+        let small = find(&matches, YahtzeeHand::SmallStraight).expect("Petite Suite attendue");
+        assert_eq!(faces_of(&dice, &small.scoring_dice), [3, 4, 5, 6]);
+
+        let large = find(&matches, YahtzeeHand::LargeStraight).expect("Grande Suite attendue");
+        assert_eq!(faces_of(&dice, &large.scoring_dice), [2, 3, 4, 5, 6]);
     }
 }
