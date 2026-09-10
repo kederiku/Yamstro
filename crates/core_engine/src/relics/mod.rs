@@ -3,26 +3,57 @@
 #[cfg(feature = "bevy")]
 use bevy_ecs::reflect::ReflectComponent;
 
+pub mod definitions;
 pub mod effects;
+
+pub use definitions::rarity_of;
 
 /// Identité d'une relique. Enum **unit-only** : aucune variante ne porte de
 /// donnée, ce qui le garde `Copy` et donc stockable dans un `StepSource` lui
 /// aussi `Copy`. Les paramètres d'une relique vivent dans `effects_for`
 /// (TASK-21), jamais dans son identité.
 ///
-/// Hors build de test, cet enum est **inhabité** : les douze reliques de
-/// production arrivent à l'Étape 5, et les trois variantes ci-dessous ne sont
-/// que des fixtures. Elles ne franchissent pas la frontière de crate, donc
-/// aucun test de `tests/` ne peut les nommer.
+/// Les douze premières sont les reliques **de production**, dans l'ordre du
+/// catalogue ; les trois dernières sont des **fixtures** `#[cfg(test)]`, qui ne
+/// franchissent pas la frontière de crate — aucun test de `tests/` ne peut les
+/// nommer, et elles n'entrent jamais dans `CATALOG`.
 #[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RelicId {
+    CrackedDie,
+    PolishedStone,
+    TripletMaster,
+    FullHouseArchitect,
+    StellarAlignment,
+    PyramidOfSixes,
+    Pendulum,
+    UnstableObsidian,
+    DivineYahtzee,
+    ClayPiggyBank,
+    GhostDie,
+    DoubleMirror,
     #[cfg(test)]
     SixFire,
     #[cfg(test)]
     MagicPair,
     #[cfg(test)]
     BrokenGlass,
+}
+
+/// Palier de rareté d'une relique.
+///
+/// **`Legendary` est déclarée sans porteur.** Le palier arrive à l'Étape 9 ;
+/// la déclarer maintenant évite qu'une sauvegarde de l'Étape 10 ou un
+/// modificateur de blind qui l'énumère aient à rouvrir ce type. Le glossaire
+/// annonce un `BlindModifier::DisableRarity(RelicRarity)` qui **n'existe pas
+/// encore** dans le code : c'est une référence en avant, pas une dépendance.
+#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RelicRarity {
+    Common,
+    Uncommon,
+    Rare,
+    Legendary,
 }
 
 /// État mutable d'une relique en cours de run. `None` est une variante de cet
@@ -103,7 +134,20 @@ impl RelicInventory {
 /// Pool de tirage de la boutique (Étape 6). Vide à cette étape : les trois
 /// fixtures n'y figurent pas, et les douze reliques de production arrivent à
 /// l'Étape 5.
-pub const CATALOG: &[RelicId] = &[];
+pub const CATALOG: &[RelicId] = &[
+    RelicId::CrackedDie,
+    RelicId::PolishedStone,
+    RelicId::TripletMaster,
+    RelicId::FullHouseArchitect,
+    RelicId::StellarAlignment,
+    RelicId::PyramidOfSixes,
+    RelicId::Pendulum,
+    RelicId::UnstableObsidian,
+    RelicId::DivineYahtzee,
+    RelicId::ClayPiggyBank,
+    RelicId::GhostDie,
+    RelicId::DoubleMirror,
+];
 
 #[cfg(test)]
 mod tests {

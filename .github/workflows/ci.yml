@@ -442,6 +442,25 @@ jobs:
           # Les deux réglages restent deux, et restent indépendants.
           require "critère 4  réglages toujours à deux champs" -nU 'pub flash_intensity: f32,\n    /// Intensité de la secousse de caméra\.\n    pub shake_intensity: f32,\n\}' crates/ui_and_juice/src/settings.rs
 
+          # ---- Étape 5 : catalogue des reliques (TASK-53) ----
+          # **Les définitions sont exhaustives, par construction.** Un bras
+          # attrape-tout ferait compiler une relique oubliée, et à soixante
+          # reliques le compilateur est le seul contrôle qui tienne encore.
+          # Ancré en début de ligne : `, _) =>` sur le déclencheur est légitime.
+          forbid  "critère 5  bras attrape-tout dans les définitions" -n '^\s*_ =>' crates/core_engine/src/relics/definitions crates/core_engine/src/cups/definitions
+          forbid  "critère 5  rareté rendue optionnelle"  -n 'Option<RelicRarity>|unwrap_or\w*\(RelicRarity' crates/
+          require "critère 5  les douze raretés déclarées" -nU 'RelicId::CrackedDie\n        \| RelicId::PolishedStone\n        \| RelicId::TripletMaster\n        \| RelicId::ClayPiggyBank => RelicRarity::Common' crates/core_engine/src/relics/definitions/mod.rs
+          require "critère 5  catalogue à douze entrées" -nU 'RelicId::CrackedDie,[^]]*RelicId::DoubleMirror,\n\];' crates/core_engine/src/relics/mod.rs
+          # Les fixtures ne sont jamais tirables : elles n'entrent pas au
+          # catalogue, et leurs variantes restent sous cfg(test).
+          forbid  "critère 5  fixture entrée au catalogue" -nU 'pub const CATALOG[^]]*(SixFire|MagicPair|BrokenGlass)' crates/core_engine/src/relics/mod.rs
+          # La composition du catalogue n'est pas la loi de tirage : aucune
+          # pondération ici. Ancré sur les mots du tirage, jamais sur un nombre.
+          forbid  "critère 5  pondération de tirage dans le moteur" -n '\b(weight|weighted|chance|probabilit|\bpoids\b|drop_rate)' crates/core_engine/src/relics
+          # Les douze reliques sont énumérées dans effects_for tant qu'elles
+          # n'ont pas de comportement : TASK-56 remplacera ces noms un à un.
+          require "critère 5  douze reliques énumérées par effects_for" -nU 'RelicId::CrackedDie\n            \| RelicId::PolishedStone' crates/core_engine/src/relics/effects.rs
+
           exit $status
 
   # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en

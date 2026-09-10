@@ -95,9 +95,32 @@ pub fn effects_for(def: RelicId, hook: Hook, ctx: &TriggerCtx) -> SmallVec<[Scor
             effects
         }
 
-        // Les trois `def` sont énumérés explicitement : une quatrième variante
-        // de `RelicId` ne serait couverte par rien et le compilateur le dirait.
-        // Le joker ne porte que sur le déclencheur.
+        // **Les douze reliques de production n'ont pas encore de comportement,
+        // et cela s'écrit ici, nommément.** Rendre un `SmallVec` vide n'est pas
+        // un comportement, c'est son absence : TASK-56 remplacera ces noms un à
+        // un. Ce qui compte est qu'ils soient **énumérés** : un joker `_ =>`
+        // ferait compiler une treizième relique oubliée, et à soixante
+        // reliques le compilateur est le seul contrôle qui tienne encore.
+        // C'est l'argument que le corpus emploie pour interdire le `_ =>` dans
+        // `rarity_of` ; il vaut ici mot pour mot.
+        (
+            RelicId::CrackedDie
+            | RelicId::PolishedStone
+            | RelicId::TripletMaster
+            | RelicId::FullHouseArchitect
+            | RelicId::StellarAlignment
+            | RelicId::PyramidOfSixes
+            | RelicId::Pendulum
+            | RelicId::UnstableObsidian
+            | RelicId::DivineYahtzee
+            | RelicId::ClayPiggyBank
+            | RelicId::GhostDie
+            | RelicId::DoubleMirror,
+            _,
+        ) => SmallVec::new(),
+
+        // Les trois fixtures sont énumérées de même : le joker ne porte que sur
+        // le déclencheur.
         #[cfg(test)]
         (RelicId::SixFire | RelicId::MagicPair | RelicId::BrokenGlass, _) => SmallVec::new(),
     }
@@ -168,11 +191,12 @@ mod tests {
     fn test_fixtures_absent_from_catalog() {
         // Étape 6 : étendre au tirage de boutique.
         //
-        // `CATALOG` vaut `&[]` à cette étape : l'assertion est trivialement
-        // vraie aujourd'hui. Elle est écrite en boucle `contains` et non en
-        // `assert!(CATALOG.is_empty())` pour rester valide quand l'Étape 5 y
-        // versera douze entrées. L'invariant ne repose pas sur ce test mais
-        // sur le fait que le pool de boutique **dérive** de `CATALOG`.
+        // `CATALOG` porte douze entrées depuis TASK-53 : l'assertion est
+        // devenue **substantielle**, là où elle était trivialement vraie sur un
+        // catalogue vide. Elle est restée une boucle `contains` plutôt qu'un
+        // `assert!(CATALOG.is_empty())` précisément pour survivre à ce
+        // remplissage. L'invariant ne repose pas sur ce test mais sur le fait
+        // que le pool de boutique **dérive** de `CATALOG`.
         for fixture in [RelicId::SixFire, RelicId::MagicPair, RelicId::BrokenGlass] {
             assert!(!CATALOG.contains(&fixture));
         }
