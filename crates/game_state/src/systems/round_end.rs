@@ -233,15 +233,42 @@ mod tests {
         v.into_iter().map(|(e, _)| e).collect()
     }
 
+    /// Transitions enregistrées **au fil de l'eau**.
+    #[derive(Resource, Default)]
+    struct Journal(Vec<Paire>);
+
+    /// Draine les messages de transition à chaque frame.
+    ///
+    /// **Lire l'historique à la fin ne marche pas.** `Messages<T>` est un
+    /// tampon à deux temps, et sa rotation est pilotée par `FixedUpdate`, donc
+    /// par le **temps réel**. Mesuré : pour le même scénario, sept transitions
+    /// retenues sur la machine de développement, **trois** sur le runner de
+    /// CI — le test passait ici et échouait là-bas. Un système qui draine
+    /// chaque frame ne perd rien, quelle que soit la vitesse.
+    ///
+    /// Il tourne en `Last` : les transitions sont appliquées en
+    /// `StateTransition`, plus tôt dans la même frame.
+    fn enregistrer(
+        mut journal: ResMut<Journal>,
+        mut messages: MessageReader<StateTransitionEvent<RunPhase>>,
+    ) {
+        journal.0.extend(
+            messages
+                .read()
+                .map(|message| (message.exited, message.entered)),
+        );
+    }
+
+    /// Arme le journal. Les deux transitions de mise en route — l'apparition de
+    /// la sous-phase — ont déjà eu lieu quand l'application est rendue ; elles
+    /// sont du bruit de machine, et `is_declared` les couvre par ailleurs.
+    fn armer_le_journal(app: &mut App) {
+        app.init_resource::<Journal>();
+        app.add_systems(Last, enregistrer);
+    }
+
     fn transitions(app: &App) -> Vec<Paire> {
-        let messages = app
-            .world()
-            .resource::<Messages<StateTransitionEvent<RunPhase>>>();
-        let mut curseur = messages.get_cursor();
-        curseur
-            .read(messages)
-            .map(|message| (message.exited, message.entered))
-            .collect()
+        app.world().resource::<Journal>().0.clone()
     }
 
     fn deux_frames(app: &mut App) {
@@ -325,6 +352,7 @@ mod tests {
 
     fn observer(scenario: fn(&mut App)) -> Vec<Paire> {
         let mut app = app_en_run(CupId::Standard);
+        armer_le_journal(&mut app);
         scenario(&mut app);
         transitions(&app)
     }
@@ -515,6 +543,7 @@ mod tests {
         // s'arrêterait en chemin passerait le test sans avoir rien parcouru —
         // c'est ce que le banc a montré.
         let mut app = app_en_run(CupId::Standard);
+        armer_le_journal(&mut app);
 
         cas_blind_select_vers_roll(&mut app);
         assert_eq!(phase(&app), Some(RunPhase::Roll), "entrée dans la main");
@@ -537,8 +566,10 @@ mod tests {
         deux_frames(&mut app);
         assert_eq!(phase(&app), Some(RunPhase::BlindSelect), "continuer");
 
+        // Cinq, et non sept : les deux transitions de mise en route ont eu lieu
+        // avant que le journal ne soit armé.
         let observees = transitions(&app);
-        assert!(observees.len() >= 6, "scénario trop court : {observees:?}");
+        assert!(observees.len() >= 5, "scénario trop court : {observees:?}");
         for paire in observees {
             assert!(
                 is_declared(paire.0, paire.1),
