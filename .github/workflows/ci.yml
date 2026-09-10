@@ -289,10 +289,9 @@ jobs:
           # Écriture absolue : un cumul par frame et la caméra dérive hors cadre
           # sans que rien ne le signale.
           forbid  "critère 4  écriture caméra cumulative" -n 'translation(\.[xyz])?\s*\+=' crates/ui_and_juice/src
-          # `flash_intensity` existe dès maintenant et n'est consommée qu'à
-          # TASK-51. Ancré sur le champ hors de son fichier de déclaration :
-          # `settings.rs` a le droit de le nommer, personne d'autre.
-          forbid  "critère 4  consommateur de flash avant TASK-51" -n 'flash_intensity' crates/ui_and_juice/src -g '!crates/ui_and_juice/src/settings.rs'
+          # **Levée à TASK-51**, qui livre le flash et son intensité d'un seul
+          # tenant. Elle nommait le ticket qui devait la lever : c'est ce qui
+          # distingue une garde datée d'une garde oubliée.
           # `Resource` est un sous-trait de `Component` en 0.19 : poser une de
           # ces ressources sur une entité despawnerait silencieusement les
           # autres porteurs.
@@ -412,6 +411,29 @@ jobs:
           # La sortie de phase attend le drapeau : sans lui, RoundEnd arbitrerait
           # sur un contexte où rien n'a été ajouté.
           require "critère 4  sortie de phase liée au commit" -n 'steps\.is_empty\(\) && queue\.committed' crates/game_state/src/systems/round_end.rs
+
+          # ---- Étape 4 : accessibilité, flashs plafonnés (TASK-51) ----
+          # Un seul support de flash : deux nœuds, ce serait deux plafonds
+          # indépendants, donc six changements de luminance par seconde là où la
+          # conformité en admet trois.
+          require "critère 4  support de flash unique"   -n 'commands\.spawn\(\(\n        FlashOverlay,' -U crates/ui_and_juice/src/animation.rs
+          forbid  "critère 4  second support de flash"   -n 'FlashOverlay,' crates/ -g '!crates/ui_and_juice/src/animation.rs'
+          # L'intensité n'est lue **que** par le système de flash : la pulsation
+          # et le trauma sont inconditionnels, sans quoi la règle « aucune
+          # information n'est portée par le flash seul » ne tient plus.
+          #
+          # Pas de garde textuelle côté dépileur : ses fixtures **écrivent**
+          # légitimement le réglage pour piloter les tests, et aucun motif ne
+          # sépare proprement cette écriture d'une lecture. C'est
+          # `test_reduce_flashes_disables_full_screen_flash` qui porte la
+          # propriété, et il mord — à intensité nulle il exige que la pulsation
+          # et le trauma soient toujours là.
+          require "critère 4  intensité lue par le flash" -n 'settings\.flash_intensity > 0\.0' crates/ui_and_juice/src/animation.rs
+          # Le plafond est en secondes réelles : jamais un `Timer`, que le
+          # fast-forward accélérerait, et jamais le fond de la caméra.
+          forbid  "critère 4  plafond confié à un Timer" -n 'Timer.*flash|flash.*Timer|ClearColor\(|insert_resource::<ClearColor' crates/ui_and_juice/src
+          # Les deux réglages restent deux, et restent indépendants.
+          require "critère 4  réglages toujours à deux champs" -nU 'pub flash_intensity: f32,\n    /// Intensité de la secousse de caméra\.\n    pub shake_intensity: f32,\n\}' crates/ui_and_juice/src/settings.rs
 
           exit $status
 

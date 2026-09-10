@@ -97,6 +97,22 @@ impl Plugin for JuicePlugin {
                 .in_set(JuiceSet::Animation),
         );
 
+        // Le flash lit les paliers joués : il doit tourner **après** le
+        // dépilement, sinon il les découvre à la frame suivante. Il reste hors
+        // garde d'état comme les autres animations : une opacité coupée net à
+        // la transition laisserait l'écran blanc.
+        app.add_systems(
+            Update,
+            crate::animation::animate_flash
+                .in_set(JuiceSet::Animation)
+                .after(JuiceSet::TickQueue),
+        );
+
+        // **Un seul support de flash**, instancié une fois et nulle part
+        // ailleurs : deux nœuds, ce serait deux plafonds indépendants, donc six
+        // changements de luminance par seconde.
+        app.add_systems(Startup, crate::animation::spawn_flash_overlay);
+
         // Les deux premiers maillons du dépilement. Le chaînage et la garde
         // d'état viennent du `configure_sets` ci-dessus : les répéter ici ne
         // ferait que doubler ce qui existe déjà.

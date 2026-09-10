@@ -27,7 +27,7 @@
 //! figerait `Transform.scale` à sa valeur courante — entité restée gonflée.
 
 use bevy::prelude::*;
-use core_engine::scoring::ScoreStep;
+use core_engine::scoring::{ScoreAction, ScoreStep};
 
 use crate::settings::JuiceSettings;
 
@@ -74,6 +74,106 @@ impl PunchScale {
     fn settled(&self) -> bool {
         self.offset.abs() < 1e-3 && self.velocity.abs() < 1e-3
     }
+}
+
+/// Le nœud plein écran qui porte le flash. **Un seul dans la crate.**
+///
+/// `Component` uniquement, et détail d'implémentation privé : deux supports de
+/// flash, ce serait deux plafonds indépendants, donc six changements de
+/// luminance par seconde là où la conformité en admet trois.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlashOverlay;
+
+/// Opacité de crête d'un flash, à intensité nominale.
+///
+/// **Réglage d'Étape 7**, mais qui n'est pas qu'esthétique : voir la
+/// décroissance ci-dessous.
+const FLASH_PEAK_ALPHA: f32 = 0.35;
+
+/// Durée d'extinction d'un flash, en secondes.
+///
+/// **Elle interagit avec le plafond, et c'est le point à ne pas manquer.** À
+/// trois flashs par seconde, une extinction plus longue que leur écartement
+/// donne un écran continûment blanc : le plafond serait tenu à la lettre et ne
+/// protégerait plus personne. À la cadence du plafond — huit paliers par
+/// seconde, soit 125 ms — 100 ms laissent 25 ms de noir franc entre deux
+/// impulsions. Un test tient cet invariant, précisément pour que l'Étape 7 ne
+/// puisse pas l'annuler en croyant ne toucher qu'à l'apparence.
+const FLASH_DECAY_SECS: f32 = 0.10;
+
+/// Nombre de changements de luminance plein écran admis par seconde glissante.
+const FLASH_CAP_PER_SECOND: usize = 3;
+
+/// Flash plein écran des multiplications, sous plafond de photosensibilité.
+///
+/// # Fenêtre glissante, et non espacement minimal
+///
+/// Le budget est une fenêtre glissante d'une seconde portant au plus trois
+/// horodatages — un `Local`, donc un état privé du système : l'étape ne crée
+/// aucune ressource de budget, et ni `JuiceSettings` ni `ScoringStepQueue` ne
+/// gagnent de champ. La variante « pas de flash à moins d'un tiers de seconde
+/// du précédent » que le corpus admettait est plus simple mais **échoue au test
+/// du plafond** : à huit paliers par seconde elle n'émettrait que deux flashs
+/// là où la règle en admet trois, et se censurerait donc au-delà du nécessaire.
+///
+/// # Le retour local est inconditionnel, le flash seul est conditionnel
+///
+/// Ce système n'écrit **que** l'opacité du nœud. La pulsation du compteur Mult
+/// et le trauma sont posés par `dispatch_step`, sans jamais lire
+/// `flash_intensity` : un flash refusé — accessibilité ou plafond — laisse donc
+/// tout le reste intact. La règle « aucune information n'est portée par le
+/// flash seul » est vraie **par construction**, pas par vigilance.
+///
+/// Le budget n'est consommé que par un flash **émis** ; un refus ne coûte rien.
+/// Et plusieurs multiplications tombant dans la même frame ne comptent que pour
+/// une : l'œil y voit un seul changement de luminance.
+pub fn animate_flash(
+    time: Res<Time>,
+    settings: Res<JuiceSettings>,
+    mut joues: MessageReader<crate::events::ScoreStepPlayed>,
+    mut fenetre: Local<std::collections::VecDeque<f32>>,
+    mut overlay: Query<&mut BackgroundColor, With<FlashOverlay>>,
+) {
+    let maintenant = time.elapsed_secs();
+    while fenetre.front().is_some_and(|pose| maintenant - pose >= 1.0) {
+        fenetre.pop_front();
+    }
+
+    let demande = joues
+        .read()
+        .any(|joue| matches!(joue.action, ScoreAction::MultiplyMult(_)));
+    let accorde = demande && settings.flash_intensity > 0.0 && fenetre.len() < FLASH_CAP_PER_SECOND;
+    if accorde {
+        fenetre.push_back(maintenant);
+    }
+
+    let pas = FLASH_PEAK_ALPHA / FLASH_DECAY_SECS * time.delta_secs();
+    for mut couleur in &mut overlay {
+        let opacite = if accorde {
+            FLASH_PEAK_ALPHA * settings.flash_intensity
+        } else {
+            (couleur.0.alpha() - pas).max(0.0)
+        };
+        couleur.0.set_alpha(opacite);
+    }
+}
+
+/// Instancie le nœud plein écran, une fois, au démarrage.
+///
+/// Un nœud UI et non un `ClearColor` : le fond n'est pas la scène, et le flash
+/// doit couvrir les dés, les reliques et les compteurs.
+pub fn spawn_flash_overlay(mut commands: Commands) {
+    commands.spawn((
+        FlashOverlay,
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.0)),
+        GlobalZIndex(i32::MAX),
+    ));
 }
 
 /// Lequel des trois compteurs une entité porte.

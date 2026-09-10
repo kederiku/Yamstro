@@ -374,6 +374,288 @@ mod tests {
         }
     }
 
+    // ---- Accessibilité : flashs (TASK-51) ----
+
+    use crate::animation::FlashOverlay;
+
+    fn alpha(app: &mut App) -> f32 {
+        let mut etat = app
+            .world_mut()
+            .query_filtered::<&BackgroundColor, With<FlashOverlay>>();
+        etat.iter(app.world())
+            .map(|c| c.0.alpha())
+            .next()
+            .expect("le nœud de flash")
+    }
+
+    /// Une scène de `n` multiplications, dépilées à `vitesse`, avec relevé de
+    /// l'alpha **à chaque frame**.
+    fn multiplications(n: usize, vitesse: u32, intensite_flash: f32) -> (Scene, Vec<f32>) {
+        let paliers = (0..n)
+            .map(|_| {
+                palier_de(
+                    StepSource::HandBase {
+                        hand: YahtzeeHand::FullHouse,
+                    },
+                    ScoreAction::MultiplyMult(150),
+                )
+            })
+            .collect();
+        let mut s = scene(paliers);
+        s.app
+            .world_mut()
+            .resource_mut::<JuiceSettings>()
+            .flash_intensity = intensite_flash;
+        s.app
+            .world_mut()
+            .resource_mut::<ScoringStepQueue>()
+            .set_speed_multiplier(vitesse)
+            .expect("vitesse admise");
+
+        // 64 frames de 15 625 µs : une seconde simulée exactement.
+        let releve = (0..64)
+            .map(|_| {
+                frame(&mut s.app);
+                alpha(&mut s.app)
+            })
+            .collect();
+        (s, releve)
+    }
+
+    /// Nombre de **fronts montants** : un flash est un passage de zéro à une
+    /// valeur non nulle. C'est ce que l'œil compte, et ce que le plafond borne.
+    fn flashs(releve: &[f32]) -> usize {
+        releve
+            .iter()
+            .zip(std::iter::once(&0.0).chain(releve.iter()))
+            .filter(|(maintenant, avant)| **maintenant > 0.0 && **avant == 0.0)
+            .count()
+    }
+
+    /// Demande un flash **sans passer par la file** : un message de palier joué
+    /// écrit à la main, pour maîtriser l'instant de chaque demande.
+    fn demander_un_flash(app: &mut App) {
+        app.world_mut().write_message(ScoreStepPlayed {
+            source: StepSource::HandBase {
+                hand: YahtzeeHand::FullHouse,
+            },
+            action: ScoreAction::MultiplyMult(150),
+        });
+    }
+
+    fn app_flash(intensite: f32) -> App {
+        let mut s = scene(Vec::new());
+        s.app
+            .world_mut()
+            .resource_mut::<JuiceSettings>()
+            .flash_intensity = intensite;
+        s.app
+    }
+
+    #[test]
+    fn test_refused_flash_does_not_spend_the_budget() {
+        // **Un refus ne coûte rien.** Sinon, un joueur qui réactive les flashs
+        // après les avoir coupés resterait jusqu'à une seconde sans en voir un
+        // seul : le budget aurait été consommé par des flashs invisibles.
+        let mut app = app_flash(0.0);
+        for _ in 0..3 {
+            demander_un_flash(&mut app);
+            frame_de(&mut app, 15_625);
+        }
+        app.world_mut()
+            .resource_mut::<JuiceSettings>()
+            .flash_intensity = 1.0;
+
+        demander_un_flash(&mut app);
+        frame_de(&mut app, 15_625);
+        assert!(
+            alpha(&mut app) > 0.0,
+            "le budget a été dépensé par des flashs que personne n'a vus"
+        );
+    }
+
+    #[test]
+    fn test_flashes_resume_one_second_after_the_first() {
+        // La fenêtre glisse : elle expire une seconde après le **premier** flash
+        // émis, pas après le dernier refus. Sans purge, ou avec une fenêtre trop
+        // longue, la reprise n'arriverait jamais.
+        let mut app = app_flash(1.0);
+        for _ in 0..6 {
+            demander_un_flash(&mut app);
+            frame_de(&mut app, 125_000);
+        }
+        // 0,75 s écoulées, trois flashs émis à 0,125 / 0,25 / 0,375 s et trois
+        // refusés. La fenêtre expire une seconde après le **premier**, soit à
+        // 1,125 s : c'est cette date-là qu'il faut dépasser, pas la seconde
+        // ronde.
+        frame_de(&mut app, 400_000);
+        demander_un_flash(&mut app);
+        frame_de(&mut app, 15_625);
+        assert!(
+            alpha(&mut app) > 0.0,
+            "les flashs n'ont pas repris après l'expiration de la fenêtre"
+        );
+    }
+
+    #[test]
+    fn test_only_multiplications_flash() {
+        let mut app = app_flash(1.0);
+        for action in [ScoreAction::AddChips(10), ScoreAction::AddMult(400)] {
+            app.world_mut().write_message(ScoreStepPlayed {
+                source: StepSource::HandBase {
+                    hand: YahtzeeHand::FullHouse,
+                },
+                action,
+            });
+            frame_de(&mut app, 15_625);
+            assert_eq!(alpha(&mut app), 0.0, "{action:?} a déclenché un flash");
+        }
+    }
+
+    #[test]
+    fn test_peak_alpha_follows_the_setting() {
+        // L'intensité **module** le flash, elle ne fait pas que l'autoriser.
+        let pic = |intensite: f32| {
+            let mut app = app_flash(intensite);
+            demander_un_flash(&mut app);
+            frame_de(&mut app, 15_625);
+            alpha(&mut app)
+        };
+        let plein = pic(1.0);
+        let moitie = pic(0.5);
+        assert!(plein > 0.0);
+        // Égalité **exacte** : multiplier par 0,5 puis par 2 ne perd rien en
+        // binaire, et le corpus proscrit les comparaisons approchées.
+        assert_eq!(
+            moitie * 2.0,
+            plein,
+            "un flash à moitié d'intensité ne vaut pas la moitié"
+        );
+    }
+
+    #[test]
+    fn test_reduce_flashes_disables_full_screen_flash() {
+        let (mut s, releve) = multiplications(6, 2, 0.0);
+
+        assert_eq!(flashs(&releve), 0, "un flash a été émis à intensité nulle");
+        assert!(
+            releve.iter().all(|a| *a == 0.0),
+            "l'alpha n'est pas resté nul"
+        );
+
+        // **Le retour local reste entier.** C'est la règle 1 : le mode
+        // accessibilité rend le jeu moins agressif, jamais moins lisible.
+        assert!(
+            s.app.world().resource::<ScreenShake>().trauma > 0.0,
+            "le trauma a disparu avec le flash"
+        );
+        let mult = s.compteurs[1];
+        assert!(
+            s.app
+                .world()
+                .get::<AnimatedNumber>(mult)
+                .expect("compteur")
+                .target
+                > 0.0,
+            "la cible du compteur Mult n'a pas été écrite"
+        );
+        assert!(
+            porteurs_de_punch(&mut s.app).contains(&mult),
+            "la pulsation du compteur Mult a disparu"
+        );
+        // **Et elle garde son amplitude.** Vérifier la seule présence du
+        // composant laisserait passer une impulsion nulle, qui porte un
+        // `PunchScale` sans rien montrer : le banc l'a montré.
+        let ressort = s.app.world().get::<PunchScale>(mult).expect("ressort");
+        assert!(
+            ressort.velocity >= PULSE_RENFORCEE,
+            "la pulsation a été affaiblie avec le flash : {}",
+            ressort.velocity
+        );
+    }
+
+    #[test]
+    fn test_flash_cap_is_three_per_second() {
+        // Six multiplications en une seconde, à x2 : huit paliers par seconde.
+        let (_, releve) = multiplications(6, 2, 1.0);
+        assert_eq!(
+            flashs(&releve),
+            3,
+            "le plafond de trois changements de luminance par seconde n'est pas tenu"
+        );
+    }
+
+    #[test]
+    fn test_flash_returns_to_black_between_two_flashes() {
+        // **Sans ce test, l'Étape 7 peut annuler le plafond en croyant ne
+        // toucher qu'à l'esthétique** : trois flashs par seconde dont la
+        // décroissance dure plus que leur écartement donnent un écran
+        // continûment blanc, et le plafond ne protège plus personne.
+        let (_, releve) = multiplications(6, 2, 1.0);
+        let pics: Vec<usize> = releve
+            .iter()
+            .enumerate()
+            .zip(std::iter::once(&0.0).chain(releve.iter()))
+            .filter(|((_, a), avant)| **a > 0.0 && **avant == 0.0)
+            .map(|((i, _), _)| i)
+            .collect();
+        assert_eq!(pics.len(), 3);
+        for paire in pics.windows(2) {
+            assert!(
+                releve[paire[0]..paire[1]].contains(&0.0),
+                "l'écran n'est pas repassé par le noir entre deux flashs"
+            );
+        }
+    }
+
+    #[test]
+    fn test_flash_and_shake_settings_are_independent() {
+        // Deux réglages, deux effets : aucune branche ne lit l'un pour décider
+        // de l'autre. Le relevé porte sur les **fronts montants**, le flash
+        // pouvant s'être éteint avant la dernière frame.
+        let une_multiplication = || {
+            vec![palier_de(
+                StepSource::HandBase {
+                    hand: YahtzeeHand::FullHouse,
+                },
+                ScoreAction::MultiplyMult(150),
+            )]
+        };
+
+        // Secousse coupée : le flash reste.
+        let mut s = scene(une_multiplication());
+        s.app
+            .world_mut()
+            .resource_mut::<JuiceSettings>()
+            .shake_intensity = 0.0;
+        let releve: Vec<f32> = (0..24)
+            .map(|_| {
+                frame(&mut s.app);
+                alpha(&mut s.app)
+            })
+            .collect();
+        assert_eq!(flashs(&releve), 1, "la secousse coupée a emporté le flash");
+
+        // Flash coupé : le trauma reste. C'est l'amplitude que
+        // `shake_intensity` annule, pas le trauma lui-même.
+        let mut s = scene(une_multiplication());
+        s.app
+            .world_mut()
+            .resource_mut::<JuiceSettings>()
+            .flash_intensity = 0.0;
+        let releve: Vec<f32> = (0..24)
+            .map(|_| {
+                frame(&mut s.app);
+                alpha(&mut s.app)
+            })
+            .collect();
+        assert_eq!(flashs(&releve), 0, "un flash a survécu à son extinction");
+        assert!(
+            s.app.world().resource::<ScreenShake>().trauma > 0.0,
+            "le flash coupé a emporté le trauma"
+        );
+    }
+
     // ---- Commit unique du score (TASK-50) ----
 
     use core_engine::blind::{BlindContext, BlindDefinition};
