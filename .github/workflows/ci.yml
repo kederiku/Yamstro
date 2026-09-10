@@ -83,7 +83,15 @@ jobs:
           forbid  "critère 8  sub non saturants"         -n 'wrapping_sub|overflowing_sub|unchecked_sub' "$SRC"
           require "critère 8  saturation présente"       -n 'saturating_(add|sub)' "$SRC"
           forbid  "critère 9  aucun HashMap ni HashSet"  -n 'HashMap|HashSet' "$SRC"
-          forbid  "critère 10 noms proscrits"            -n 'evaluate_dice|evaluate_hand|HandEvaluation|RollSession|rerolls_remaining|rerolls_per_hand|ScoringDie|RoundContext' crates/
+          # Les huit noms sont ancrés aux limites de mot. Sans l'ancrage, la
+          # variante normative « Hook::OnScoringDie » contient la sous-chaîne
+          # « ScoringDie » et ferait échouer la garde ; c'est le TYPE de ce nom
+          # qui est proscrit, pas le moment qu'il nomme (CONTEXT.md).
+          forbid  "critère 10 noms proscrits"            -n '\b(evaluate_dice|evaluate_hand|HandEvaluation|RollSession|rerolls_remaining|rerolls_per_hand|ScoringDie|RoundContext)\b' crates/
+          # Les quatre hooks sont déclarés dans trigger.rs, mais l'Étape 2 n'en
+          # câble que deux. Un point d'appel de OnRoll ou OnRoundEnd ailleurs
+          # dans le pipeline produirait des effets fantômes dans le journal.
+          forbid  "critère 10 hooks non câblés"          -n 'OnRoll|OnRoundEnd' "$SRC/scoring" -g '!**/trigger.rs'
           forbid  "critère 10 le mot défausse"           -ni 'défausse|defausse' crates/
           forbid  "critère 5  ReflectResource"           -n 'ReflectResource|reflect\(Resource\)' crates/
 

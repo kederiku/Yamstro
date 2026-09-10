@@ -5,7 +5,9 @@ mod effect;
 pub mod levels;
 mod pipeline;
 mod report;
+mod trigger;
 
 pub use context::ScoreContext;
 pub use effect::{ScoreAction, ScoreEffect, StepSource};
 pub use report::{ScoreStep, ScoringReport};
+pub use trigger::{Hook, TriggerCtx};

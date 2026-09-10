@@ -95,6 +95,17 @@ déroger au plancher du Mult.
 Objet permanent qui produit des effets de score à des points de déclenchement
 donnés. Les reliques sont des données, jamais des objets-trait.
 
+**Déclencheur** :
+Moment du tour où les reliques et les sceaux sont consultés. Il y en a quatre,
+aux noms canoniques `OnRoll`, `OnScoringDie`, `OnHandScored` et `OnRoundEnd`.
+Un déclencheur nomme un moment, jamais un effet : ce qu'une relique produit à
+ce moment est décidé ailleurs.
+`OnScoringDie` contient le nom d'un type proscrit plus haut, sans en être un :
+l'un est un moment du tour, l'autre serait un type en collision avec un
+composant du moteur de rendu. La garde de la CI est ancrée aux limites de mot
+pour les distinguer.
+_Avoid_ : `RelicHook`, `RelicEffect`
+
 **Inventaire** :
 Suite ordonnée des reliques possédées. L'ordre est strict, de gauche à droite,
 et n'est jamais retrié par type d'effet : réordonner l'inventaire change le
