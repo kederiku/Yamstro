@@ -10,6 +10,8 @@
 
 use bevy::prelude::*;
 
+use crate::states::{AppState, RunPhase, SettingsOverlay};
+
 /// Les quatre ensembles de systèmes du tour de jeu, dans leur ordre
 /// d'exécution.
 ///
@@ -33,6 +35,10 @@ pub struct GameStatePlugin;
 
 impl Plugin for GameStatePlugin {
     fn build(&self, app: &mut App) {
+        app.init_state::<AppState>()
+            .add_sub_state::<RunPhase>()
+            .init_resource::<SettingsOverlay>();
+
         app.configure_sets(
             Update,
             (
