@@ -23,7 +23,7 @@ use core_engine::cups::CupId;
 use core_engine::evaluator::HandMatch;
 use core_engine::hands::{HandLevels, YahtzeeHand};
 use core_engine::rng::RunRng;
-use core_engine::scoring::{ScoreStep, ScoringReport};
+use core_engine::scoring::ScoreStep;
 
 /// Ce qui dure toute une run.
 ///
@@ -52,24 +52,214 @@ pub struct HandContext {
     pub selected_hand: Option<YahtzeeHand>,
 }
 
+/// Vitesse de relecture refusée.
+///
+/// **Première erreur du dépôt**, et donc la convention : un type nu, `Display`
+/// et `std::error::Error` écrits à la main, aucune dépendance ajoutée pour un
+/// seul type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidSpeed(pub u32);
+
+impl std::fmt::Display for InvalidSpeed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "vitesse de relecture invalide : {} n'est ni 1, ni 2, ni 4",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for InvalidSpeed {}
+
+/// Intervalle entre deux paliers, avant application de la vitesse.
+const STEP_INTERVAL_SECS: f32 = 0.25;
+/// Pause après le dernier palier. **Jamais accélérée.**
+const FINAL_PAUSE_SECS: f32 = 0.5;
+
 /// File d'animation du score, alimentée par le rapport du pipeline.
 ///
-/// **Forme minimale.** L'Étape 4 arrête la forme définitive, curseur et
-/// minuteries de dépilement compris. Elle porte le rapport en plus des paliers
-/// parce que le commit unique a besoin du total et de la figure retenue.
+/// **Forme définitive.** Huit champs, aucun de plus : ni curseur d'index, ni
+/// drapeau d'application, ni identifiant de blind. Le dépilement se fait par
+/// `pop_front`, et un champ d'attribution inviterait au double comptage que la
+/// séparation calcul/commit supprime (ADR-010).
 ///
-/// Aucun champ d'attribution ici — ni drapeau d'application, ni identifiant de
-/// blind : il inviterait au double comptage que la séparation calcul/commit
-/// supprime.
-#[derive(Resource, Debug, Clone, Default)]
+/// # Ce que `report` portait, et pourquoi il a disparu
+///
+/// TASK-31 stockait le `ScoringReport` entier. L'Étape 4 n'en tirait que deux
+/// valeurs, qui sont désormais des champs. Les deux sont **dérivables du
+/// rapport** — `final_score` est même, de l'aveu de `core_engine`, « redondante
+/// par construction avec le dernier pas » — et c'est sans importance : **au
+/// moment du commit, la file est vide**. Tout ce qui se déduirait des `steps` a
+/// disparu quand vient le seul instant où on en a besoin. C'est la raison
+/// d'être des deux champs, et la seule.
+///
+/// `committed` est le garde-fou du commit unique. Il naît **fermé** dans
+/// `Default` : une file par défaut n'a rien à commettre, et sa figure est une
+/// sentinelle qui ne doit jamais être lue.
+#[derive(Resource, Debug, Clone, PartialEq, Eq)]
 pub struct ScoringStepQueue {
     pub steps: VecDeque<ScoreStep>,
-    pub report: Option<ScoringReport>,
+    /// Figure retenue, à marquer dans `used_hands`.
+    pub hand: YahtzeeHand,
+    /// Total calculé par `core_engine`, transporté tel quel, jamais recalculé.
+    pub final_score: u64,
+    /// `TimerMode::Repeating`, 0,25 s.
+    pub step_timer: Timer,
+    /// `TimerMode::Once`, 0,5 s, **jamais accélérée**.
+    pub final_pause: Timer,
+    /// 1 | 2 | 4. Écrit **uniquement** par `set_speed_multiplier`.
+    pub speed_multiplier: u32,
+    /// Espace ou clic gauche maintenu.
+    pub fast_forward: bool,
+    /// Garde-fou : le commit n'a lieu qu'une fois.
+    pub committed: bool,
+}
+
+impl Default for ScoringStepQueue {
+    /// **Écrit à la main, jamais dérivé.** Un `Default` dérivé donnerait deux
+    /// minuteries de durée nulle ; or `Timer::tick` calcule alors
+    /// `elapsed.checked_div(0).map_or(u32::MAX, …)`, si bien que
+    /// `times_finished_this_tick()` vaut **`u32::MAX`** dès la première frame et
+    /// que la boucle de dépilement ferait 4 294 967 295 tours.
+    ///
+    /// La figure est une **sentinelle** : `YahtzeeHand::ALL[0]` est `Aces`, une
+    /// figure parfaitement réelle. Elle n'est jamais lue parce que `committed`
+    /// naît à `true`. Quiconque lit `hand` sans avoir vérifié `committed`
+    /// marquera `Aces` comme jouée.
+    fn default() -> Self {
+        Self {
+            steps: VecDeque::new(),
+            hand: YahtzeeHand::ALL[0],
+            final_score: 0,
+            step_timer: Timer::from_seconds(STEP_INTERVAL_SECS, TimerMode::Repeating),
+            final_pause: Timer::from_seconds(FINAL_PAUSE_SECS, TimerMode::Once),
+            speed_multiplier: 1,
+            fast_forward: false,
+            committed: true,
+        }
+    }
+}
+
+impl ScoringStepQueue {
+    /// Seul chemin de remplissage. `speed_multiplier` vaut toujours 1, donc
+    /// aucun `Result` ne remonte dans `build_scoring_report` ; le réglage
+    /// courant, lui, est reposé par l'appelant (voir `build_scoring_report`).
+    pub fn new(steps: VecDeque<ScoreStep>, hand: YahtzeeHand, final_score: u64) -> Self {
+        Self {
+            steps,
+            hand,
+            final_score,
+            committed: false,
+            ..Self::default()
+        }
+    }
+
+    /// Seul chemin d'écriture de `speed_multiplier`.
+    ///
+    /// **Rejette, ne corrige pas.** Un `3` venu du réglage de l'Étape 11 est un
+    /// bug de l'appelant ; un `clamp` le rendrait invisible et le joueur
+    /// verrait une vitesse qu'il n'a pas demandée. En cas de rejet, la valeur
+    /// courante n'est pas touchée.
+    pub fn set_speed_multiplier(&mut self, value: u32) -> Result<(), InvalidSpeed> {
+        if !matches!(value, 1 | 2 | 4) {
+            return Err(InvalidSpeed(value));
+        }
+        self.speed_multiplier = value;
+        Ok(())
+    }
+
+    /// Facteur de vitesse appliqué au dépilement.
+    ///
+    /// **Plafond à 8.** 0,25 s ÷ 8 vaut 31 ms, soit deux frames à 60 FPS. En
+    /// dessous, le joueur ne voit plus quel dé ou quelle relique produit quel
+    /// incrément : le séquencement visible n'existe plus.
+    pub fn effective_speed(&self) -> f32 {
+        (self.speed_multiplier as f32 * if self.fast_forward { 4.0 } else { 1.0 }).min(8.0)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    fn file() -> ScoringStepQueue {
+        ScoringStepQueue::new(VecDeque::new(), YahtzeeHand::FullHouse, 1_234)
+    }
+
+    #[test]
+    fn test_effective_speed_table() {
+        let mut q = file();
+        for (multiplicateur, sans, avec) in [(1, 1.0, 4.0), (2, 2.0, 8.0), (4, 4.0, 8.0)] {
+            q.set_speed_multiplier(multiplicateur)
+                .expect("vitesse admise");
+            q.fast_forward = false;
+            assert_eq!(
+                q.effective_speed(),
+                sans,
+                "x{multiplicateur} sans avance rapide"
+            );
+            q.fast_forward = true;
+            assert_eq!(
+                q.effective_speed(),
+                avec,
+                "x{multiplicateur} avec avance rapide"
+            );
+        }
+    }
+
+    #[test]
+    fn test_speed_multiplier_rejects_invalid() {
+        let mut q = file();
+        q.set_speed_multiplier(4).expect("vitesse admise");
+        for invalide in [0, 3, 5, 8, u32::MAX] {
+            assert_eq!(
+                q.set_speed_multiplier(invalide),
+                Err(InvalidSpeed(invalide))
+            );
+            assert_eq!(q.speed_multiplier, 4, "un rejet a tout de même écrit");
+        }
+    }
+
+    #[test]
+    fn test_committed_is_false_at_construction() {
+        assert!(!file().committed);
+        assert_eq!(file().hand, YahtzeeHand::FullHouse);
+        assert_eq!(file().final_score, 1_234);
+        assert_eq!(file().speed_multiplier, 1);
+        assert!(!file().fast_forward);
+    }
+
+    #[test]
+    fn test_default_is_a_closed_guard() {
+        // Une file par défaut n'a **rien** à commettre : le garde-fou naît
+        // fermé, et la figure sentinelle n'est donc jamais lue. Sans cela,
+        // `hand` vaut `Aces`, une figure parfaitement réelle, et un commit
+        // égaré la marquerait comme jouée.
+        let q = ScoringStepQueue::default();
+        assert!(q.committed);
+        assert!(q.steps.is_empty());
+        assert_eq!(q.final_score, 0);
+        assert_eq!(q.speed_multiplier, 1);
+    }
+
+    #[test]
+    fn test_timer_modes_and_durations() {
+        let q = file();
+        assert_eq!(q.step_timer.mode(), TimerMode::Repeating);
+        assert_eq!(q.step_timer.duration(), Duration::from_millis(250));
+        assert_eq!(q.final_pause.mode(), TimerMode::Once);
+        assert_eq!(q.final_pause.duration(), Duration::from_millis(500));
+        // Le `Default` porte les mêmes durées : un `derive(Default)` donnerait
+        // deux minuteries de durée nulle, et `Timer::tick` rend alors
+        // `times_finished_this_tick() == u32::MAX` (checked_div sur zéro), ce
+        // qui ferait tourner la boucle de dépilement 4 294 967 295 fois.
+        let d = ScoringStepQueue::default();
+        assert_eq!(d.step_timer.duration(), q.step_timer.duration());
+        assert_eq!(d.final_pause.duration(), q.final_pause.duration());
+    }
+
     use bevy::input::InputPlugin;
     use bevy::state::app::StatesPlugin;
     use core_engine::blind::{BlindContext, BlindDefinition};
@@ -144,7 +334,11 @@ mod tests {
         assert_eq!(monde.resource::<HandContext>().rerolls_left, 3);
         assert_eq!(monde.resource::<RelicInventory>().slots.len(), 5);
         assert!(monde.resource::<ScoringStepQueue>().steps.is_empty());
-        assert!(monde.resource::<ScoringStepQueue>().report.is_none());
+        assert_eq!(
+            *monde.resource::<ScoringStepQueue>(),
+            ScoringStepQueue::default(),
+            "la file insérée par le plugin n'est pas une file au repos"
+        );
     }
 
     #[test]

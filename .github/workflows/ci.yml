@@ -322,6 +322,25 @@ jobs:
           require "critère 4  point de conversion unique" -n 'impl From<ScoreEffect> for ScoreStepPlayed \{' crates/ui_and_juice/src/events.rs
           require "critère 4  tampon enregistré par le plugin" -n 'add_message::<crate::events::ScoreStepPlayed>' crates/ui_and_juice/src/lib.rs
 
+          # ---- Étape 4 : forme définitive de la file (TASK-47) ----
+          # Le type est **rempli** par game_state et **vidé** par ui_and_juice :
+          # le déplacer dans le juice, comme le suggère l'arborescence du
+          # document source, créerait une dépendance circulaire. Une seule
+          # déclaration, et elle est ici.
+          forbid  "critère 4  file déclarée hors des états" -n 'struct ScoringStepQueue' crates/ -g '!crates/game_state/src/resources.rs'
+          require "critère 4  file déclarée dans les états" -n 'pub struct ScoringStepQueue \{' crates/game_state/src/resources.rs
+          # Huit champs, aucun de plus : pas de curseur d'index, le dépilement
+          # se fait par pop_front.
+          require "critère 4  les huit champs de la file" -nU 'pub steps: VecDeque<ScoreStep>,[^}]*pub hand: YahtzeeHand,[^}]*pub final_score: u64,[^}]*pub step_timer: Timer,[^}]*pub final_pause: Timer,[^}]*pub speed_multiplier: u32,[^}]*pub fast_forward: bool,[^}]*pub committed: bool,' crates/game_state/src/resources.rs
+          # `Default` à la main : un dérivé donnerait deux minuteries de durée
+          # nulle, et `Timer::tick` rend alors u32::MAX par `checked_div`.
+          require "critère 4  Default de la file écrit à la main" -n 'impl Default for ScoringStepQueue' crates/game_state/src/resources.rs
+          forbid  "critère 4  Default de la file dérivé" -nU 'derive\([^)]*Default[^)]*\)\]\n(///.*\n|//.*\n)*pub struct ScoringStepQueue' crates/game_state/src/resources.rs
+          # Rejet, jamais correction silencieuse.
+          forbid  "critère 4  vitesse corrigée au lieu d'être rejetée" -n '\.clamp\(' crates/game_state/src/resources.rs
+          require "critère 4  plafond de vitesse"        -n '\.min\(8\.0\)' crates/game_state/src/resources.rs
+          forbid  "critère 4  vitesse écrite hors du setter" -n '^\s*[A-Za-z_][A-Za-z0-9_.]*\.speed_multiplier\s*[-+*/]?=' crates/ -g '!crates/game_state/src/resources.rs'
+
           exit $status
 
   # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en

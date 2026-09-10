@@ -116,7 +116,10 @@ fn build_scoring_report(
         return;
     };
 
-    *queue = ScoringStepQueue::default();
+    // Le réglage de vitesse est un choix de **joueur**, pas un état de manche :
+    // il traverse la remise à zéro. Sans cela, un joueur qui choisit x4 le
+    // reperd à la main suivante, et rien ne le signale.
+    remettre_a_zero(&mut queue, ScoringStepQueue::default());
 
     let Some(cell) = hand.selected_hand else {
         return;
@@ -151,8 +154,29 @@ fn build_scoring_report(
     // Les paliers sont déplacés tels quels : ni tri, ni déduplication, ni
     // filtrage des paliers nuls. Un palier nul reste un palier, l'Étape 4
     // l'anime.
-    queue.steps = report.steps.iter().cloned().collect();
-    queue.report = Some(report);
+    remettre_a_zero(
+        &mut queue,
+        ScoringStepQueue::new(
+            report.steps.iter().copied().collect(),
+            found.hand,
+            report.final_score,
+        ),
+    );
+}
+
+/// Remplace la file en **conservant la vitesse de relecture**.
+///
+/// `new` et `Default` posent tous deux `speed_multiplier = 1`, ce qui est juste
+/// pour une file neuve et faux pour le joueur : la valeur courante est donc
+/// relue et reposée par le seul chemin d'écriture. L'`expect` n'est pas
+/// décoratif — le champ est `pub`, et quiconque y écrirait un 3 à la main
+/// l'apprendrait ici plutôt qu'à l'Étape 11.
+fn remettre_a_zero(queue: &mut ScoringStepQueue, suivante: ScoringStepQueue) {
+    let vitesse = queue.speed_multiplier;
+    *queue = suivante;
+    queue
+        .set_speed_multiplier(vitesse)
+        .expect("la vitesse courante est valide par construction");
 }
 
 /// Branche la soumission et le calcul du rapport.
@@ -202,6 +226,36 @@ mod tests {
             choisir(&mut app, figure);
         }
         app
+    }
+
+    /// Référence **indépendante** de la file : rejoue le pipeline sur les
+    /// mêmes entrées que le système, sans passer par la ressource testée.
+    ///
+    /// Le tri des dés est repris à l'identique du système : c'est l'entrée du
+    /// pipeline, pas sa sortie, et une divergence de tri ferait échouer la
+    /// comparaison pour la mauvaise raison.
+    fn rapport_de_reference(app: &mut App) -> core_engine::scoring::ScoringReport {
+        let mut roll: Vec<(u8, Die)> = des_tries(app)
+            .into_iter()
+            .map(|(_, die, view)| (view.order, die))
+            .collect();
+        roll.sort_unstable_by_key(|(order, die)| (*order, die.id));
+        let roll: Vec<Die> = roll.into_iter().map(|(_, die)| die).collect();
+
+        let monde = app.world();
+        let session = monde.resource::<RunSession>();
+        let blind = monde.resource::<BlindContext>();
+        let main = monde.resource::<HandContext>();
+        let relics = monde.resource::<RelicInventory>();
+
+        let cell = main.selected_hand.expect("figure choisie");
+        let found = main
+            .active_evaluations
+            .iter()
+            .find(|evaluated| evaluated.hand == cell)
+            .expect("figure réalisée");
+
+        ScoringPipeline::resolve(found, &roll, &session.hand_levels, relics, blind)
     }
 
     /// Passe par `select_hand`, jamais par une écriture directe : c'est le
@@ -281,7 +335,12 @@ mod tests {
             !file.steps.is_empty(),
             "la file est vide : rien n'a été calculé"
         );
-        assert!(file.report.is_some(), "le rapport complet manque");
+        assert!(
+            !file.committed,
+            "le garde-fou est né fermé : la file n'a pas été construite"
+        );
+        assert!(file.final_score > 0, "le total n'a pas été transporté");
+        assert_eq!(file.hand, YahtzeeHand::FullHouse, "figure retenue");
     }
 
     #[test]
@@ -289,8 +348,12 @@ mod tests {
         let mut app = app_prete(Some(YahtzeeHand::FullHouse));
         soumettre(&mut app);
 
+        // La file ne porte plus le rapport : la référence est **recalculée**,
+        // ce qui la rend indépendante de la ressource testée. L'ancienne
+        // version comparait deux champs de la même ressource et ne prouvait
+        // que la cohérence interne du remplissage.
+        let rapport = rapport_de_reference(&mut app);
         let file = app.world().resource::<ScoringStepQueue>();
-        let rapport = file.report.as_ref().expect("rapport posé");
 
         assert_eq!(
             file.steps.len(),
@@ -301,6 +364,53 @@ mod tests {
             file.steps.iter().eq(rapport.steps.iter()),
             "les paliers ont été triés, dédupliqués ou filtrés"
         );
+        assert_eq!(file.final_score, rapport.final_score, "total transporté");
+        assert_eq!(
+            file.final_score,
+            file.steps.back().expect("au moins un palier").score_after,
+            "le total diverge du dernier palier"
+        );
+    }
+
+    #[test]
+    fn test_queue_from_build_scoring_report_reads_back() {
+        let mut app = app_prete(Some(YahtzeeHand::FullHouse));
+        soumettre(&mut app);
+        let rapport = rapport_de_reference(&mut app);
+
+        app.update();
+        app.update();
+        app.update();
+
+        let file = app.world().resource::<ScoringStepQueue>();
+        assert!(
+            file.steps.iter().eq(rapport.steps.iter()),
+            "paliers altérés"
+        );
+        assert_eq!(file.final_score, rapport.final_score);
+        assert_eq!(file.hand, YahtzeeHand::FullHouse);
+        assert!(!file.committed, "le garde-fou s'est fermé tout seul");
+    }
+
+    #[test]
+    fn test_speed_multiplier_survives_a_second_submission() {
+        // `new` et `Default` posent tous deux la vitesse à 1 : sans reprise
+        // explicite, le joueur qui choisit x4 le reperd à la main suivante,
+        // deux fois par manche et sans le moindre signal.
+        let mut app = app_prete(Some(YahtzeeHand::FullHouse));
+        soumettre(&mut app);
+        app.world_mut()
+            .resource_mut::<ScoringStepQueue>()
+            .set_speed_multiplier(4)
+            .expect("vitesse admise");
+
+        reentrer_dans_scoring(&mut app);
+
+        assert_eq!(
+            app.world().resource::<ScoringStepQueue>().speed_multiplier,
+            4,
+            "le réglage du joueur a été écrasé par la reconstruction"
+        );
     }
 
     #[test]
@@ -309,13 +419,7 @@ mod tests {
         soumettre(&mut app);
 
         let premiers = paliers(&app);
-        let total = app
-            .world()
-            .resource::<ScoringStepQueue>()
-            .report
-            .as_ref()
-            .expect("rapport posé")
-            .final_score;
+        let total = app.world().resource::<ScoringStepQueue>().final_score;
 
         reentrer_dans_scoring(&mut app);
 
@@ -325,12 +429,7 @@ mod tests {
             "la file diffère d'une entrée à l'autre"
         );
         assert_eq!(
-            app.world()
-                .resource::<ScoringStepQueue>()
-                .report
-                .as_ref()
-                .expect("rapport posé")
-                .final_score,
+            app.world().resource::<ScoringStepQueue>().final_score,
             total
         );
     }
@@ -390,13 +489,7 @@ mod tests {
     fn test_report_uses_session_hand_levels() {
         let mut app = app_prete(Some(YahtzeeHand::FullHouse));
         soumettre(&mut app);
-        let au_niveau_un = app
-            .world()
-            .resource::<ScoringStepQueue>()
-            .report
-            .as_ref()
-            .expect("rapport posé")
-            .final_score;
+        let au_niveau_un = app.world().resource::<ScoringStepQueue>().final_score;
 
         {
             let mut session = app.world_mut().resource_mut::<RunSession>();
@@ -405,13 +498,7 @@ mod tests {
         }
         reentrer_dans_scoring(&mut app);
 
-        let au_niveau_trois = app
-            .world()
-            .resource::<ScoringStepQueue>()
-            .report
-            .as_ref()
-            .expect("rapport posé")
-            .final_score;
+        let au_niveau_trois = app.world().resource::<ScoringStepQueue>().final_score;
         assert!(
             au_niveau_trois > au_niveau_un,
             "les niveaux de la session ne sont pas appliqués : {au_niveau_un} puis {au_niveau_trois}"
@@ -435,7 +522,11 @@ mod tests {
 
         let file = app.world().resource::<ScoringStepQueue>();
         assert!(file.steps.is_empty(), "un rapport périmé a survécu");
-        assert!(file.report.is_none(), "un rapport périmé a survécu");
+        assert_eq!(
+            *file,
+            ScoringStepQueue::default(),
+            "un résidu a survécu à l'entrée stérile"
+        );
     }
 
     #[test]
@@ -474,7 +565,7 @@ mod tests {
         assert_eq!(phase(&app), RunPhase::Scoring);
         let file = app.world().resource::<ScoringStepQueue>();
         assert!(file.steps.is_empty());
-        assert!(file.report.is_none());
+        assert_eq!(*file, ScoringStepQueue::default());
     }
 
     #[test]
@@ -501,7 +592,7 @@ mod tests {
         assert_eq!(phase(&app), RunPhase::Scoring);
         let file = app.world().resource::<ScoringStepQueue>();
         assert!(file.steps.is_empty());
-        assert!(file.report.is_none());
+        assert_eq!(*file, ScoringStepQueue::default());
     }
 
     #[test]
