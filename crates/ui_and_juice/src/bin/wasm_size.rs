@@ -4,6 +4,13 @@
 //! gameplay, aucun système propre : elle monte l'`App` avec la liste de plugins
 //! et de features réelles, et c'est tout.
 //!
+//! # Elle vit dans la crate du sommet
+//!
+//! Elle doit monter le jeu **entier**. `ui_and_juice` est la seule crate qui
+//! dépende des deux autres ; la laisser dans `game_state` ferait mesurer un
+//! binaire amputé de toute la mise en scène, et l'écart jouerait **à la
+//! baisse**, donc sans déclencher la garde de CI.
+//!
 //! # Pourquoi une cible binaire
 //!
 //! Une crate bibliothèque compilée pour `wasm32-unknown-unknown` produit une
@@ -20,9 +27,10 @@
 
 use bevy::prelude::*;
 use game_state::GameStatePlugin;
+use ui_and_juice::JuicePlugin;
 
 fn main() {
     App::new()
-        .add_plugins((DefaultPlugins, GameStatePlugin))
+        .add_plugins((DefaultPlugins, GameStatePlugin, JuicePlugin))
         .run();
 }

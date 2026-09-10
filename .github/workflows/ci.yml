@@ -209,7 +209,14 @@ jobs:
           # est exigée. Et la garde sur le score attrapait les lignes de test
           # qui le POSENT — rien ne l'écrit encore, donc les scénarios doivent
           # bien l'établir. Ce qui l'interdit vraiment est le type.
-          forbid  "critère 4  set nu hors de la soumission" -n 'next\.set\(' crates/game_state/src -g '!**/submission.rs'
+          # **Corrigée à l'audit de TASK-52 : elle ne gardait rien.** Ancrée sur
+          # le nom du receveur `next`, elle laissait passer `phase.set(..)` de
+          # `round_end.rs`, dont le paramètre porte un autre nom — mesuré par
+          # mutation. L'alternance couvre les noms employés en production et
+          # doit s'étendre si un nouveau paraît ; la protection de fond, elle,
+          # est le couple de TASK-29 sur `states.rs`, qui prouve qu'un `set` nu
+          # vers l'état courant despawne, là où `set_if_neq` est inerte.
+          forbid  "critère 4  set nu hors de la soumission" -n '\b(next|phase|app_state|etat)\.set\(' crates/game_state/src -g '!**/submission.rs'
           require "critère 4  arbitre en lecture seule"  -n 'blind: Option<Res<BlindContext>>' "$SETUP/round_end.rs"
           require "critère 4  transitions qualifiées"    -n 'NextState::set_if_neq' "$SETUP/round_end.rs"
 
@@ -221,8 +228,23 @@ jobs:
           # positif. Et sa garde « ParamSet » refusait un ParamSet livré à
           # TASK-34 sur deux requêtes de dés, sans rapport avec les Transform :
           # elle est remplacée, pas contournée.
-          forbid  "critère 4  unique écrivain de Transform" -n '&mut Transform' crates/game_state/src -g '!**/animation.rs'
-          require "critère 4  l'animation écrit le Transform" -n 'Query<\(Entity, &mut Transform, &mut PunchScale\)>' "$SETUP/animation.rs"
+          # Élargie à TOUT le workspace à l'ouverture de l'Étape 4, et
+          # l'exclusion porte le **chemin exact** du seul fichier autorisé —
+          # non plus « n'importe quel animation.rs ». Sans cela, la migration
+          # du juice vers `ui_and_juice` créerait un second écrivain dans un
+          # second fichier du même nom, que la garde aurait laissé passer.
+          # Quand le fichier déménagera, cette ligne devra bouger avec lui,
+          # délibérément.
+          # **Les deux lignes ont déménagé avec le fichier**, à TASK-43. C'était
+          # prévu : TASK-42 avait posé l'exclusion sur un chemin exact
+          # précisément pour que la migration ne puisse pas laisser deux
+          # écrivains derrière elle, un par crate.
+          forbid  "critère 4  unique écrivain de Transform" -n '&mut Transform' crates/ -g '!crates/ui_and_juice/src/animation.rs'
+          require "critère 4  l'animation écrit le Transform" -n 'Query<\(Entity, &mut Transform, &mut PunchScale\)>' crates/ui_and_juice/src/animation.rs
+          # Une migration est un déplacement, pas une duplication : deux
+          # `PunchScale` homonymes dans deux crates compilent parfaitement et
+          # donnent deux systèmes écrivant des `Transform`.
+          forbid  "critère 4  PunchScale resté dans game_state" -n 'PunchScale' crates/game_state
           forbid  "critère 4  overlay transformé en état" -n 'AppState::Settings|RunPhase::Settings|SettingsState' crates/game_state/src
 
           # ---- Étape 3 : budget WebAssembly (TASK-40) ----
@@ -234,6 +256,191 @@ jobs:
           forbid  "critère 4  lto partiel"               -n 'lto\s*=\s*"thin"' .
           forbid  "critère 4  nom wgpu de 0.18"          -n 'WgpuSettingsPriority::Compatibility' .
           require "critère 4  référence de taille wasm"  -n '^[0-9]+$' ci/wasm-size-baseline.txt
+
+          # ---- Étape 4 : mise en scène (TASK-42) ----
+          # Ancrées sur une **déclaration de dépendance**, jamais sur le nom.
+          # Dans leur forme nue, les deux gardes du § 4 de TASK-42 n'attrapent
+          # que le commentaire du manifeste qui dit qu'on n'en veut pas, et le
+          # `//!` qui explique que ces combinateurs n'existent plus. Vingt-
+          # deuxième et vingt-troisième fois dans ce projet.
+          forbid  "critère 4  dépendance de tweening ou audio" -n '^\s*[a-z0-9_-]*(tween|kira|rodio|audio|vorbis|symphonia|seedling)[a-z0-9_-]*\s*=|"(bevy_audio|vorbis)"' --glob '**/Cargo.toml' crates/
+          forbid  "critère 4  dépendance inverse vers le juice" -n 'ui_and_juice' crates/game_state crates/core_engine
+
+          # ---- Étape 4 : compteurs interpolés (TASK-44) ----
+          # La dérogation `f64` est **bornée à l'affichage** (ADR-003) : le
+          # score commis reste le `u64` du pipeline. Ancrée sur une
+          # déclaration ou une conversion, jamais sur le mot : le fichier
+          # d'animation explique pourquoi il y a droit, et l'expliquer ne doit
+          # pas déclencher la garde.
+          forbid  "critère 4  f64 hors des compteurs"    -n ':\s*f64|->\s*f64|\bas f64\b|f64::from' crates/ui_and_juice/src -g '!crates/ui_and_juice/src/animation.rs'
+          forbid  "critère 4  f64 dans le moteur ou les états" -n ':\s*f64|->\s*f64|\bas f64\b' crates/core_engine/src crates/game_state/src
+          # Deux pièges 0.19 vérifiés à TASK-44 : `TextFont.font` est un
+          # `FontSource` et `font_size` un `FontSize`, plus des types nus.
+          forbid  "critère 9  font_size en flottant nu"  -n 'font_size:\s*[0-9]' crates/
+          forbid  "critère 9  cosmic-text"               -n 'cosmic' crates/
+
+          # ---- Étape 4 : secousse de caméra et réglages (TASK-45) ----
+          # Le ticket demandait un « test » qui n'en est pas un : une commande
+          # rg dans un tableau de tests unitaires. Sa place est ici, et le
+          # motif est ancré sur des **identifiants**, jamais sur le mot : le
+          # commentaire d'`apply_screen_shake` doit pouvoir expliquer qu'il ne
+          # puise dans aucun flux de la partie sans déclencher la garde qu'il
+          # documente. C'est le défaut que le corpus rejoue de ticket en
+          # ticket.
+          forbid  "critère 4  flux déterministe puisé par le juice" -n '\bRunRng\b|\brng\b|thread_rng|rand::|gen_range|random' crates/ui_and_juice/src
+          # La caméra est le second écrivain de `Transform`, et le seul admis.
+          # La garde du critère 4 plus haut l'autorise dans ce fichier ; celle-ci
+          # exige qu'il y soit, et que la dérogation reste écrite.
+          require "critère 4  la secousse écrit la caméra" -n 'Query<&mut Transform, With<Camera2d>>' crates/ui_and_juice/src/animation.rs
+          require "critère 4  exception caméra documentée" -n 'la seule exception admise' crates/ui_and_juice/src/animation.rs
+          # Écriture absolue : un cumul par frame et la caméra dérive hors cadre
+          # sans que rien ne le signale.
+          forbid  "critère 4  écriture caméra cumulative" -n 'translation(\.[xyz])?\s*\+=' crates/ui_and_juice/src
+          # **Levée à TASK-51**, qui livre le flash et son intensité d'un seul
+          # tenant. Elle nommait le ticket qui devait la lever : c'est ce qui
+          # distingue une garde datée d'une garde oubliée.
+          # `Resource` est un sous-trait de `Component` en 0.19 : poser une de
+          # ces ressources sur une entité despawnerait silencieusement les
+          # autres porteurs.
+          forbid  "critère 4  réglages posés en composant" -n 'derive\(.*Component' crates/ui_and_juice/src/settings.rs
+
+          # ---- Étape 4 : palier joué et fermeture du périmètre audio (TASK-46) ----
+          # Les trois noms proscrits sont ancrés sur une **déclaration ou un
+          # emploi**, jamais sur le nom nu : le module `events.rs` doit pouvoir
+          # écrire pourquoi la v1 avait trois ressources pour un rôle sans
+          # déclencher la garde qui l'interdit. Même ancrage que `f64` à
+          # TASK-44. Une garde sur le mot « audio » serait déjà rouge
+          # aujourd'hui : le titre de section de `lib.rs` et le commentaire de
+          # `Cargo.toml` documentent tous deux cette absence.
+          forbid  "critère 4  ressource de son déclarée ou employée" -n '(struct|enum|impl|::<|Res<|ResMut<|insert_resource\()\s*(AudioFeedbackConfig|ScoringAudioPool|SoundEffectBank)' crates/
+          forbid  "critère 4  API audio de Bevy dans le juice" -n '\b(AudioPlayer|AudioSource|AudioSink|AudioBundle|PlaybackSettings)\b' crates/
+          forbid  "critère 4  module audio dans le juice" --files crates/ui_and_juice/src -g 'audio.rs'
+          # La hauteur est un livrable de l'Étape 8 (demi-ton tempéré, C41).
+          # Ancré sur des identifiants : le `0\.05` que réclamait le ticket
+          # proscrivait un littéral numérique, et mordait deux bornes de ressort
+          # de TASK-43 sans aucun rapport avec le son.
+          forbid  "critère 4  hauteur de son dans le juice" -n '(PitchScaleTracker|pitch_factor|pitch_scale|semitone)' crates/ui_and_juice/src
+          # Le plafond de deux champs est tout l'objet du ticket, et la liste de
+          # dérivés est épinglée : y ajouter Component ou Resource casse la
+          # contre-épreuve.
+          require "critère 4  message à deux champs"     -n 'pub source: StepSource,\n    pub action: ScoreAction,' -U crates/ui_and_juice/src/events.rs
+          require "critère 4  dérivés du message"        -n '#\[derive\(Message, Debug, Clone, Copy, PartialEq, Eq\)\]' crates/ui_and_juice/src/events.rs
+          require "critère 4  point de conversion unique" -n 'impl From<&ScoreStep> for ScoreStepPlayed \{' crates/ui_and_juice/src/events.rs
+          require "critère 4  tampon enregistré par le plugin" -n 'add_message::<crate::events::ScoreStepPlayed>' crates/ui_and_juice/src/lib.rs
+
+          # ---- Étape 4 : forme définitive de la file (TASK-47) ----
+          # Le type est **rempli** par game_state et **vidé** par ui_and_juice :
+          # le déplacer dans le juice, comme le suggère l'arborescence du
+          # document source, créerait une dépendance circulaire. Une seule
+          # déclaration, et elle est ici.
+          forbid  "critère 4  file déclarée hors des états" -n 'struct ScoringStepQueue' crates/ -g '!crates/game_state/src/resources.rs'
+          require "critère 4  file déclarée dans les états" -n 'pub struct ScoringStepQueue \{' crates/game_state/src/resources.rs
+          # Huit champs, aucun de plus : pas de curseur d'index, le dépilement
+          # se fait par pop_front.
+          require "critère 4  les huit champs de la file" -nU 'pub steps: VecDeque<ScoreStep>,[^}]*pub hand: YahtzeeHand,[^}]*pub final_score: u64,[^}]*pub step_timer: Timer,[^}]*pub final_pause: Timer,[^}]*pub speed_multiplier: u32,[^}]*pub fast_forward: bool,[^}]*pub committed: bool,' crates/game_state/src/resources.rs
+          # `Default` à la main : un dérivé donnerait deux minuteries de durée
+          # nulle, et `Timer::tick` rend alors u32::MAX par `checked_div`.
+          require "critère 4  Default de la file écrit à la main" -n 'impl Default for ScoringStepQueue' crates/game_state/src/resources.rs
+          forbid  "critère 4  Default de la file dérivé" -nU 'derive\([^)]*Default[^)]*\)\]\n(///.*\n|//.*\n)*pub struct ScoringStepQueue' crates/game_state/src/resources.rs
+          # Rejet, jamais correction silencieuse.
+          forbid  "critère 4  vitesse corrigée au lieu d'être rejetée" -n '\.clamp\(' crates/game_state/src/resources.rs
+          require "critère 4  plafond de vitesse"        -n '\.min\(8\.0\)' crates/game_state/src/resources.rs
+          forbid  "critère 4  vitesse écrite hors du setter" -n '^\s*[A-Za-z_][A-Za-z0-9_.]*\.speed_multiplier\s*[-+*/]?=' crates/ -g '!crates/game_state/src/resources.rs'
+
+          # ---- Étape 4 : cadence de dépilement (TASK-48) ----
+          # Le compte exact des périodes franchies, jamais un booléen : un
+          # `Repeating` réenroule son elapsed, et `finished()` jetterait tout ce
+          # qui dépasse une période dans le même tic.
+          require "critère 4  compte exact des périodes" -n 'times_finished_this_tick\(\)' crates/ui_and_juice/src/queue.rs
+          forbid  "critère 4  cadence testée par un booléen" -n 'step_timer\.(finished|just_finished)\(\)' crates/
+          # L'accélération multiplie le pas de temps ; `Timer` n'a pas de champ
+          # vitesse, et régler l'horloge globale accélérerait aussi la pause
+          # finale et les animations.
+          require "critère 4  pas de temps multiplié" -n 'time\.delta\(\)\.mul_f32\(' crates/ui_and_juice/src/queue.rs
+          forbid  "critère 4  horloge globale détournée" -n 'set_relative_speed|Virtual>|relative_speed\(' crates/
+          # Ancrés sur un accès, pas sur le mot : le module doit pouvoir écrire
+          # que la pause finale et le commit ne sont pas de son ressort.
+          # Contre-épreuve sur l'instruction exacte plutôt qu'interdiction du
+          # `mul_f32` : `[^)]*` ne franchit pas la parenthèse de `delta()`, et
+          # `[^;]*` mordrait le commentaire qui explique la règle. Épingler
+          # l'instruction casse à toute modification, accélération comprise.
+          require "critère 4  pause finale au pas de temps nu" -n 'final_pause\.tick\(time\.delta\(\)\);' crates/ui_and_juice/src/queue.rs
+          # **Retirée à TASK-50**, qui écrit ces trois champs : j'avais énoncé à
+          # TASK-48 qu'une garde que le ticket suivant doit supprimer n'est pas
+          # une garde, et je ne l'avais appliqué qu'à `NextState`. Le § du
+          # commit ci-dessous la remplace par des contre-épreuves qui, elles,
+          # survivent au ticket suivant.
+          forbid  "critère 4  dépilement par la fin"      -n 'steps\.pop_back|steps\.remove\(' crates/
+          forbid  "critère 4  panique par unwrap"         -n '\.unwrap\(\)' crates/
+          # L'accès du dépileur est énuméré dans un seul type : y ajouter un
+          # Transform se voit là, et la file n'y est pas.
+          require "critère 4  accès du dépileur groupés" -nU 'derive\(SystemParam\)\]\npub struct DispatchParams' crates/ui_and_juice/src/queue.rs
+          forbid  "critère 4  file empruntée par le dépileur" -n 'fn dispatch_step\([^)]*ScoringStepQueue' crates/ui_and_juice/src/queue.rs
+
+          # ---- Étape 4 : mise en scène d'un palier (TASK-49) ----
+          # C36 : le nom entrait en collision avec le marqueur `Scoring` de
+          # game_state. **Bornée au juice** : `core_engine` porte légitimement un
+          # `Hook::OnScoringDie`, qui est un déclencheur de relique et n'a rien à
+          # voir avec un composant de présentation.
+          forbid  "critère 4  nom proscrit du dé de score" -n 'ScoringDie' crates/ui_and_juice crates/game_state
+          # La résolution passe par l'identité, jamais par le rang d'affichage,
+          # qui est recalculé à chaque manche et dépend du gobelet.
+          require "critère 4  résolution du dé par identité" -n 'die\.id == die_id' crates/ui_and_juice/src/queue.rs
+          forbid  "critère 4  dé résolu par position"     -n '\b[a-z_][a-z0-9_]*\.order\b|\.nth\(' crates/ui_and_juice/src/queue.rs
+          # Les cibles se lisent dans le palier. La conversion vit dans
+          # animation.rs, où la dérogation f64 est bornée (TASK-44).
+          require "critère 4  cibles lues dans le palier" -n 'kind\.target_for\(step\)' crates/ui_and_juice/src/queue.rs
+          forbid  "critère 4  cible recalculée par le dépileur" -n 'chips_after\s*[-+*/]|score_after\s*[-+*/]|mult_after\s*[-+*/]' crates/ui_and_juice/src/queue.rs
+          # L'événement part avant toute résolution d'entité : un palier dont la
+          # cible manque en émet un quand même.
+          require "critère 4  émission inconditionnelle"  -nU 'ctx\.events\.write\(ScoreStepPlayed::from\(step\)\);' crates/ui_and_juice/src/queue.rs
+          # Le marqueur des compteurs vit avec AnimatedNumber, pas ici.
+          require "critère 4  marqueur des trois compteurs" -n 'pub enum CounterKind \{' crates/ui_and_juice/src/animation.rs
+          forbid  "critère 4  repli par filtre d'exclusion" -n 'ParamSet<|Without<DieView>|Without<RelicSlotUI>' crates/ui_and_juice/src
+
+          # ---- Étape 4 : commit unique du score (TASK-50) ----
+          # Trois écritures, dans cet ordre, et une signature à trois
+          # paramètres : sans `NextState`, sans `RunSession`, sans `AppState`,
+          # le commit **ne peut pas** arbitrer. C'est le typage qui tient la
+          # règle, la contre-épreuve tient le typage.
+          require "critère 4  signature du commit"       -nU 'fn commit_score_when_drained\(\n    time: Res<Time>,\n    mut queue: ResMut<ScoringStepQueue>,\n    mut blind: ResMut<BlindContext>,\n\) \{' crates/ui_and_juice/src/queue.rs
+          require "critère 4  total ajouté au score"     -n 'current_score\.saturating_add\(queue\.final_score\)' crates/ui_and_juice/src/queue.rs
+          require "critère 4  main décomptée sans débordement" -n 'hands_remaining\.saturating_sub\(1\)' crates/ui_and_juice/src/queue.rs
+          require "critère 4  case consommée au commit"  -n 'used_hands\.mark\(queue\.hand\)' crates/ui_and_juice/src/queue.rs
+          require "critère 4  garde-fou refermé"         -n 'queue\.committed = true;' crates/ui_and_juice/src/queue.rs
+          # La soustraction nue est proscrite partout : à zéro, un u8 rend 255.
+          forbid  "critère 4  main décomptée par soustraction nue" -n 'hands_remaining\s*-[^=]|hands_remaining\s*-=' crates/
+          # Le commit vit dans le juice, et nulle part ailleurs. **Ancré sur sa
+          # forme**, pas sur l'affectation : les fixtures de test posent
+          # légitimement un score ou une grille, et aucune garde textuelle ne
+          # sait distinguer un montage d'un commit. La forme, elle, est unique.
+          forbid  "critère 4  commit dupliqué hors du juice" -n 'current_score\.saturating_add|hands_remaining\.saturating_sub|used_hands\.mark\(' crates/game_state/src crates/core_engine/src
+          # La sortie de phase attend le drapeau : sans lui, RoundEnd arbitrerait
+          # sur un contexte où rien n'a été ajouté.
+          require "critère 4  sortie de phase liée au commit" -n 'steps\.is_empty\(\) && queue\.committed' crates/game_state/src/systems/round_end.rs
+
+          # ---- Étape 4 : accessibilité, flashs plafonnés (TASK-51) ----
+          # Un seul support de flash : deux nœuds, ce serait deux plafonds
+          # indépendants, donc six changements de luminance par seconde là où la
+          # conformité en admet trois.
+          require "critère 4  support de flash unique"   -n 'commands\.spawn\(\(\n        FlashOverlay,' -U crates/ui_and_juice/src/animation.rs
+          forbid  "critère 4  second support de flash"   -n 'FlashOverlay,' crates/ -g '!crates/ui_and_juice/src/animation.rs'
+          # L'intensité n'est lue **que** par le système de flash : la pulsation
+          # et le trauma sont inconditionnels, sans quoi la règle « aucune
+          # information n'est portée par le flash seul » ne tient plus.
+          #
+          # Pas de garde textuelle côté dépileur : ses fixtures **écrivent**
+          # légitimement le réglage pour piloter les tests, et aucun motif ne
+          # sépare proprement cette écriture d'une lecture. C'est
+          # `test_reduce_flashes_disables_full_screen_flash` qui porte la
+          # propriété, et il mord — à intensité nulle il exige que la pulsation
+          # et le trauma soient toujours là.
+          require "critère 4  intensité lue par le flash" -n 'settings\.flash_intensity > 0\.0' crates/ui_and_juice/src/animation.rs
+          # Le plafond est en secondes réelles : jamais un `Timer`, que le
+          # fast-forward accélérerait, et jamais le fond de la caméra.
+          forbid  "critère 4  plafond confié à un Timer" -n 'Timer.*flash|flash.*Timer|ClearColor\(|insert_resource::<ClearColor' crates/ui_and_juice/src
+          # Les deux réglages restent deux, et restent indépendants.
+          require "critère 4  réglages toujours à deux champs" -nU 'pub flash_intensity: f32,\n    /// Intensité de la secousse de caméra\.\n    pub shake_intensity: f32,\n\}' crates/ui_and_juice/src/settings.rs
 
           exit $status
 

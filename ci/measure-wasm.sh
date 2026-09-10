@@ -19,7 +19,7 @@ SORTIE=${1:-dist}
 BRUT=target/wasm32-unknown-unknown/release/${CIBLE}.wasm
 
 cargo build --release --target wasm32-unknown-unknown \
-  -p game_state --features measure --bin "${CIBLE}"
+  -p ui_and_juice --features measure --bin "${CIBLE}"
 
 rm -rf "${SORTIE}"
 wasm-bindgen --target web --out-dir "${SORTIE}" "${BRUT}"

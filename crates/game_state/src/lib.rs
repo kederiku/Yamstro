@@ -6,7 +6,7 @@ pub mod resources;
 pub mod states;
 pub mod systems;
 
-pub use components::{DieView, Hidden, Locked, PunchScale, RelicSlotUI, Scoring};
+pub use components::{DieView, Hidden, Locked, RelicSlotUI, Scoring};
 pub use plugin::{GameSet, GameStatePlugin};
 pub use resources::{HandContext, RunSession, ScoringStepQueue};
 pub use states::{AppState, RunPhase, SettingsOverlay};

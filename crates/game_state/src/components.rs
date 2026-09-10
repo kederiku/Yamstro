@@ -42,11 +42,10 @@
 //! exige_component::<game_state::components::Scoring>();
 //! exige_component::<game_state::components::Hidden>();
 //! exige_component::<game_state::components::RelicSlotUI>();
-//! exige_component::<game_state::components::PunchScale>();
 //! ```
 //!
-//! **Un bloc par type, et non les six d'un coup.** Mesuré : groupés, ils ne
-//! garderaient qu'une disjonction — « au moins un des six n'est pas une
+//! **Un bloc par type, et non les cinq d'un coup.** Mesuré : groupés, ils ne
+//! garderaient qu'une disjonction — « au moins un des cinq n'est pas une
 //! ressource » — et resteraient au vert avec un seul type promu, les cinq
 //! autres suffisant à faire échouer la compilation. Séparés, chacun mord sur
 //! le sien.
@@ -74,11 +73,6 @@
 //! ```compile_fail
 //! fn exige_resource<T: bevy::ecs::resource::Resource>() {}
 //! exige_resource::<game_state::components::RelicSlotUI>();
-//! ```
-//!
-//! ```compile_fail
-//! fn exige_resource<T: bevy::ecs::resource::Resource>() {}
-//! exige_resource::<game_state::components::PunchScale>();
 //! ```
 
 use bevy::prelude::*;
@@ -112,40 +106,13 @@ pub struct Hidden;
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelicSlotUI(pub u8);
 
-/// Impulsion d'échelle posée par commande, consommée par l'unique système
-/// d'animation.
-///
-/// Les flottants sont légitimes ici : l'interdiction porte sur l'arithmétique
-/// de score, tenue en point fixe, pas sur l'animation. Les réglages viennent de
-/// l'appelant ; ce fichier n'en fixe aucun.
-///
-/// **Les champs ont changé à TASK-39**, et ce n'est pas un renommage. La forme
-/// d'origine portait une échelle courante ; un ressort amorti a besoin d'une
-/// **vitesse**, sans quoi son intégration est inexprimable. `offset` est
-/// l'écart d'échelle courant, et l'échelle appliquée vaut
-/// `base_scale * (1.0 + offset)`.
-///
-/// `base_scale` vaut `Vec3::ONE` par convention : toute entité animable est
-/// instanciée à `Transform.scale == Vec3::ONE`, sa taille visuelle venant du
-/// sprite ou du nœud d'interface.
-#[derive(Component, Debug, Clone, Copy, PartialEq)]
-pub struct PunchScale {
-    pub base_scale: Vec3,
-    pub offset: f32,
-    pub velocity: f32,
-    /// Raideur du ressort.
-    pub elasticity: f32,
-    /// Amortissement.
-    pub decay: f32,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use core_engine::dice::{Die, DieId};
 
     #[test]
-    fn test_all_six_components_attach_and_read_back() {
+    fn test_all_five_components_attach_and_read_back() {
         let mut world = World::new();
         let entite = world
             .spawn((
@@ -154,13 +121,6 @@ mod tests {
                 Scoring,
                 Hidden,
                 RelicSlotUI(2),
-                PunchScale {
-                    base_scale: Vec3::ONE,
-                    offset: 0.2,
-                    velocity: 0.0,
-                    elasticity: 0.5,
-                    decay: 0.8,
-                },
             ))
             .id();
 
@@ -169,12 +129,6 @@ mod tests {
         assert_eq!(world.get::<Scoring>(entite), Some(&Scoring));
         assert_eq!(world.get::<Hidden>(entite), Some(&Hidden));
         assert_eq!(world.get::<RelicSlotUI>(entite), Some(&RelicSlotUI(2)));
-        let punch = world.get::<PunchScale>(entite).expect("PunchScale posé");
-        assert_eq!(punch.base_scale, Vec3::ONE);
-        assert_eq!(punch.offset, 0.2);
-        assert_eq!(punch.velocity, 0.0);
-        assert_eq!(punch.elasticity, 0.5);
-        assert_eq!(punch.decay, 0.8);
     }
 
     #[test]
@@ -253,6 +207,5 @@ mod tests {
         exige_component::<Scoring>();
         exige_component::<Hidden>();
         exige_component::<RelicSlotUI>();
-        exige_component::<PunchScale>();
     }
 }
