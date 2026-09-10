@@ -65,7 +65,13 @@ fn seal_effects(die_id: DieId, seal: DieSeal) -> SmallVec<[ScoreEffect; 2]> {
     }
 }
 
-/// Balaie l'inventaire de gauche à droite pour un dé donné.
+/// Balaie l'inventaire de gauche à droite pour un déclencheur donné.
+///
+/// **Une seule boucle sert les deux déclencheurs de cette étape.** L'étape 2
+/// l'appelle une fois par dé comptabilisé, sur un prototype dérivé par
+/// `on_scoring_die` ; l'étape 3 l'appelle une fois pour la main, sur un
+/// prototype à `die: None`. Deux boucles jumelles divergeraient, et *Miroir
+/// Double* se comporterait alors différemment selon le déclencheur.
 ///
 /// Le prototype porte les six champs constants du contexte ; seuls `uid`,
 /// `slot`, `state`, `left_effects` et `die` varient d'un slot à l'autre. Le
@@ -79,14 +85,19 @@ fn seal_effects(die_id: DieId, seal: DieSeal) -> SmallVec<[ScoreEffect; 2]> {
 /// (TASK-24), sinon *Miroir Double* se comporterait différemment selon le
 /// déclencheur, et les boss qui désactivent un slot deviendraient
 /// silencieusement plus faibles.
-fn scan_die<O: FnMut(u8, &[ScoreEffect])>(
+fn scan_relics<O: FnMut(Hook, &TriggerCtx<'_>)>(
     proto: TriggerCtx<'_>,
     relics: &RelicInventory,
     effects: &mut Vec<ScoreEffect>,
-    die_id: DieId,
-    value: u8,
+    hook: Hook,
     observer: &mut O,
 ) {
+    // Tranche du slot immédiatement à gauche, **quel qu'il soit**. Un voisin
+    // stérile — absent, désactivé, ou n'ayant rien produit — la remet à vide :
+    // la plage est donc réassignée à chaque itération, y compris sur les
+    // chemins qui sautent le slot. La règle inverse, « le dernier slot ayant
+    // produit », rendrait *Miroir Double* transparent à une désactivation et
+    // affaiblirait silencieusement les boss qui éteignent une relique.
     let mut left: core::ops::Range<usize> = 0..0;
 
     for (slot, entry) in relics.slots.iter().enumerate() {
@@ -104,7 +115,6 @@ fn scan_die<O: FnMut(u8, &[ScoreEffect])>(
         }
 
         let slot = u8::try_from(slot).unwrap_or(u8::MAX);
-        observer(slot, &effects[left.clone()]);
 
         // L'emprunt partagé de `effects` s'achève au retour de `effects_for`,
         // ce qui autorise l'extension qui suit. Ne jamais garder cette tranche
@@ -116,9 +126,9 @@ fn scan_die<O: FnMut(u8, &[ScoreEffect])>(
                 state: inst.state,
                 left_effects: &effects[left.clone()],
                 ..proto
-            }
-            .on_scoring_die(die_id, value);
-            effects_for(inst.def, Hook::OnScoringDie, &ctx)
+            };
+            observer(hook, &ctx);
+            effects_for(inst.def, hook, &ctx)
         };
 
         let start = effects.len();
@@ -143,14 +153,15 @@ pub fn pass_a(
 }
 
 /// Variante instrumentée de [`pass_a`]. L'observateur reçoit, avant chaque
-/// interrogation de relique, le numéro de slot et la tranche `left_effects`
-/// qui lui est présentée.
+/// interrogation de relique, le déclencheur et le contexte exact qui va être
+/// présenté à la relique. Le déclencheur distingue les appels de l'étape 2,
+/// refaits à chaque dé, de l'appel unique de l'étape 3.
 ///
 /// Elle existe parce qu'aucune relique de cette étape ne lit `left_effects` :
 /// sans ce point d'écoute, la règle des slots stériles et la remise à zéro
 /// entre deux dés ne seraient vérifiables par aucun test. La production passe
 /// un observateur inerte.
-fn pass_a_with<O: FnMut(u8, &[ScoreEffect])>(
+fn pass_a_with<O: FnMut(Hook, &TriggerCtx<'_>)>(
     hand: &HandMatch,
     dice: &[Die],
     hand_levels: &HandLevels,
@@ -163,6 +174,22 @@ fn pass_a_with<O: FnMut(u8, &[ScoreEffect])>(
     // `base_effects` : ce sont les mêmes valeurs, et les faire circuler
     // ajouterait un paramètre sans rien garantir de plus.
     let (base_chips, base_mult) = resolved_base(hand.hand, hand_levels, blind);
+
+    // Prototype des champs que le balayage ne fait jamais varier. Seuls `uid`,
+    // `slot`, `state`, `left_effects` et `die` changent d'un appel à l'autre.
+    let proto = TriggerCtx {
+        hand,
+        dice,
+        hand_levels,
+        blind,
+        uid: 0,
+        slot: 0,
+        state: RelicState::None,
+        die: None,
+        base_chips,
+        base_mult,
+        left_effects: &[],
+    };
 
     for die_id in &hand.scoring_dice {
         // Recherche linéaire, jamais un index : le pool retire et ajoute des
@@ -197,21 +224,29 @@ fn pass_a_with<O: FnMut(u8, &[ScoreEffect])>(
         // L'inventaire est interrogé après le dé entier, pas entre ses effets :
         // c'est ce qui donne un bonus de relique par dé rencontré, à sa place
         // dans le journal, au lieu d'un groupe en fin d'étape.
-        let proto = TriggerCtx {
-            hand,
-            dice,
-            hand_levels,
-            blind,
-            uid: 0,
-            slot: 0,
-            state: RelicState::None,
-            die: None,
-            base_chips,
-            base_mult,
-            left_effects: &[],
-        };
-        scan_die(proto, relics, &mut effects, die_id, value, observer);
+        let sur_ce_de = proto.on_scoring_die(die_id, value);
+        scan_relics(
+            sur_ce_de,
+            relics,
+            &mut effects,
+            Hook::OnScoringDie,
+            observer,
+        );
     }
+
+    // Étape 3 : l'inventaire est balayé **une fois pour la main**, dans l'ordre
+    // strict des slots. Aucun regroupement par type d'action : placer une
+    // relique multiplicative avant ou après une relique additive doit changer
+    // le score, et c'est la seule décision de construction que le jeu laisse au
+    // joueur (ADR-005). Le canal `left_effects` repart d'une tranche vide : ce
+    // balayage ne voit pas ce que l'étape 2 a produit.
+    scan_relics(
+        proto.on_hand_scored(),
+        relics,
+        &mut effects,
+        Hook::OnHandScored,
+        observer,
+    );
 
     effects
 }
@@ -227,10 +262,35 @@ mod tests {
     /// Journal des tranches `left_effects` vues par chaque slot, dans l'ordre
     /// des appels. C'est le seul moyen d'observer un canal qu'aucune fixture ne
     /// lit, sans ajouter de quatrième fixture qui devrait muter.
-    type Journal = Vec<(u8, Vec<ScoreEffect>)>;
+    /// Ce que l'observateur retient de chaque contexte présenté à une relique.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Vu {
+        hook: Hook,
+        slot: u8,
+        die: Option<(DieId, u8)>,
+        left: Vec<ScoreEffect>,
+    }
 
-    fn observateur(journal: &mut Journal) -> impl FnMut(u8, &[ScoreEffect]) + '_ {
-        move |slot, left| journal.push((slot, left.to_vec()))
+    type Journal = Vec<Vu>;
+
+    fn observateur(journal: &mut Journal) -> impl FnMut(Hook, &TriggerCtx<'_>) + '_ {
+        move |hook, ctx| {
+            journal.push(Vu {
+                hook,
+                slot: ctx.slot,
+                die: ctx.die,
+                left: ctx.left_effects.to_vec(),
+            });
+        }
+    }
+
+    /// Les seules entrées du journal produites par un déclencheur donné.
+    fn sur(journal: &Journal, hook: Hook) -> Vec<Vu> {
+        journal
+            .iter()
+            .filter(|vu| vu.hook == hook)
+            .cloned()
+            .collect()
     }
 
     fn de(id: u32, value: u8) -> Die {
@@ -456,9 +516,10 @@ mod tests {
             &mut observateur(&mut journal),
         );
 
-        assert_eq!(journal.len(), 1);
-        assert_eq!(journal[0].0, 0);
-        assert!(journal[0].1.is_empty());
+        let vus = sur(&journal, Hook::OnScoringDie);
+        assert_eq!(vus.len(), 1);
+        assert_eq!(vus[0].slot, 0);
+        assert!(vus[0].left.is_empty());
     }
 
     #[test]
@@ -495,14 +556,15 @@ mod tests {
                 &mut observateur(&mut journal),
             );
 
-            let vu = journal
+            let vus = sur(&journal, Hook::OnScoringDie);
+            let vu = vus
                 .iter()
-                .find(|(slot, _)| *slot == 2)
+                .find(|vu| vu.slot == 2)
                 .unwrap_or_else(|| panic!("le slot 2 n'a pas été interrogé, cas {cas}"));
             assert!(
-                vu.1.is_empty(),
+                vu.left.is_empty(),
                 "voisin {cas} : le canal n'a pas été réinitialisé, {:?}",
-                vu.1
+                vu.left
             );
         }
     }
@@ -525,12 +587,13 @@ mod tests {
             &mut observateur(&mut journal),
         );
 
-        assert_eq!(journal.len(), 4);
-        assert!(journal[0].1.is_empty(), "dé 1, slot 0");
-        assert_eq!(journal[1].1.len(), 1, "dé 1, slot 1 voit son voisin");
-        assert_eq!(journal[2].0, 0);
+        let vus = sur(&journal, Hook::OnScoringDie);
+        assert_eq!(vus.len(), 4);
+        assert!(vus[0].left.is_empty(), "dé 1, slot 0");
+        assert_eq!(vus[1].left.len(), 1, "dé 1, slot 1 voit son voisin");
+        assert_eq!(vus[2].slot, 0);
         assert!(
-            journal[2].1.is_empty(),
+            vus[2].left.is_empty(),
             "dé 2, slot 0 : le canal repart à vide"
         );
     }
@@ -553,6 +616,142 @@ mod tests {
     use crate::hands::{HandLevels, YahtzeeHand};
     use crate::scoring::{ScoreAction, StepSource};
     use smallvec::smallvec;
+
+    // ---- Étape 3 : les reliques déclenchées une fois pour la main ----
+
+    /// Effets de relique du journal, dans l'ordre, sans les effets de dé.
+    fn effets_de_relique(effects: &[ScoreEffect]) -> Vec<ScoreAction> {
+        effects
+            .iter()
+            .filter(|e| matches!(e.source, StepSource::Relic { .. }))
+            .map(|e| e.action)
+            .collect()
+    }
+
+    /// Main pleine sans aucun 6 : *Feu de Six* reste muet, donc seuls les
+    /// déclenchements de l'étape 3 produisent des effets de relique.
+    fn main_pleine() -> ([Die; 5], HandMatch) {
+        (
+            [de(0, 5), de(1, 5), de(2, 5), de(3, 2), de(4, 2)],
+            main_de(&[0, 1, 2, 3, 4], &[]),
+        )
+    }
+
+    #[test]
+    fn test_relic_order_is_inventory_order() {
+        let (dice, hand) = main_pleine();
+        let relics = inventaire(&[Some(RelicId::MagicPair), Some(RelicId::BrokenGlass)]);
+
+        let effects = pass_a(&hand, &dice, &HandLevels::default(), &blind_nu(), &relics);
+
+        // L'ordre est celui de l'inventaire, jamais un regroupement par type
+        // d'action : c'est ce qui fait qu'un réordonnancement change le score.
+        assert_eq!(
+            effets_de_relique(&effects),
+            vec![ScoreAction::AddMult(400), ScoreAction::MultiplyMult(150)]
+        );
+        let queue = &effects[effects.len() - 2..];
+        assert_eq!(queue[0].action, ScoreAction::AddMult(400));
+        assert_eq!(queue[1].action, ScoreAction::MultiplyMult(150));
+    }
+
+    #[test]
+    fn test_relic_reversed_order_reverses_effects() {
+        let (dice, hand) = main_pleine();
+        let relics = inventaire(&[Some(RelicId::BrokenGlass), Some(RelicId::MagicPair)]);
+
+        let effects = pass_a(&hand, &dice, &HandLevels::default(), &blind_nu(), &relics);
+
+        assert_eq!(
+            effets_de_relique(&effects),
+            vec![ScoreAction::MultiplyMult(150), ScoreAction::AddMult(400)]
+        );
+    }
+
+    #[test]
+    fn test_disabled_relic_produces_nothing() {
+        let (dice, hand) = main_pleine();
+        let mut relics = inventaire(&[Some(RelicId::MagicPair), Some(RelicId::BrokenGlass)]);
+        if let Some(inst) = relics.slots[0].as_mut() {
+            inst.state = RelicState::Disabled;
+        }
+
+        let effects = pass_a(&hand, &dice, &HandLevels::default(), &blind_nu(), &relics);
+
+        // L'instance reste dans l'inventaire : le pipeline ne la retire pas et
+        // ne la remplace pas par un slot vide, il la saute.
+        assert_eq!(relics.slots.len(), 2);
+        assert!(relics.slots[0].is_some());
+        assert_eq!(
+            effets_de_relique(&effects),
+            vec![ScoreAction::MultiplyMult(150)]
+        );
+    }
+
+    #[test]
+    fn test_left_effects_slot_zero_is_empty() {
+        let (dice, hand) = main_pleine();
+        let relics = inventaire(&[Some(RelicId::MagicPair), Some(RelicId::BrokenGlass)]);
+        let mut journal = Journal::new();
+
+        pass_a_with(
+            &hand,
+            &dice,
+            &HandLevels::default(),
+            &blind_nu(),
+            &relics,
+            &mut observateur(&mut journal),
+        );
+
+        let vus = sur(&journal, Hook::OnHandScored);
+        assert_eq!(vus.len(), 2, "un balayage unique pour la main");
+        assert_eq!(vus[0].slot, 0);
+        assert!(vus[0].left.is_empty());
+        // `OnHandScored` se déclenche une fois pour la main : aucun dé n'est
+        // désigné, et confondre les deux déclencheurs se verrait ici.
+        assert!(vus.iter().all(|vu| vu.die.is_none()));
+    }
+
+    #[test]
+    fn test_left_effects_slot_one_is_slot_zero() {
+        let (dice, hand) = main_pleine();
+        let relics = inventaire(&[Some(RelicId::MagicPair), Some(RelicId::BrokenGlass)]);
+        let mut journal = Journal::new();
+
+        pass_a_with(
+            &hand,
+            &dice,
+            &HandLevels::default(),
+            &blind_nu(),
+            &relics,
+            &mut observateur(&mut journal),
+        );
+
+        let vus = sur(&journal, Hook::OnHandScored);
+        assert_eq!(vus[1].slot, 1);
+        assert_eq!(vus[1].left.len(), 1);
+        assert_eq!(vus[1].left[0].action, ScoreAction::AddMult(400));
+        assert_eq!(
+            vus[1].left[0].source,
+            StepSource::Relic {
+                uid: 1,
+                def: RelicId::MagicPair
+            }
+        );
+    }
+
+    #[test]
+    fn test_empty_inventory_produces_no_relic_effect() {
+        let (dice, hand) = main_pleine();
+
+        for slots in [vec![], vec![None, None]] {
+            let relics = RelicInventory { slots };
+
+            let effects = pass_a(&hand, &dice, &HandLevels::default(), &blind_nu(), &relics);
+
+            assert!(effets_de_relique(&effects).is_empty());
+        }
+    }
 
     #[test]
     fn test_base_emits_chips_then_mult() {
