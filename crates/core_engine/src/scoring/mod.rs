@@ -2,6 +2,8 @@
 
 mod context;
 mod effect;
+pub mod levels;
+mod pipeline;
 mod report;
 
 pub use context::ScoreContext;
