@@ -107,7 +107,12 @@ jobs:
           forbid  "critère 7  le pipeline ne commet rien" -n '\.current_score|\.hands_remaining|\.used_hands|advance_state\(' "$SRC/scoring"
           forbid  "critère 7  aucune source d'aléa"      -n '\brng\b|RunRng|rand::|thread_rng' "$SRC/scoring"
           forbid  "critère 6  feature test-fixtures"     -n 'test-fixtures"|^\s*test-fixtures\s*=' crates/
-          forbid  "critère 2  comparaison approchée"     -n 'assert_relative_eq|EPSILON|\bapprox::|abs\(\)\s*<' crates/
+          # L'exclusion de animation.rs n'est pas une échappatoire : c'est la
+          # distinction que le corpus pose lui-même à TASK-30 — « les flottants
+          # sont légitimes ici : l'interdiction porte sur l'arithmétique de
+          # score, tenue en point fixe, pas sur l'animation ». Un ressort a
+          # besoin d'un seuil de repos, qui EST une comparaison approchée.
+          forbid  "critère 2  comparaison approchée"     -n 'assert_relative_eq|EPSILON|\bapprox::|abs\(\)\s*<' crates/ -g '!**/animation.rs'
           require "critère 2  égalités exactes"          -n 'assert_eq!' "$SRC/scoring"
 
           # ---- Étape 3 : mise en place d'une manche (TASK-32) ----
@@ -120,7 +125,7 @@ jobs:
           SETUP=crates/game_state/src/systems
 
           forbid  "critère 4  soustraction nue (manche)" -n '\w*(reroll|hand|gold|slot|capacity|count|interest|score|target|ante)\w*\s*(-=|- )' "$SETUP"
-          forbid  "critère 4  aucun flottant (manche)"   -n '\bf32\b|\bf64\b' "$SETUP"
+          forbid  "critère 4  aucun flottant (manche)"   -n '\bf32\b|\bf64\b' "$SETUP" -g '!**/animation.rs'
           forbid  "critère 4  combinateurs de 0.18"      -n '\b(run_in|run_after|run_before)\s*\(' crates/
           require "critère 4  stubs de malus marqués"    -n 'Étape 5|Étape 10' "$SETUP/setup.rs"
 
@@ -204,5 +209,17 @@ jobs:
           forbid  "critère 4  set nu hors de la soumission" -n 'next\.set\(' crates/game_state/src -g '!**/submission.rs'
           require "critère 4  arbitre en lecture seule"  -n 'blind: Option<Res<BlindContext>>' "$SETUP/round_end.rs"
           require "critère 4  transitions qualifiées"    -n 'NextState::set_if_neq' "$SETUP/round_end.rs"
+
+          # ---- Étape 3 : overlay et animation (TASK-39) ----
+          # Le § 4 de TASK-39 demandait « exactement une occurrence de
+          # &mut Transform » : un compte de lignes, que le commentaire
+          # expliquant le conflit d'accès fait déjà passer à deux. Le couple
+          # interdire-dehors / exiger-dedans dit la même chose sans faux
+          # positif. Et sa garde « ParamSet » refusait un ParamSet livré à
+          # TASK-34 sur deux requêtes de dés, sans rapport avec les Transform :
+          # elle est remplacée, pas contournée.
+          forbid  "critère 4  unique écrivain de Transform" -n '&mut Transform' crates/game_state/src -g '!**/animation.rs'
+          require "critère 4  l'animation écrit le Transform" -n 'Query<\(Entity, &mut Transform, &mut PunchScale\)>' "$SETUP/animation.rs"
+          forbid  "critère 4  overlay transformé en état" -n 'AppState::Settings|RunPhase::Settings|SettingsState' crates/game_state/src
 
           exit $status

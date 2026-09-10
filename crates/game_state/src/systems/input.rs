@@ -34,9 +34,9 @@ use core_engine::dice::{Die, DieId};
 use core_engine::hands::{HandGrid, YahtzeeHand};
 
 use crate::components::{DieView, Locked};
-use crate::plugin::InputSet;
+use crate::plugin::{GameSet, InputSet};
 use crate::resources::{HandContext, RunSession};
-use crate::states::RunPhase;
+use crate::states::{RunPhase, SettingsOverlay};
 use crate::systems::evaluation::is_hand_available;
 
 /// Touches de rang, dans l'ordre. `KeyCode` est un enum sans arithmétique : la
@@ -112,6 +112,23 @@ pub fn select_hand(hand: &mut HandContext, used: &HandGrid, cell: YahtzeeHand) {
     }
 }
 
+/// `Update`, **sans aucune garde d'état** : le menu doit rester atteignable
+/// depuis n'importe quel `AppState`.
+///
+/// **L'overlay n'est jamais un état.** En faire une variante obligerait à le
+/// dupliquer dans chaque phase et à mémoriser un état de retour ; la ressource
+/// supprime les deux. Aucun `NextState` n'est écrit ici, dans aucune branche.
+///
+/// Ce système est dans `GameSet::HandlingInput` — c'est une entrée, et son rang
+/// d'ordonnancement parmi les autres compte — mais **hors** de
+/// `InputSet::FrozenByOverlay` : geler la touche qui ferme l'overlay
+/// enfermerait le joueur dans un menu qu'aucune touche ne peut plus quitter.
+fn toggle_settings_overlay(keys: Res<ButtonInput<KeyCode>>, mut overlay: ResMut<SettingsOverlay>) {
+    if keys.just_pressed(KeyCode::Escape) {
+        overlay.open = !overlay.open;
+    }
+}
+
 /// Rang d'affichage visé par une touche. `dice_count` étant un `u8`, la
 /// saturation est inatteignable.
 fn rank_of(index: usize) -> u8 {
@@ -181,6 +198,11 @@ pub(crate) fn register(app: &mut App) {
             .in_set(InputSet::FrozenByOverlay)
             .run_if(in_state(RunPhase::Roll)),
     );
+
+    app.add_systems(
+        Update,
+        toggle_settings_overlay.in_set(GameSet::HandlingInput),
+    );
 }
 
 #[cfg(test)]
@@ -192,10 +214,97 @@ mod tests {
 
     use crate::components::{Hidden, Locked};
     use crate::resources::{HandContext, RunSession};
-    use crate::states::SettingsOverlay;
+    use crate::states::{AppState, RunPhase, SettingsOverlay};
     use crate::systems::fixtures::{
         app_a_la_graine, app_en_run, deck_de, entites_des, entrer_dans_roll, frapper, valeurs_des,
     };
+
+    #[test]
+    fn test_escape_toggles_overlay_without_state_change() {
+        // Depuis trois états, dont un hors run : le menu doit être atteignable
+        // partout, et n'écrire aucun `NextState` dans aucune branche.
+        for cible in [AppState::MainMenu, AppState::InRun, AppState::Codex] {
+            let mut app = app_en_run(CupId::Standard);
+            app.world_mut()
+                .resource_mut::<NextState<AppState>>()
+                .set(cible);
+            app.update();
+            let avant = *app.world().resource::<State<AppState>>().get();
+            assert_eq!(avant, cible, "montage : {cible:?}");
+            assert!(!app.world().resource::<SettingsOverlay>().open);
+
+            frapper(&mut app, KeyCode::Escape);
+            app.update();
+            assert!(
+                app.world().resource::<SettingsOverlay>().open,
+                "l'overlay ne s'ouvre pas depuis {cible:?}"
+            );
+            assert_eq!(*app.world().resource::<State<AppState>>().get(), avant);
+
+            frapper(&mut app, KeyCode::Escape);
+            app.update();
+            assert!(
+                !app.world().resource::<SettingsOverlay>().open,
+                "l'overlay ne se referme pas depuis {cible:?}"
+            );
+            assert_eq!(
+                *app.world().resource::<State<AppState>>().get(),
+                avant,
+                "l'état a bougé depuis {cible:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_game_input_is_frozen_while_overlay_open() {
+        // **Deux des trois entrées du corpus n'existent pas.** Il n'y a aucun
+        // clic dans le projet, et `select_hand` est une fonction, pas un
+        // système : aucun ensemble ne peut la geler. Ce test porte donc sur les
+        // trois entrées qui existent — verrouillage, relance, soumission.
+        let mut app = app_en_run(CupId::Standard);
+        entrer_dans_roll(&mut app);
+
+        frapper(&mut app, KeyCode::Escape);
+        app.update();
+        assert!(app.world().resource::<SettingsOverlay>().open);
+
+        let entite = entites_des(&mut app)[0];
+        let valeurs = valeurs_des(&mut app);
+        let relances = app.world().resource::<HandContext>().rerolls_left;
+
+        frapper(&mut app, KeyCode::Digit1);
+        frapper(&mut app, KeyCode::Space);
+        frapper(&mut app, KeyCode::Enter);
+        app.update();
+        app.update();
+
+        assert!(
+            app.world().get::<Locked>(entite).is_none(),
+            "un verrou a bougé"
+        );
+        assert_eq!(valeurs_des(&mut app), valeurs, "un dé a bougé");
+        assert_eq!(
+            app.world().resource::<HandContext>().rerolls_left,
+            relances,
+            "une relance a été consommée"
+        );
+        assert_eq!(
+            *app.world().resource::<State<RunPhase>>().get(),
+            RunPhase::Roll,
+            "la soumission est passée"
+        );
+
+        // Refermé, les mêmes entrées agissent de nouveau.
+        frapper(&mut app, KeyCode::Escape);
+        app.update();
+        frapper(&mut app, KeyCode::Digit1);
+        app.update();
+
+        assert!(
+            app.world().get::<Locked>(entite).is_some(),
+            "les entrées ne sont pas revenues"
+        );
+    }
 
     #[test]
     fn test_reroll_blocked_at_zero() {

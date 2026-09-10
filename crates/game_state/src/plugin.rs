@@ -1,5 +1,13 @@
 //! Plugin racine et ordre des ensembles de systèmes.
 //!
+//! **Ce plugin exige `InputPlugin`.** `toggle_settings_overlay` (TASK-39) lit
+//! `Res<ButtonInput<KeyCode>>` **sans aucune garde d'état** — le menu doit
+//! rester atteignable partout — si bien que toute application montant ce
+//! plugin doit aussi monter celui des entrées. Bevy n'offre aucun moyen
+//! d'exiger un plugin ; l'absence se manifeste par une panique dont le message
+//! ne nomme ni le système ni la ressource hors feature `debug`. La dépendance
+//! est donc énoncée ici, faute de pouvoir l'être dans le type.
+//!
 //! **Ce plugin ne pose pas de gestionnaire d'erreur.** L'API de Bevy 0.19 est
 //! `App::set_error_handler`, dont le corps ouvre sur un `assert!` refusant un
 //! second appel sur la même `App` : un plugin de bibliothèque qui s'en
@@ -89,12 +97,14 @@ impl Plugin for GameStatePlugin {
         crate::systems::evaluation::register(app);
         crate::systems::submission::register(app);
         crate::systems::round_end::register(app);
+        crate::systems::animation::register(app);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::input::InputPlugin;
     use bevy::state::app::StatesPlugin;
 
     /// Ordre d'exécution observé, un ensemble par entrée.
@@ -107,7 +117,7 @@ mod tests {
         // des tickets aval ne seraient jamais initialisés et le test passerait
         // pour de mauvaises raisons.
         let mut app = App::new();
-        app.add_plugins((MinimalPlugins, StatesPlugin, GameStatePlugin));
+        app.add_plugins((MinimalPlugins, StatesPlugin, InputPlugin, GameStatePlugin));
 
         app.update();
         app.update();
@@ -117,7 +127,7 @@ mod tests {
     #[test]
     fn test_system_sets_are_ordered() {
         let mut app = App::new();
-        app.add_plugins((MinimalPlugins, StatesPlugin, GameStatePlugin));
+        app.add_plugins((MinimalPlugins, StatesPlugin, InputPlugin, GameStatePlugin));
         app.init_resource::<Journal>();
 
         // Les systèmes sont enregistrés dans l'ordre **inverse** de l'ordre

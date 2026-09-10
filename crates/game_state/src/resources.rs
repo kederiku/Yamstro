@@ -70,6 +70,7 @@ pub struct ScoringStepQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::input::InputPlugin;
     use bevy::state::app::StatesPlugin;
     use core_engine::blind::{BlindContext, BlindDefinition};
     use core_engine::cups::CupId;
@@ -112,7 +113,12 @@ mod tests {
         };
 
         let mut app = App::new();
-        app.add_plugins((MinimalPlugins, StatesPlugin, crate::GameStatePlugin));
+        app.add_plugins((
+            MinimalPlugins,
+            StatesPlugin,
+            InputPlugin,
+            crate::GameStatePlugin,
+        ));
         app.insert_resource(session);
         app.insert_resource(manche());
         app.insert_resource(HandContext {
