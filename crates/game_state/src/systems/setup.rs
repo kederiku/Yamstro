@@ -23,6 +23,33 @@
 //! `run_in`, `run_after` et `run_before` n'existent plus en 0.19 ; les
 //! combinateurs sont `.chain()`, `.before()` et `.after()`.
 //!
+//! # Entrer dans une main : trois pièges d'ordonnancement
+//!
+//! Mesuré, et contraignant pour `setup_round` :
+//!
+//! 1. Une entité créée par `Commands` **n'est pas visible** de la `Query` du
+//!    système qui l'a créée ; elle ne le devient qu'au passage suivant. Les
+//!    dés manquants sont donc construits et **roulés en local**, puis spawnés
+//!    déjà formés. Un spawn nu suivi d'un tour de `Query` les laisserait sur
+//!    la face 1, et l'écart ne se verrait qu'à l'écran.
+//! 2. L'ordre d'itération d'une `Query` suit l'archétype, pas le spawn : poser
+//!    puis retirer `Locked` déplace l'entité. Le flux de dés se consomme donc
+//!    **dans l'ordre des `DieId`**, triés explicitement, faute de quoi deux
+//!    runs de même graine divergent.
+//! 3. Une ré-entrée `Roll → Roll` déclenche bien les schedules de sortie et
+//!    d'entrée. Les dés sont rattachés à `DespawnOnExit(AppState::InRun)`, et
+//!    jamais à une phase : mesuré, ils survivent alors à la main suivante.
+//!
+//! # Les `DieId` ne sont jamais réutilisés
+//!
+//! `NextDieId` porte un compteur monotone à l'échelle de la run. Ce n'est pas
+//! un ornement : la règle « `1 + max(DieId présents)` » ne tient pas la
+//! propriété dès qu'un dé disparaît — cinq dés, retrait du cinquième, retour à
+//! cinq, et l'identifiant retiré est réattribué. C'est exactement le cycle
+//! qu'ouvre le boss *La Meule* à l'Étape 9, et c'est pourquoi `DicePool`
+//! (TASK-09) porte un `next_id` privé que `remove` ne décrémente jamais. La
+//! formule reste la règle d'**amorçage**, employée une seule fois.
+//!
 //! # Pourquoi des ressources optionnelles
 //!
 //! `RunPhase::BlindSelect` est l'état par défaut sous `AppState::InRun` : on y
@@ -36,10 +63,13 @@
 use bevy::prelude::*;
 use core_engine::blind::{BlindContext, BlindDefinition, BlindModifier, BlindType};
 use core_engine::config::effective_rerolls;
+use core_engine::cups::definitions::cup;
+use core_engine::dice::{Die, DieId};
 use core_engine::hands::HandGrid;
 use core_engine::relics::RelicInventory;
 
-use crate::resources::RunSession;
+use crate::components::{DieView, Locked, Scoring};
+use crate::resources::{HandContext, RunSession};
 use crate::states::{AppState, RunPhase};
 
 /// Dénominateur des facteurs en pour-mille. Aucun flottant n'entre dans la
@@ -249,7 +279,119 @@ fn check_run_completion(
     }
 }
 
-/// Branche les deux systèmes de mise en place. L'ordre **et** la garde.
+/// Compteur monotone d'identifiants de dés, à l'échelle de la run.
+///
+/// C'est le `next_id` privé de `DicePool` (TASK-09) porté au monde : `Die` et
+/// `DieView` remplacent le pool côté Bevy, mais la propriété qu'il garantissait
+/// ne se garantit pas toute seule. Amorcé à `1 + max(DieId présents)`, `0` si
+/// le monde n'en contient aucun ; il ne décroît ensuite jamais.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NextDieId(pub u32);
+
+/// Nombre de faces du dé de rang `index` : `sides.get(index)`, à défaut le
+/// **dernier** élément. C'est la règle exacte du constructeur de `DicePool`
+/// (TASK-09 § 2),
+/// et jamais un nombre de faces écrit en dur — le Polyèdre porte un D8 en
+/// dernière position, et un dé au-delà de la table en porte un aussi.
+///
+/// `sides` vide ne peut pas venir du catalogue, dont l'invariant est
+/// `sides.len() == dice_count` ; le dé dégénéré rendu ici a une face, ce que
+/// `Die::new` accepte, plutôt qu'une panique.
+fn sides_for_rank(sides: &[u8], index: usize) -> u8 {
+    sides
+        .get(index)
+        .or_else(|| sides.last())
+        .copied()
+        .unwrap_or(1)
+}
+
+/// Rang d'affichage. `dice_count` étant un `u8`, la saturation est
+/// inatteignable ; elle évite une conversion faillible dans une boucle.
+fn rank_of(index: usize) -> u8 {
+    u8::try_from(index).unwrap_or(u8::MAX)
+}
+
+/// `OnEnter(RunPhase::Roll)` : entrée dans une main.
+///
+/// Calcule les relances, réinitialise le contexte de main, ajuste le nombre de
+/// dés à la configuration puis les roule. N'écrit rien dans le contexte de
+/// blind, ne décrémente aucune relance, ne consomme que le flux `rng.dice`.
+fn setup_round(
+    mut commands: Commands,
+    session: Option<ResMut<RunSession>>,
+    blind: Option<Res<BlindContext>>,
+    inventory: Option<Res<RelicInventory>>,
+    next_id: Option<Res<NextDieId>>,
+    mut dice: Query<(Entity, &mut Die, &mut DieView)>,
+) {
+    let (Some(mut session), Some(blind), Some(inventory)) = (session, blind, inventory) else {
+        return;
+    };
+
+    // 1. Les relances, calculées avant tout emprunt mutable du flux.
+    let rerolls_left = resolve_rerolls(&session, &blind.blind, &inventory);
+
+    // 2. Le contexte de main est intégralement réinitialisé. Il est **posé**,
+    //    et non muté : ses trois champs sont réécrits, et aucun autre système
+    //    ne l'insère — sans cela il n'existerait nulle part.
+    commands.insert_resource(HandContext {
+        rerolls_left,
+        active_evaluations: Vec::new(),
+        selected_hand: None,
+    });
+
+    // 3. Les dés présents, triés par identifiant. Le tri n'est pas cosmétique :
+    //    l'ordre d'itération suit l'archétype, que le verrouillage déplace.
+    let mut present: Vec<(Entity, DieId)> = dice.iter().map(|(e, die, _)| (e, die.id)).collect();
+    present.sort_unstable_by_key(|(_, id)| *id);
+
+    let seed = present.last().map_or(0, |(_, id)| id.0.saturating_add(1));
+    let mut next = next_id.map_or(seed, |counter| counter.0.max(seed));
+
+    let wanted = usize::from(session.config.dice_count);
+    let sides = cup(session.cup_id).sides;
+
+    // Le surplus part par les identifiants les plus élevés.
+    let kept = wanted.min(present.len());
+    for (entity, _) in present.drain(kept..) {
+        commands.entity(entity).despawn();
+    }
+
+    // 4 et 5 sur les dés conservés, dans l'ordre des identifiants.
+    for (index, (entity, _)) in present.iter().enumerate() {
+        // Le marqueur et le champ se retirent ensemble : c'est `Die.locked`
+        // que `Die::roll` consulte, et une divergence rendrait le verrouillage
+        // inopérant sans erreur de compilation.
+        commands.entity(*entity).remove::<(Locked, Scoring)>();
+
+        let Ok((_, mut die, mut view)) = dice.get_mut(*entity) else {
+            continue;
+        };
+        die.locked = false;
+        view.order = rank_of(index);
+        die.roll(&mut session.rng.dice, false);
+    }
+
+    // Les dés manquants : construits, roulés, puis spawnés déjà formés.
+    for index in present.len()..wanted {
+        let mut die = Die::new(DieId(next), sides_for_rank(&sides, index));
+        next = next.saturating_add(1);
+        die.roll(&mut session.rng.dice, false);
+
+        commands.spawn((
+            die,
+            DieView {
+                order: rank_of(index),
+            },
+            DespawnOnExit(AppState::InRun),
+        ));
+    }
+
+    commands.insert_resource(NextDieId(next));
+}
+
+/// Branche les systèmes de mise en place. Pour la manche, l'ordre **et** la
+/// garde ; pour la main, un seul système.
 pub(crate) fn register(app: &mut App) {
     app.add_systems(
         OnEnter(RunPhase::BlindSelect),
@@ -259,6 +401,8 @@ pub(crate) fn register(app: &mut App) {
         )
             .chain(),
     );
+
+    app.add_systems(OnEnter(RunPhase::Roll), setup_round);
 }
 
 #[cfg(test)]
@@ -268,10 +412,15 @@ mod tests {
     use super::*;
     use bevy::state::app::StatesPlugin;
     use core_engine::config::RunConfig;
-    use core_engine::cups::CupId;
     use core_engine::cups::definitions::cup;
+    use core_engine::cups::{CupDeck, CupId};
+    use core_engine::evaluator::HandMatch;
     use core_engine::hands::{HandLevels, YahtzeeHand};
     use core_engine::rng::RunRng;
+    use std::collections::BTreeSet;
+
+    use crate::components::{Locked, Scoring};
+    use crate::resources::HandContext;
 
     fn session(id: CupId, stake_level: u8) -> RunSession {
         let deck = cup(id);
@@ -346,6 +495,297 @@ mod tests {
             .resource_mut::<NextState<RunPhase>>()
             .set(RunPhase::BlindSelect);
         app.update();
+    }
+
+    /// Gobelet ad hoc, pour les tailles de main que le catalogue ne porte pas.
+    /// **Aucun gobelet n'est ajouté au catalogue**, arrêté à l'Étape 9.
+    fn deck_de(n: u8) -> CupDeck {
+        CupDeck {
+            dice_count: n,
+            sides: vec![6; usize::from(n)],
+            ..cup(CupId::Standard)
+        }
+    }
+
+    /// Application en run, sur une graine maîtresse choisie.
+    fn app_a_la_graine(id: CupId, seed: u64) -> App {
+        let mut app = app_en_run(id);
+        app.world_mut().resource_mut::<RunSession>().rng = RunRng::from_seed(seed);
+        app
+    }
+
+    fn entrer_dans_roll(app: &mut App) {
+        app.world_mut()
+            .resource_mut::<NextState<RunPhase>>()
+            .set(RunPhase::Roll);
+        app.update();
+    }
+
+    /// Les dés du monde, triés par `DieId`.
+    fn des_tries(app: &mut App) -> Vec<(Entity, Die, DieView)> {
+        let mut etat = app.world_mut().query::<(Entity, &Die, &DieView)>();
+        let mut v: Vec<(Entity, Die, DieView)> = etat
+            .iter(app.world())
+            .map(|(e, d, w)| (e, d.clone(), *w))
+            .collect();
+        v.sort_unstable_by_key(|(_, d, _)| d.id);
+        v
+    }
+
+    fn entites_des(app: &mut App) -> Vec<Entity> {
+        des_tries(app).into_iter().map(|(e, _, _)| e).collect()
+    }
+
+    #[test]
+    fn test_dice_count_follows_run_config() {
+        // Monte **puis redescend** dans une seule application : trois
+        // applications séparées n'exerceraient jamais le retrait du surplus.
+        let mut app = app_en_run(CupId::Standard);
+
+        for n in [4_u8, 5, 6, 4] {
+            app.world_mut().resource_mut::<RunSession>().config = RunConfig::from_cup(&deck_de(n));
+            entrer_dans_roll(&mut app);
+
+            let des = des_tries(&mut app);
+            assert_eq!(des.len(), usize::from(n), "{n} dés attendus");
+
+            let rangs: Vec<u8> = des.iter().map(|(_, _, w)| w.order).collect();
+            let attendus: Vec<u8> = (0..n).collect();
+            assert_eq!(rangs, attendus, "rangs 0..{n}, sans trou ni doublon");
+        }
+    }
+
+    #[test]
+    fn test_second_entry_does_not_leak_dice() {
+        let mut app = app_en_run(CupId::Standard);
+        entrer_dans_roll(&mut app);
+        let avant = entites_des(&mut app);
+
+        // `set` nu vers l'état courant : la transition a bien lieu, et les
+        // entités rattachées à `DespawnOnExit(AppState::InRun)` y survivent.
+        entrer_dans_roll(&mut app);
+        let apres = entites_des(&mut app);
+
+        assert_eq!(avant.len(), apres.len(), "le nombre de dés a bougé");
+        assert_eq!(avant, apres, "des dés ont été détruits puis recréés");
+    }
+
+    #[test]
+    fn test_setup_round_clears_locked_and_scoring() {
+        let mut app = app_en_run(CupId::Standard);
+        entrer_dans_roll(&mut app);
+
+        let entites = entites_des(&mut app);
+        for entite in &entites {
+            app.world_mut()
+                .entity_mut(*entite)
+                .insert((Locked, Scoring));
+            app.world_mut().get_mut::<Die>(*entite).expect("dé").locked = true;
+        }
+
+        entrer_dans_roll(&mut app);
+
+        for entite in &entites {
+            assert!(
+                app.world().get::<Locked>(*entite).is_none(),
+                "marqueur Locked resté"
+            );
+            assert!(
+                app.world().get::<Scoring>(*entite).is_none(),
+                "marqueur Scoring resté"
+            );
+            // Le marqueur et le champ se retirent ensemble : c'est `Die.locked`
+            // que `Die::roll` consulte, et une divergence rendrait le
+            // verrouillage inopérant sans erreur de compilation.
+            assert!(
+                !app.world().get::<Die>(*entite).expect("dé").locked,
+                "champ Die.locked resté vrai"
+            );
+        }
+    }
+
+    #[test]
+    fn test_setup_round_resets_selected_hand() {
+        let mut app = app_en_run(CupId::Standard);
+        entrer_dans_roll(&mut app);
+
+        {
+            let mut main = app.world_mut().resource_mut::<HandContext>();
+            main.selected_hand = Some(YahtzeeHand::Chance);
+            main.active_evaluations.push(HandMatch {
+                hand: YahtzeeHand::Chance,
+                scoring_dice: Vec::new(),
+                discarded_dice: Vec::new(),
+                potential_score: 0,
+            });
+        }
+
+        entrer_dans_roll(&mut app);
+
+        // Avant l'`Update` : les commandes d'un `OnEnter` sont appliquées en
+        // fin de `StateTransition`, donc le contexte est déjà neuf ici.
+        let main = app.world().resource::<HandContext>();
+        assert_eq!(main.selected_hand, None);
+        assert!(main.active_evaluations.is_empty());
+    }
+
+    #[test]
+    fn test_same_seed_same_first_roll() {
+        // Deux applications de même graine, dont l'une a vu ses dés changer
+        // d'archétype : poser `Locked` déplace l'entité, et l'ordre
+        // d'itération d'une `Query` suit l'archétype. Sans le tri par `DieId`
+        // avant de consommer le flux, les deux suites divergeraient alors que
+        // le flux est identique.
+        let mut a = app_a_la_graine(CupId::Standard, 42);
+        let mut b = app_a_la_graine(CupId::Standard, 42);
+
+        let suite = |app: &mut App| -> Vec<(DieId, u8)> {
+            des_tries(app)
+                .into_iter()
+                .map(|(_, d, _)| (d.id, d.current_value))
+                .collect()
+        };
+
+        entrer_dans_roll(&mut a);
+        entrer_dans_roll(&mut b);
+        let premiere = suite(&mut a);
+        assert_eq!(premiere, suite(&mut b));
+
+        // Les dés sont bel et bien roulés : un dé neuf **non** roulé reste sur
+        // la face 1, et rien d'autre dans la suite ne le verrait.
+        assert!(
+            premiere.iter().any(|(_, valeur)| *valeur != 1),
+            "aucun dé n'a bougé de la face 1"
+        );
+
+        for (rang, entite) in entites_des(&mut b).into_iter().enumerate() {
+            if rang % 2 == 0 {
+                b.world_mut().entity_mut(entite).insert(Locked);
+            }
+        }
+
+        entrer_dans_roll(&mut a);
+        entrer_dans_roll(&mut b);
+        let seconde = suite(&mut a);
+
+        assert_eq!(seconde, suite(&mut b));
+        // Un dé **conservé** est roulé lui aussi. Sans cette assertion, une
+        // entrée qui ne relancerait que les dés neufs passerait inaperçue.
+        assert_ne!(premiere, seconde, "la seconde entrée n'a rien roulé");
+    }
+
+    #[test]
+    fn test_rerolls_come_from_resolve_rerolls() {
+        let mut app = app_en_run(CupId::Abandoned);
+        app.world_mut().resource_mut::<RunSession>().stake_level = 4;
+        app.world_mut()
+            .resource_mut::<BlindContext>()
+            .blind
+            .modifier = Some(BlindModifier::MaxRerolls(1));
+        entrer_dans_roll(&mut app);
+
+        assert_eq!(app.world().resource::<HandContext>().rerolls_left, 0);
+
+        // Contre-épreuve : sur un gobelet qui a des relances, la valeur suit la
+        // chaîne. Sans elle, un compte constamment nul passerait l'assertion
+        // ci-dessus, le gobelet Abandonné étant déjà à zéro.
+        let mut standard = app_en_run(CupId::Standard);
+        entrer_dans_roll(&mut standard);
+        assert_eq!(
+            standard.world().resource::<HandContext>().rerolls_left,
+            cup(CupId::Standard).base_rerolls
+        );
+    }
+
+    #[test]
+    fn test_sides_follow_the_cup() {
+        // Le Polyèdre porte [6,6,6,6,8] : le dernier dé est un D8, jamais un 6
+        // écrit en dur.
+        let mut app = app_en_run(CupId::Polyhedron);
+        entrer_dans_roll(&mut app);
+
+        let faces: Vec<u8> = des_tries(&mut app)
+            .iter()
+            .map(|(_, d, _)| d.sides)
+            .collect();
+        assert_eq!(faces, cup(CupId::Polyhedron).sides);
+
+        // Au-delà de la table, la règle est le **dernier** élément : un sixième
+        // dé sur le Polyèdre est encore un D8.
+        app.world_mut().resource_mut::<RunSession>().config = RunConfig::from_cup(&deck_de(6));
+        entrer_dans_roll(&mut app);
+
+        let faces: Vec<u8> = des_tries(&mut app)
+            .iter()
+            .map(|(_, d, _)| d.sides)
+            .collect();
+        assert_eq!(faces.len(), 6);
+        assert_eq!(faces[5], 8, "le dé hors table reprend le dernier élément");
+    }
+
+    #[test]
+    fn test_die_id_counter_bootstraps_above_existing_dice() {
+        // Le compteur n'existe pas encore au premier passage : il s'amorce à
+        // « 1 + max(présents) ». Un monde qui porte déjà des dés — une partie
+        // relue à l'Étape 10, un montage de test — ne doit pas les voir
+        // réattribués. C'est la seule occasion où la formule du ticket sert.
+        let mut app = app_en_run(CupId::Standard);
+        app.world_mut().spawn((
+            Die::new(DieId(7), 6),
+            DieView { order: 0 },
+            DespawnOnExit(AppState::InRun),
+        ));
+
+        entrer_dans_roll(&mut app);
+
+        let ids: Vec<u32> = des_tries(&mut app).iter().map(|(_, d, _)| d.id.0).collect();
+        assert_eq!(
+            ids,
+            vec![7, 8, 9, 10, 11],
+            "les identifiants neufs partent au-dessus du plus haut présent"
+        );
+    }
+
+    #[test]
+    fn test_die_ids_are_never_reused() {
+        // Rétrécir puis regrossir : la formule « 1 + max(présents) » du ticket
+        // réattribuerait ici l'identifiant du dé retiré, et une relique qui
+        // l'avait mémorisé pointerait sur un autre dé.
+        let mut app = app_en_run(CupId::Standard);
+
+        let mut ids_vus: BTreeSet<u32> = BTreeSet::new();
+        let mut entites_vues: BTreeSet<u64> = BTreeSet::new();
+        let mut precedents: Vec<u32> = Vec::new();
+
+        for n in [5_u8, 4, 5, 3, 6] {
+            app.world_mut().resource_mut::<RunSession>().config = RunConfig::from_cup(&deck_de(n));
+            entrer_dans_roll(&mut app);
+
+            for (entite, die, _) in des_tries(&mut app) {
+                if entites_vues.insert(entite.to_bits()) {
+                    assert!(
+                        ids_vus.insert(die.id.0),
+                        "DieId {} réattribué à une entité neuve",
+                        die.id.0
+                    );
+                }
+            }
+
+            // Le surplus part par les identifiants les plus **élevés** : ce qui
+            // survit d'un tour au suivant est toujours le début de la liste.
+            let presents: Vec<u32> = des_tries(&mut app).iter().map(|(_, d, _)| d.id.0).collect();
+            let survivants: Vec<u32> = presents
+                .iter()
+                .copied()
+                .filter(|id| precedents.contains(id))
+                .collect();
+            assert_eq!(
+                survivants,
+                precedents[..survivants.len()],
+                "le surplus n'est pas parti par le haut"
+            );
+            precedents = presents;
+        }
     }
 
     #[test]

@@ -124,4 +124,20 @@ jobs:
           forbid  "critère 4  combinateurs de 0.18"      -n '\b(run_in|run_after|run_before)\s*\(' crates/
           require "critère 4  stubs de malus marqués"    -n 'Étape 5|Étape 10' "$SETUP/setup.rs"
 
+          # ---- Étape 3 : entrée dans une main (TASK-33) ----
+          # Deux ancrages de plus, dix-septième et dix-huitième du corpus. La
+          # garde « slot » du § 4 de TASK-33 vise un adressage par position
+          # fixe ; nue, elle attrape « RelicInventory { slots: … } », nom d'un
+          # champ public de core_engine. Et la garde « DicePool » vise une
+          # instanciation ; nue, elle attrape les commentaires qui expliquent
+          # justement qu'on n'en crée pas.
+          forbid  "critère 4  positions fixes de dés"    -n '0\.\.5|\[Entity; 5\]|\[Die; 5\]|\b(die_slots?|dice_slots?)\b|slots?\s*\[' "$SETUP"
+          forbid  "critère 4  littéraux de main"         -n 'rerolls_left\s*=\s*[0-9]|dice_count\s*=\s*[0-9]' "$SETUP"
+          forbid  "critère 4  flux hors des dés"         -n 'rng\.(shop|boss|relic_effects)|thread_rng|from_entropy' "$SETUP"
+          forbid  "critère 4  pool de dés en parallèle"  -n 'DicePool::new|DicePool\s*\{|:\s*DicePool\b|<DicePool>' crates/game_state/src
+          # Aucun test ne peut voir cette relance : après le nettoyage des
+          # verrous, force = true et force = false donnent le même résultat.
+          # Le texte est donc la seule garde possible.
+          forbid  "critère 5  relance forcée hors Étape 9" -n 'roll\([^)]*,\s*true\s*\)' "$SETUP"
+
           exit $status
