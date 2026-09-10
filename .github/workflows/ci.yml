@@ -319,7 +319,7 @@ jobs:
           # contre-épreuve.
           require "critère 4  message à deux champs"     -n 'pub source: StepSource,\n    pub action: ScoreAction,' -U crates/ui_and_juice/src/events.rs
           require "critère 4  dérivés du message"        -n '#\[derive\(Message, Debug, Clone, Copy, PartialEq, Eq\)\]' crates/ui_and_juice/src/events.rs
-          require "critère 4  point de conversion unique" -n 'impl From<ScoreEffect> for ScoreStepPlayed \{' crates/ui_and_juice/src/events.rs
+          require "critère 4  point de conversion unique" -n 'impl From<&ScoreStep> for ScoreStepPlayed \{' crates/ui_and_juice/src/events.rs
           require "critère 4  tampon enregistré par le plugin" -n 'add_message::<crate::events::ScoreStepPlayed>' crates/ui_and_juice/src/lib.rs
 
           # ---- Étape 4 : forme définitive de la file (TASK-47) ----
@@ -366,6 +366,27 @@ jobs:
           # Transform se voit là, et la file n'y est pas.
           require "critère 4  accès du dépileur groupés" -nU 'derive\(SystemParam\)\]\npub struct DispatchParams' crates/ui_and_juice/src/queue.rs
           forbid  "critère 4  file empruntée par le dépileur" -n 'fn dispatch_step\([^)]*ScoringStepQueue' crates/ui_and_juice/src/queue.rs
+
+          # ---- Étape 4 : mise en scène d'un palier (TASK-49) ----
+          # C36 : le nom entrait en collision avec le marqueur `Scoring` de
+          # game_state. **Bornée au juice** : `core_engine` porte légitimement un
+          # `Hook::OnScoringDie`, qui est un déclencheur de relique et n'a rien à
+          # voir avec un composant de présentation.
+          forbid  "critère 4  nom proscrit du dé de score" -n 'ScoringDie' crates/ui_and_juice crates/game_state
+          # La résolution passe par l'identité, jamais par le rang d'affichage,
+          # qui est recalculé à chaque manche et dépend du gobelet.
+          require "critère 4  résolution du dé par identité" -n 'die\.id == die_id' crates/ui_and_juice/src/queue.rs
+          forbid  "critère 4  dé résolu par position"     -n '\b[a-z_][a-z0-9_]*\.order\b|\.nth\(' crates/ui_and_juice/src/queue.rs
+          # Les cibles se lisent dans le palier. La conversion vit dans
+          # animation.rs, où la dérogation f64 est bornée (TASK-44).
+          require "critère 4  cibles lues dans le palier" -n 'kind\.target_for\(step\)' crates/ui_and_juice/src/queue.rs
+          forbid  "critère 4  cible recalculée par le dépileur" -n 'chips_after\s*[-+*/]|score_after\s*[-+*/]|mult_after\s*[-+*/]' crates/ui_and_juice/src/queue.rs
+          # L'événement part avant toute résolution d'entité : un palier dont la
+          # cible manque en émet un quand même.
+          require "critère 4  émission inconditionnelle"  -nU 'ctx\.events\.write\(ScoreStepPlayed::from\(step\)\);' crates/ui_and_juice/src/queue.rs
+          # Le marqueur des compteurs vit avec AnimatedNumber, pas ici.
+          require "critère 4  marqueur des trois compteurs" -n 'pub enum CounterKind \{' crates/ui_and_juice/src/animation.rs
+          forbid  "critère 4  repli par filtre d'exclusion" -n 'ParamSet<|Without<DieView>|Without<RelicSlotUI>' crates/ui_and_juice/src
 
           exit $status
 

@@ -27,6 +27,7 @@
 //! figerait `Transform.scale` à sa valeur courante — entité restée gonflée.
 
 use bevy::prelude::*;
+use core_engine::scoring::ScoreStep;
 
 use crate::settings::JuiceSettings;
 
@@ -72,6 +73,44 @@ impl PunchScale {
     /// passe par sa position de repos à pleine vitesse n'est pas au repos.
     fn settled(&self) -> bool {
         self.offset.abs() < 1e-3 && self.velocity.abs() < 1e-3
+    }
+}
+
+/// Lequel des trois compteurs une entité porte.
+///
+/// **Le corpus le supposait posé par TASK-44 ; il ne l'était pas.**
+/// `AnimatedNumber` ne porte que `decimals`, qui vaut 1 pour le Mult et **0
+/// pour Chips comme pour le Total** : sans ce composant, deux des trois
+/// compteurs sont indiscernables et l'axe « action » du dépilement est
+/// inapplicable.
+///
+/// Un énuméré plutôt que trois marqueurs unitaires : le `match` du dépileur
+/// devient exhaustif, et ajouter un quatrième compteur à l'Étape 9 fera
+/// échouer la compilation ici, là où trois marqueurs laisseraient passer
+/// l'oubli.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CounterKind {
+    Chips,
+    Mult,
+    Total,
+}
+
+impl CounterKind {
+    /// Cible de ce compteur pour un palier donné.
+    ///
+    /// **Cette conversion vit ici et nulle part ailleurs.** La dérogation `f64`
+    /// est bornée à ce fichier par une garde du volet 1 (TASK-44), et le
+    /// dépileur n'a donc pas à connaître les unités : il passe le palier et
+    /// reçoit un nombre à afficher. Les trois valeurs sont **lues dans le
+    /// palier**, jamais recalculées — cette étape rejoue un journal.
+    ///
+    /// Le Mult est porté en **centièmes** par le moteur : 430 s'affiche 4.3.
+    pub fn target_for(self, step: &ScoreStep) -> f64 {
+        match self {
+            Self::Chips => step.chips_after as f64,
+            Self::Mult => step.mult_after as f64 / 100.0,
+            Self::Total => step.score_after as f64,
+        }
     }
 }
 

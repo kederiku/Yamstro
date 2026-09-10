@@ -19,7 +19,7 @@
 //! crate.
 
 use bevy::prelude::*;
-use core_engine::scoring::{ScoreAction, ScoreEffect, StepSource};
+use core_engine::scoring::{ScoreAction, ScoreStep, StepSource};
 
 /// Un palier de score vient d'être joué à l'écran.
 ///
@@ -47,19 +47,31 @@ use core_engine::scoring::{ScoreAction, ScoreEffect, StepSource};
 /// propriétaires et des règles d'évolution différents : `ScoreEffect` appartient
 /// au journal du moteur, `ScoreStepPlayed` au canal de présentation.
 ///
-/// `From<ScoreEffect>` est le **point de conversion unique**. Le jour où le type
+/// `From<&ScoreStep>` est le **point de conversion unique**. Le jour où le type
 /// moteur gagne un champ, la compilation casse ici, à un seul endroit, et
 /// quelqu'un décide si ce champ entre dans le message. Sans lui, un dépileur qui
 /// recopie les champs à la main laisse la question sans réponse et sans signal.
+///
+/// **Corrigé à TASK-49 :** la conversion portait d'abord sur `ScoreEffect`, qui
+/// ne circule pas sur ce chemin. La file transporte des `ScoreStep` — les deux
+/// mêmes champs, plus les trois valeurs d'après — et c'est un `&ScoreStep` que
+/// le dépileur reçoit. Une conversion depuis un type que personne ne fait
+/// passer n'est pas un point de passage.
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScoreStepPlayed {
     pub source: StepSource,
     pub action: ScoreAction,
 }
 
-impl From<ScoreEffect> for ScoreStepPlayed {
-    fn from(effet: ScoreEffect) -> Self {
-        let ScoreEffect { source, action } = effet;
+impl From<&ScoreStep> for ScoreStepPlayed {
+    fn from(palier: &ScoreStep) -> Self {
+        let ScoreStep {
+            source,
+            action,
+            chips_after: _,
+            mult_after: _,
+            score_after: _,
+        } = *palier;
         Self { source, action }
     }
 }
@@ -72,12 +84,15 @@ mod tests {
     use super::*;
     use core_engine::hands::YahtzeeHand;
 
-    fn palier() -> ScoreEffect {
-        ScoreEffect {
+    fn palier() -> ScoreStep {
+        ScoreStep {
             source: StepSource::HandBase {
                 hand: YahtzeeHand::Yahtzee,
             },
             action: ScoreAction::MultiplyMult(150),
+            chips_after: 120,
+            mult_after: 430,
+            score_after: 516,
         }
     }
 
@@ -90,7 +105,7 @@ mod tests {
             Update,
             (
                 |mut w: MessageWriter<ScoreStepPlayed>| {
-                    w.write(ScoreStepPlayed::from(palier()));
+                    w.write(ScoreStepPlayed::from(&palier()));
                 },
                 |mut r: MessageReader<ScoreStepPlayed>, mut recu: ResMut<Recu>| {
                     recu.0.extend(r.read().copied());
@@ -101,7 +116,7 @@ mod tests {
         app.update();
         assert_eq!(
             app.world().resource::<Recu>().0,
-            vec![ScoreStepPlayed::from(palier())]
+            vec![ScoreStepPlayed::from(&palier())]
         );
     }
 
@@ -110,15 +125,15 @@ mod tests {
 
     #[test]
     fn test_score_step_played_has_exactly_two_fields() {
-        let ScoreStepPlayed { source, action } = ScoreStepPlayed::from(palier());
+        let ScoreStepPlayed { source, action } = ScoreStepPlayed::from(&palier());
         assert_eq!(source, palier().source);
         assert_eq!(action, palier().action);
     }
 
     #[test]
-    fn test_from_score_effect_copies_both_fields() {
+    fn test_from_score_step_copies_both_fields() {
         let effet = palier();
-        let message = ScoreStepPlayed::from(effet);
+        let message = ScoreStepPlayed::from(&effet);
         assert_eq!(message.source, effet.source);
         assert_eq!(message.action, effet.action);
     }

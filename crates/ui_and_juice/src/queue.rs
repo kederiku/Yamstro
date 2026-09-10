@@ -23,10 +23,10 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use core_engine::dice::Die;
-use core_engine::scoring::ScoreStep;
+use core_engine::scoring::{ScoreAction, ScoreStep, StepSource};
 use game_state::{DieView, RelicSlotUI, ScoringStepQueue};
 
-use crate::animation::{AnimatedNumber, ScreenShake};
+use crate::animation::{AnimatedNumber, CounterKind, PunchScale, ScreenShake};
 use crate::events::ScoreStepPlayed;
 use crate::settings::JuiceSettings;
 
@@ -51,7 +51,7 @@ pub struct DispatchParams<'w, 's> {
     pub commands: Commands<'w, 's>,
     pub dice: Query<'w, 's, (Entity, &'static DieView, &'static Die)>,
     pub slots: Query<'w, 's, (Entity, &'static RelicSlotUI)>,
-    pub counters: Query<'w, 's, &'static mut AnimatedNumber>,
+    pub counters: Query<'w, 's, (Entity, &'static mut AnimatedNumber, &'static CounterKind)>,
     pub shake: ResMut<'w, ScreenShake>,
     pub settings: Res<'w, JuiceSettings>,
     pub events: MessageWriter<'w, ScoreStepPlayed>,
@@ -105,13 +105,106 @@ pub fn tick_scoring_queue(
     }
 }
 
-/// Met en scène un palier. **Corps écrit par TASK-49**, signature fixée ici.
+/// Amplitude d'une pulsation ordinaire, et de la pulsation renforcée d'une
+/// multiplication. **Réglages d'Étape 7, pas des constantes normatives** : le
+/// corpus dit « pulsation » et « pulsation renforcée » sans un chiffre.
 ///
-/// Il pose des composants et écrit des cibles ; il n'écrit aucun `Transform` et
-/// ne joue aucun son. Les cibles des compteurs se lisent dans le palier
-/// lui-même — `chips_after`, `mult_after`, `score_after` — et rien n'y est
-/// recalculé : cette étape rejoue un score, elle ne le calcule pas.
-fn dispatch_step(_step: &ScoreStep, _ctx: &mut DispatchParams) {}
+/// Mesuré à TASK-49 sur le ressort de TASK-43 : le sursaut d'échelle vaut
+/// environ **trois pour cent par unité d'impulsion**, linéairement. La fourchette
+/// lisible de 10 à 30 % correspond donc à des amplitudes de 3,5 à 8.
+const PULSE_NOMINALE: f32 = 4.0;
+const PULSE_RENFORCEE: f32 = 8.0;
+/// Trauma ajouté par une multiplication. L'amplitude étant quadratique
+/// (TASK-45), 0,6 donne 0,36 × 12 px, soit une secousse franche et lisible.
+const TRAUMA_MULTIPLICATION: f32 = 0.6;
+
+/// Met en scène un palier : une impulsion pour sa source, une pour son action.
+///
+/// **Les deux axes sont indépendants.** Un palier traverse une branche de
+/// `source` **et** une branche de `action` ; une source qui frappe un dé et une
+/// action qui frappe un compteur produisent donc deux impulsions. Quand les deux
+/// désignent la même entité, la seconde insertion relance le ressort — c'est le
+/// contrat de ré-insertion de TASK-43, pas une somme.
+///
+/// Il pose des composants et écrit des cibles ; **il n'écrit aucun `Transform`**
+/// et **ne joue aucun son**. Il ne commet rien non plus : le score, la main et la
+/// grille appartiennent à TASK-50.
+fn dispatch_step(step: &ScoreStep, ctx: &mut DispatchParams) {
+    // **Inconditionnelle, et indépendante de la résolution d'entité.** Un palier
+    // dont la cible est introuvable émet quand même : sinon l'Étape 8 perdrait
+    // un son sans raison observable.
+    ctx.events.write(ScoreStepPlayed::from(step));
+
+    // ---- axe « source » ----
+    let cible = match step.source {
+        // Les deux sources frappent le même dé. Seule la teinte les
+        // distinguait, et la teinte attend l'Étape 9 : il n'existe aujourd'hui
+        // aucune entité porteuse d'une couleur dans le dépôt, et la palette
+        // appartient à l'Étape 7. Ce bras se scindera quand la teinte aura de
+        // quoi s'écrire ; deux bras au corps identique ne diraient rien de plus
+        // et aucun test ne pourrait les distinguer.
+        StepSource::Die { die_id, .. } | StepSource::Seal { die_id, .. } => {
+            // **Résolution par identité, jamais par position.** `dice_count`
+            // vaut 4, 5 ou 6 selon le gobelet et `DieView.order` est un rang
+            // d'affichage recalculé à chaque manche : indexer produirait une
+            // impulsion sur le mauvais dé au premier gobelet non standard.
+            ctx.dice
+                .iter()
+                .find(|(_, _, die)| die.id == die_id)
+                .map(|(entity, _, _)| entity)
+        }
+        // La base de la figure alimente les Chips : la faire pulser là où le
+        // nombre bouge est ce qu'un joueur lit. **C'est une interprétation** de
+        // la « boîte de score de départ » du corpus, faute d'entité ou de
+        // marqueur qui la désigne ; l'Étape 9 peut la contredire.
+        StepSource::HandBase { .. } => entite_du_compteur(ctx, CounterKind::Chips),
+        // **Bras volontairement vide.** `RelicId` n'a aucune variante hors des
+        // builds de test de `core_engine` : un `StepSource::Relic` n'est pas
+        // constructible ici, donc aucun test ne peut couvrir ce bras. L'écrire
+        // le ferait paraître livré alors que rien ne le vérifie. Il se câble à
+        // l'étape qui livre le catalogue, seule capable de le tester.
+        StepSource::Relic { .. } => None,
+    };
+    frapper(ctx, cible, PULSE_NOMINALE);
+
+    // ---- axe « action » ----
+    // Les trois cibles suivent le palier à chaque pas, pas seulement celle que
+    // l'action touche : chaque palier porte l'état d'après des trois compteurs.
+    for (_, mut number, kind) in &mut ctx.counters {
+        number.target = kind.target_for(step);
+    }
+
+    let (compteur, force) = match step.action {
+        ScoreAction::AddChips(_) => (CounterKind::Chips, PULSE_NOMINALE),
+        ScoreAction::AddMult(_) => (CounterKind::Mult, PULSE_NOMINALE),
+        ScoreAction::MultiplyMult(_) => {
+            ctx.shake.add_trauma(TRAUMA_MULTIPLICATION);
+            (CounterKind::Mult, PULSE_RENFORCEE)
+        }
+    };
+    let cible = entite_du_compteur(ctx, compteur);
+    frapper(ctx, cible, force);
+}
+
+/// L'entité portant ce compteur, si la scène en porte un.
+fn entite_du_compteur(ctx: &DispatchParams, kind: CounterKind) -> Option<Entity> {
+    ctx.counters
+        .iter()
+        .find(|(_, _, porte)| **porte == kind)
+        .map(|(entity, _, _)| entity)
+}
+
+/// Pose l'impulsion **par commande**, et ne fait rien si la cible manque.
+///
+/// Aucune panique, aucun `unwrap` : un dé despawné ou un compteur que l'écran
+/// ne porte pas encore est un cas normal, pas une erreur.
+fn frapper(ctx: &mut DispatchParams, cible: Option<Entity>, amplitude: f32) {
+    if let Some(entity) = cible {
+        ctx.commands
+            .entity(entity)
+            .insert(PunchScale::impulse(amplitude));
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -215,6 +308,313 @@ mod tests {
         } else {
             touches.release(KeyCode::Space);
         }
+    }
+
+    // ---- Mise en scène d'un palier (TASK-49) ----
+
+    use crate::animation::{AnimatedNumber, CounterKind, PunchScale};
+    use core_engine::dice::{Die, DieId, DieSeal};
+    use game_state::{DieView, RelicSlotUI};
+
+    struct Scene {
+        app: App,
+        des: Vec<Entity>,
+        compteurs: Vec<Entity>,
+    }
+
+    /// Une variante de source et les entités qu'elle doit faire pulser.
+    type Cas = (StepSource, fn(&Scene) -> Vec<Entity>);
+
+    /// Trois dés, deux slots de relique, trois compteurs — instanciés à la main,
+    /// puisque **rien dans le dépôt n'instancie encore d'interface**.
+    fn scene(paliers: Vec<ScoreStep>) -> Scene {
+        let mut app = app_file(0);
+        {
+            let mut file = app.world_mut().resource_mut::<ScoringStepQueue>();
+            file.steps = paliers.into_iter().collect();
+        }
+
+        let des = (1..=3)
+            .map(|n| {
+                app.world_mut()
+                    .spawn((Die::new(DieId(n), 6), DieView { order: n as u8 }))
+                    .id()
+            })
+            .collect();
+        // Deux slots de relique, jamais relus : ils sont là pour que
+        // l'assertion « aucune autre entité n'est frappée » ait de quoi
+        // échouer.
+        for n in 0..2u8 {
+            app.world_mut().spawn(RelicSlotUI(n));
+        }
+        let compteurs = [CounterKind::Chips, CounterKind::Mult, CounterKind::Total]
+            .into_iter()
+            .map(|kind| {
+                app.world_mut()
+                    .spawn((
+                        AnimatedNumber {
+                            displayed: 0.0,
+                            target: 0.0,
+                            rate: 12.0,
+                            decimals: u8::from(kind == CounterKind::Mult),
+                        },
+                        kind,
+                    ))
+                    .id()
+            })
+            .collect();
+
+        brancher_le_journal(&mut app);
+
+        Scene {
+            app,
+            des,
+            compteurs,
+        }
+    }
+
+    fn palier_de(source: StepSource, action: ScoreAction) -> ScoreStep {
+        ScoreStep {
+            source,
+            action,
+            chips_after: 120,
+            mult_after: 430,
+            score_after: 516,
+        }
+    }
+
+    /// Une frame d'exactement une cadence : un palier, pas deux.
+    fn une_cadence(scene: &mut Scene) {
+        frame_de(&mut scene.app, 250_000);
+    }
+
+    fn porteurs_de_punch(app: &mut App) -> Vec<Entity> {
+        let mut etat = app.world_mut().query_filtered::<Entity, With<PunchScale>>();
+        let mut v: Vec<Entity> = etat.iter(app.world()).collect();
+        v.sort();
+        v
+    }
+
+    /// Les messages **enregistrés frame par frame**, jamais relus en fin de
+    /// scénario.
+    ///
+    /// `Messages<T>` est un tampon tournant : au troisième `update()` les
+    /// premiers messages ont disparu, et un test qui relit le tampon à la fin
+    /// compte deux paliers là où quatre ont été joués. C'est le piège qui avait
+    /// rendu la CI rouge à TASK-41, transmis par TASK-46 § 6 — et dans lequel ce
+    /// ticket est retombé au premier essai.
+    #[derive(Resource, Default)]
+    struct Journal(Vec<ScoreStepPlayed>);
+
+    fn brancher_le_journal(app: &mut App) {
+        app.init_resource::<Journal>();
+        app.add_systems(
+            Last,
+            |mut lecteur: MessageReader<ScoreStepPlayed>, mut journal: ResMut<Journal>| {
+                journal.0.extend(lecteur.read().copied());
+            },
+        );
+    }
+
+    fn messages(app: &App) -> Vec<ScoreStepPlayed> {
+        app.world().resource::<Journal>().0.clone()
+    }
+
+    #[test]
+    fn test_dispatch_punches_expected_entity_only() {
+        // **Deux axes indépendants** : la source frappe une entité, l'action en
+        // frappe une autre. Le test porte donc sur l'ensemble exact des
+        // porteurs, pas sur une seule entité — et sur le fait qu'aucune autre
+        // n'est touchée.
+        let cas: Vec<Cas> = vec![
+            (
+                StepSource::Die {
+                    die_id: DieId(2),
+                    value: 5,
+                },
+                |s: &Scene| vec![s.des[1], s.compteurs[0]],
+            ),
+            (
+                StepSource::Seal {
+                    die_id: DieId(3),
+                    seal: DieSeal::Gold,
+                },
+                |s: &Scene| vec![s.des[2], s.compteurs[0]],
+            ),
+            (
+                // Source et action désignent le même compteur : une seule
+                // entité frappée, la ré-insertion relançant le ressort.
+                StepSource::HandBase {
+                    hand: YahtzeeHand::FullHouse,
+                },
+                |s: &Scene| vec![s.compteurs[0]],
+            ),
+        ];
+
+        for (source, attendu) in cas {
+            let mut s = scene(vec![palier_de(source, ScoreAction::AddChips(10))]);
+            une_cadence(&mut s);
+            let mut cibles = attendu(&s);
+            cibles.sort();
+            assert_eq!(
+                porteurs_de_punch(&mut s.app),
+                cibles,
+                "mauvaises entités frappées pour {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_hand_base_punches_chips_even_when_the_action_targets_mult() {
+        // **Les deux axes se masquent sur `HandBase` + `AddChips`** : la source
+        // et l'action désignent alors le même compteur, et supprimer la branche
+        // source passe inaperçu — le banc l'a montré. Un `AddMult` les sépare :
+        // la source frappe les Chips, l'action frappe le Mult.
+        let mut s = scene(vec![palier_de(
+            StepSource::HandBase {
+                hand: YahtzeeHand::FullHouse,
+            },
+            ScoreAction::AddMult(400),
+        )]);
+        let mut attendu = vec![s.compteurs[0], s.compteurs[1]];
+        attendu.sort();
+        une_cadence(&mut s);
+        assert_eq!(porteurs_de_punch(&mut s.app), attendu);
+    }
+
+    #[test]
+    fn test_add_mult_punches_the_mult_counter() {
+        let mut s = scene(vec![palier_de(
+            StepSource::HandBase {
+                hand: YahtzeeHand::FullHouse,
+            },
+            ScoreAction::AddMult(400),
+        )]);
+        let mult = s.compteurs[1];
+        une_cadence(&mut s);
+        assert!(porteurs_de_punch(&mut s.app).contains(&mult));
+    }
+
+    #[test]
+    fn test_counter_targets_come_from_the_step() {
+        let mut s = scene(vec![palier_de(
+            StepSource::Die {
+                die_id: DieId(1),
+                value: 4,
+            },
+            ScoreAction::AddChips(10),
+        )]);
+        let (chips, mult, total) = (s.compteurs[0], s.compteurs[1], s.compteurs[2]);
+        une_cadence(&mut s);
+
+        let cible = |app: &App, e: Entity| {
+            app.world()
+                .get::<AnimatedNumber>(e)
+                .expect("compteur")
+                .target
+        };
+        assert_eq!(cible(&s.app, chips), 120.0, "Chips");
+        assert_eq!(cible(&s.app, mult), 4.3, "Mult : centièmes vers unités");
+        assert_eq!(cible(&s.app, total), 516.0, "Total");
+    }
+
+    #[test]
+    fn test_multiply_mult_adds_trauma_add_chips_does_not() {
+        for (action, attendu) in [
+            (ScoreAction::AddChips(10), false),
+            (ScoreAction::MultiplyMult(150), true),
+        ] {
+            let mut s = scene(vec![palier_de(
+                StepSource::HandBase {
+                    hand: YahtzeeHand::FullHouse,
+                },
+                action,
+            )]);
+            une_cadence(&mut s);
+            let trauma = s.app.world().resource::<ScreenShake>().trauma;
+            assert_eq!(trauma > 0.0, attendu, "trauma pour {action:?}");
+        }
+    }
+
+    #[test]
+    fn test_reinforced_pulse_is_stronger_than_nominal() {
+        // La propriété est le **rapport**, pas les valeurs : celles-ci sont des
+        // réglages d'Étape 7 et bougeront.
+        let mesure = |action: ScoreAction| {
+            let mut s = scene(vec![palier_de(
+                StepSource::HandBase {
+                    hand: YahtzeeHand::FullHouse,
+                },
+                action,
+            )]);
+            let mult = s.compteurs[1];
+            une_cadence(&mut s);
+            s.app
+                .world()
+                .get::<PunchScale>(mult)
+                .map(|p| p.velocity)
+                .unwrap_or(0.0)
+        };
+        let nominale = mesure(ScoreAction::AddMult(400));
+        let renforcee = mesure(ScoreAction::MultiplyMult(150));
+        assert!(
+            renforcee > nominale * 1.5,
+            "la pulsation renforcée ne l'est pas : {nominale} puis {renforcee}"
+        );
+    }
+
+    #[test]
+    fn test_unknown_die_id_does_not_panic() {
+        let mut s = scene(vec![palier_de(
+            StepSource::Die {
+                die_id: DieId(999),
+                value: 4,
+            },
+            ScoreAction::AddChips(10),
+        )]);
+        une_cadence(&mut s);
+        // L'axe « action » frappe quand même son compteur : c'est la **source**
+        // qui n'a pas de cible, pas le palier.
+        let chips = s.compteurs[0];
+        assert_eq!(
+            porteurs_de_punch(&mut s.app),
+            vec![chips],
+            "un dé fantôme a été frappé"
+        );
+        assert_eq!(
+            messages(&s.app).len(),
+            1,
+            "l'événement doit partir quand même"
+        );
+    }
+
+    #[test]
+    fn test_one_event_per_step() {
+        let paliers: Vec<ScoreStep> = (1..=4)
+            .map(|n| {
+                palier_de(
+                    StepSource::Die {
+                        die_id: DieId(n),
+                        value: 3,
+                    },
+                    ScoreAction::AddChips(u64::from(n)),
+                )
+            })
+            .collect();
+        let mut s = scene(paliers.clone());
+        for _ in 0..4 {
+            une_cadence(&mut s);
+        }
+        let recus = messages(&s.app);
+        assert_eq!(recus.len(), 4, "un événement par palier joué");
+        assert_eq!(
+            recus,
+            paliers
+                .iter()
+                .map(ScoreStepPlayed::from)
+                .collect::<Vec<_>>(),
+            "ordre ou contenu altéré"
+        );
     }
 
     #[test]
