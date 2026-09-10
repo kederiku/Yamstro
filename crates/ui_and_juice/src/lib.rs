@@ -78,7 +78,11 @@ impl Plugin for JuicePlugin {
         // n'est pas configuré du tout.
         app.add_systems(
             Update,
-            crate::animation::animate_punch_scale.in_set(JuiceSet::Animation),
+            (
+                crate::animation::animate_punch_scale,
+                crate::animation::animate_numbers,
+            )
+                .in_set(JuiceSet::Animation),
         );
     }
 }

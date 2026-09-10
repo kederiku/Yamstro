@@ -73,6 +73,72 @@ impl PunchScale {
     }
 }
 
+/// Compteur interpolé : Chips, Mult et Total défilent au lieu de sauter.
+///
+/// **Seule dérogation `f64` du projet, et elle est bornée à l'affichage.**
+/// Aucune de ces valeurs ne remonte vers le moteur, le contexte de blind ou la
+/// session (ADR-003) : le score commis reste le `u64` du pipeline, transporté
+/// tel quel. Un `displayed` arrondi et réinjecté casserait le déterminisme
+/// multi-plateforme, qui est un pilier du projet. Le sens est unique —
+/// centièmes `i64` vers `f64` d'affichage — et jamais l'inverse.
+///
+/// **`Component` uniquement.** Les quatre dérivés au-delà suivent la même
+/// raison qu'à TASK-43 : c'est un type public que le dépileur construira.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct AnimatedNumber {
+    /// `f64` toléré : affichage uniquement.
+    pub displayed: f64,
+    pub target: f64,
+    /// Vitesse de rattrapage, défaut 12.0.
+    pub rate: f32,
+    /// 0 pour Chips et Total, 1 pour le Mult.
+    pub decimals: u8,
+}
+
+/// Rend la valeur avec le nombre de décimales demandé.
+///
+/// Le séparateur de milliers n'est pas spécifié par le corpus et n'est **pas**
+/// introduit ici : la localisation appartient à l'Étape 11. Ce qui est
+/// normatif, c'est que le nombre de décimales vienne de `decimals`.
+fn format_counter(value: f64, decimals: u8) -> String {
+    format!("{:.*}", decimals as usize, value)
+}
+
+/// `Update`, dans `JuiceSet::Animation`, sans garde d'état — comme le ressort,
+/// et pour la même raison : un compteur figé en pleine interpolation par la
+/// transition vers la fin de manche afficherait une valeur fausse à l'écran.
+///
+/// # Le lerp est exponentiel, et ce n'est pas un détail
+///
+/// `t = 1 - exp(-rate·dt)`. Un lerp linéaire dépendrait du framerate : le même
+/// compteur défilerait à des vitesses différentes à 60 et à 144 FPS, et le
+/// joueur le plus rapide verrait la séquence de score se dérouler plus vite.
+///
+/// La forme exponentielle rend l'erreur résiduelle **multiplicative** : chaque
+/// frame la multiplie par `exp(-rate·dt)`, et le produit sur une durée totale
+/// vaut `exp(-rate·T)` **quel que soit le découpage**. Vérifié : 6 frames de
+/// 16,667 ms et 15 frames de 6,667 ms donnent la même valeur jusqu'au dernier
+/// chiffre.
+pub fn animate_numbers(time: Res<Time>, mut query: Query<(&mut AnimatedNumber, &mut Text)>) {
+    let dt = time.delta_secs();
+    for (mut number, mut text) in &mut query {
+        let t = f64::from(1.0 - (-number.rate * dt).exp());
+        number.displayed += (number.target - number.displayed) * t;
+
+        // **Accrochage obligatoire.** Sans lui la convergence est asymptotique :
+        // le compteur affiche indéfiniment une valeur qui ne se pose jamais sur
+        // sa cible, et le total final reste visuellement à un poil du score
+        // commis. Le seuil est calibré sur la résolution d'affichage — un demi
+        // dernier chiffre visible, donc 0,5 sans décimale et 0,05 avec une.
+        let epsilon = 0.5 / 10f64.powi(i32::from(number.decimals));
+        if (number.target - number.displayed).abs() < epsilon {
+            number.displayed = number.target;
+        }
+
+        text.0 = format_counter(number.displayed, number.decimals);
+    }
+}
+
 /// `Update`, dans `JuiceSet::Animation`, sans garde ni filtre.
 ///
 /// La requête est déjà restreinte aux entités portant le composant : la
@@ -412,5 +478,264 @@ mod tests {
             base,
             "l'échelle n'est pas revenue à sa base"
         );
+    }
+
+    // ---- AnimatedNumber ----
+
+    fn compteur(app: &mut App, target: f64, decimals: u8) -> Entity {
+        app.world_mut()
+            .spawn((
+                Text::new("0"),
+                AnimatedNumber {
+                    displayed: 0.0,
+                    target,
+                    rate: 12.0,
+                    decimals,
+                },
+            ))
+            .id()
+    }
+
+    fn affiche(app: &App, entite: Entity) -> f64 {
+        app.world()
+            .get::<AnimatedNumber>(entite)
+            .expect("compteur")
+            .displayed
+    }
+
+    fn texte(app: &App, entite: Entity) -> String {
+        app.world().get::<Text>(entite).expect("texte").0.clone()
+    }
+
+    /// Avance d'un pas donné en microsecondes.
+    fn avancer_de(app: &mut App, microsecondes: u64) {
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_micros(microsecondes));
+        app.update();
+    }
+
+    #[test]
+    fn test_counter_snaps_exactly_to_target() {
+        let mut app = app_animation();
+        let entite = compteur(&mut app, 1234.0, 0);
+
+        for _ in 0..200 {
+            avancer(&mut app);
+        }
+
+        // Égalité **exacte** : sans accrochage la convergence est asymptotique,
+        // et le total resterait indéfiniment « à un poil » du score commis.
+        assert_eq!(affiche(&app, entite), 1234.0);
+        assert_eq!(texte(&app, entite), "1234");
+    }
+
+    #[test]
+    fn test_lerp_is_framerate_independent() {
+        // **Durées rigoureusement égales, et ce n'est pas une coquetterie.**
+        //
+        // Le corpus appariait 6 × 16,7 ms contre 14 × 6,9 ms en annonçant
+        // « même durée simulée » : 100,2 ms contre 96,6 ms. Mesuré, l'écart de
+        // `displayed` valait **16,37** pour une tolérance de 1e-4 — le test
+        // aurait échoué alors que la propriété qu'il vise est exacte.
+        //
+        // Un appariement à 3 µs près ne suffit pas non plus : le résiduel se
+        // déplace à `rate × résiduel` ≈ **4 460 unités par seconde**, donc une
+        // tolérance de 1e-4 exige un appariement à **22 ns**. En microsecondes
+        // entières, il faut des produits exacts. 5 × 20 ms contre 20 × 5 ms —
+        // 50 FPS contre 200 FPS — donne alors un écart de 1e-13.
+        //
+        // La forme exponentielle rend l'erreur résiduelle **multiplicative** :
+        // chaque frame la multiplie par `exp(-rate·dt)`, et le produit sur une
+        // durée T vaut `exp(-rate·T)` quel que soit le découpage.
+        let mut lent = app_animation();
+        let a = compteur(&mut lent, 1234.0, 0);
+        for _ in 0..5 {
+            avancer_de(&mut lent, 20_000); // 50 FPS
+        }
+
+        let mut rapide = app_animation();
+        let b = compteur(&mut rapide, 1234.0, 0);
+        for _ in 0..20 {
+            avancer_de(&mut rapide, 5_000); // 200 FPS
+        }
+
+        let ecart = (affiche(&lent, a) - affiche(&rapide, b)).abs();
+        assert!(
+            ecart < 1e-4,
+            "écart de {ecart} : le rattrapage dépend du framerate"
+        );
+        // Et l'accrochage n'a pas encore mordu : ce qu'on compare est bien
+        // l'interpolation, pas deux valeurs collées à la cible.
+        assert!(affiche(&lent, a) < 1234.0);
+    }
+
+    #[test]
+    fn test_mult_displays_one_decimal() {
+        // Le Mult est un `i64` en centièmes : 430 s'affiche 4.3. La conversion
+        // se fait dans le sens moteur vers affichage, et jamais dans l'autre.
+        let mut app = app_animation();
+        // Le Mult tel que le moteur le porte : un `i64` en centièmes.
+        let mult_centiemes: i64 = 430;
+        let mult = compteur(&mut app, mult_centiemes as f64 / 100.0, 1);
+        let chips = compteur(&mut app, 1234.0, 0);
+
+        for _ in 0..200 {
+            avancer(&mut app);
+        }
+
+        assert_eq!(texte(&app, mult), "4.3");
+        assert_eq!(texte(&app, chips), "1234", "un entier n'a pas de point");
+
+        // **Le cas qui pince vraiment `decimals`.** Sur 4.3, l'affichage par
+        // défaut de Rust rend déjà « 4.3 » : ignorer `decimals` y serait
+        // indistinguable, et le banc l'a montré. Sur un Mult à exactement
+        // 4,00, `{}` rend « 4 » et `{:.1}` rend « 4.0 » — et c'est la seconde
+        // forme qu'il faut, sans quoi la colonne du Mult change de largeur
+        // dès que la valeur tombe juste.
+        let rond_centiemes: i64 = 400;
+        let rond = compteur(&mut app, rond_centiemes as f64 / 100.0, 1);
+        for _ in 0..200 {
+            avancer(&mut app);
+        }
+        assert_eq!(texte(&app, rond), "4.0", "un Mult rond garde sa décimale");
+    }
+
+    #[test]
+    fn test_text_shows_the_current_value_not_the_target() {
+        // En pleine interpolation, le texte doit montrer où en est le compteur,
+        // pas où il va. Tous les autres tests lisent le texte **après**
+        // convergence, où les deux coïncident : le banc a montré qu'afficher
+        // la cible y passait inaperçu.
+        let mut app = app_animation();
+        let entite = compteur(&mut app, 1234.0, 0);
+
+        avancer(&mut app);
+
+        let affiche_maintenant = affiche(&app, entite);
+        assert!(
+            affiche_maintenant < 1234.0,
+            "déjà convergé, test sans objet"
+        );
+        assert_eq!(
+            texte(&app, entite),
+            format_counter(affiche_maintenant, 0),
+            "le texte montre la cible et non la valeur courante"
+        );
+        assert_ne!(texte(&app, entite), "1234");
+    }
+
+    #[test]
+    fn test_retarget_mid_interpolation_does_not_jump() {
+        let mut app = app_animation();
+        let entite = compteur(&mut app, 1234.0, 0);
+        for _ in 0..3 {
+            avancer(&mut app);
+        }
+
+        let a_mi_course = affiche(&app, entite);
+        assert!(a_mi_course > 0.0 && a_mi_course < 1234.0);
+
+        app.world_mut()
+            .get_mut::<AnimatedNumber>(entite)
+            .expect("compteur")
+            .target = 5000.0;
+
+        // Immédiatement après le changement, rien n'a bougé : la cible ne
+        // déplace pas la valeur affichée, elle change seulement sa direction.
+        assert_eq!(affiche(&app, entite), a_mi_course);
+
+        avancer(&mut app);
+        let apres = affiche(&app, entite);
+        assert!(
+            apres > a_mi_course,
+            "le compteur ne repart pas vers la nouvelle cible"
+        );
+    }
+
+    #[test]
+    fn test_rate_controls_convergence_speed() {
+        // `rate` est un **taux** : doubler le rate revient à doubler la durée.
+        // L'erreur résiduelle relative vaut `exp(-rate·T)`, donc celle du rate
+        // double est le **carré** de celle du rate simple. Sans ce test, un
+        // `rate` ignoré ou remplacé par une constante passe inaperçu.
+        let mut simple = app_animation();
+        let a = compteur(&mut simple, 1234.0, 0);
+        let mut double = app_animation();
+        let b = compteur(&mut double, 1234.0, 0);
+        double
+            .world_mut()
+            .get_mut::<AnimatedNumber>(b)
+            .expect("compteur")
+            .rate = 24.0;
+
+        for _ in 0..6 {
+            avancer_de(&mut simple, 16_667);
+            avancer_de(&mut double, 16_667);
+        }
+
+        let r1 = (1234.0 - affiche(&simple, a)) / 1234.0;
+        let r2 = (1234.0 - affiche(&double, b)) / 1234.0;
+        assert!(
+            (r2 - r1 * r1).abs() < 1e-3,
+            "résiduel simple {r1}, double {r2} : le carré attendu est {}",
+            r1 * r1
+        );
+    }
+
+    #[test]
+    fn test_snap_threshold_follows_decimals() {
+        // Le seuil est **calibré sur la résolution d'affichage** : un demi
+        // dernier chiffre visible, donc 0,5 sans décimale et 0,05 avec une.
+        // Deux compteurs à la même distance de leur cible, une seule frame :
+        // celui sans décimale s'accroche, l'autre non.
+        let mut app = app_animation();
+        let entier = compteur(&mut app, 100.0, 0);
+        let decimal = compteur(&mut app, 100.0, 1);
+        for entite in [entier, decimal] {
+            app.world_mut()
+                .get_mut::<AnimatedNumber>(entite)
+                .expect("compteur")
+                .displayed = 99.6;
+        }
+
+        avancer(&mut app);
+
+        assert_eq!(
+            affiche(&app, entier),
+            100.0,
+            "sans décimale, un écart de 0,33 est sous le seuil de 0,5"
+        );
+        assert!(
+            affiche(&app, decimal) < 100.0,
+            "avec une décimale, le seuil est 0,05 : il ne faut pas s'accrocher"
+        );
+    }
+
+    #[test]
+    fn test_number_and_punch_coexist_on_one_entity() {
+        // Le § 2.6 l'affirme : les deux systèmes accèdent à des types disjoints
+        // — `Text` d'un côté, `Transform` de l'autre — et cohabitent. Un
+        // compteur qui pulse en changeant de valeur est le cas réel.
+        let mut app = app_animation();
+        let entite = app
+            .world_mut()
+            .spawn((
+                Text::new("0"),
+                AnimatedNumber {
+                    displayed: 0.0,
+                    target: 1234.0,
+                    rate: 12.0,
+                    decimals: 0,
+                },
+                Transform::default(),
+                PunchScale::impulse(0.35),
+            ))
+            .id();
+
+        avancer(&mut app);
+
+        assert!(affiche(&app, entite) > 0.0, "le compteur n'a pas avancé");
+        assert_ne!(echelle(&app, entite), Vec3::ONE, "le ressort n'a pas joué");
     }
 }

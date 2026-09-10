@@ -259,6 +259,19 @@ jobs:
           forbid  "critère 4  dépendance de tweening ou audio" -n '^\s*[a-z0-9_-]*(tween|kira|rodio|audio|vorbis|symphonia)[a-z0-9_-]*\s*=|"(bevy_audio|vorbis)"' --glob '**/Cargo.toml' crates/
           forbid  "critère 4  dépendance inverse vers le juice" -n 'ui_and_juice' crates/game_state crates/core_engine
 
+          # ---- Étape 4 : compteurs interpolés (TASK-44) ----
+          # La dérogation `f64` est **bornée à l'affichage** (ADR-003) : le
+          # score commis reste le `u64` du pipeline. Ancrée sur une
+          # déclaration ou une conversion, jamais sur le mot : le fichier
+          # d'animation explique pourquoi il y a droit, et l'expliquer ne doit
+          # pas déclencher la garde.
+          forbid  "critère 4  f64 hors des compteurs"    -n ':\s*f64|->\s*f64|\bas f64\b|f64::from' crates/ui_and_juice/src -g '!crates/ui_and_juice/src/animation.rs'
+          forbid  "critère 4  f64 dans le moteur ou les états" -n ':\s*f64|->\s*f64|\bas f64\b' crates/core_engine/src crates/game_state/src
+          # Deux pièges 0.19 vérifiés à TASK-44 : `TextFont.font` est un
+          # `FontSource` et `font_size` un `FontSize`, plus des types nus.
+          forbid  "critère 9  font_size en flottant nu"  -n 'font_size:\s*[0-9]' crates/
+          forbid  "critère 9  cosmic-text"               -n 'cosmic' crates/
+
           exit $status
 
   # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en
