@@ -110,4 +110,18 @@ jobs:
           forbid  "critère 2  comparaison approchée"     -n 'assert_relative_eq|EPSILON|\bapprox::|abs\(\)\s*<' crates/
           require "critère 2  égalités exactes"          -n 'assert_eq!' "$SRC/scoring"
 
+          # ---- Étape 3 : mise en place d'une manche (TASK-32) ----
+          # Deux ancrages de plus, même défaut que ci-dessus. La garde du § 4
+          # de TASK-32 interdit « - » entouré d'espaces dans tout le fichier :
+          # elle vise une soustraction nue sur un compteur, pas un tiret de
+          # prose. Et la garde des trois combinateurs supprimés en 0.19
+          # attraperait le commentaire qui explique justement qu'on ne les
+          # écrit pas ; elle est donc ancrée sur un appel.
+          SETUP=crates/game_state/src/systems
+
+          forbid  "critère 4  soustraction nue (manche)" -n '\w*(reroll|hand|gold|slot|capacity|count|interest|score|target|ante)\w*\s*(-=|- )' "$SETUP"
+          forbid  "critère 4  aucun flottant (manche)"   -n '\bf32\b|\bf64\b' "$SETUP"
+          forbid  "critère 4  combinateurs de 0.18"      -n '\b(run_in|run_after|run_before)\s*\(' crates/
+          require "critère 4  stubs de malus marqués"    -n 'Étape 5|Étape 10' "$SETUP/setup.rs"
+
           exit $status

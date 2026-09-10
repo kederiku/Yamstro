@@ -5,15 +5,21 @@ use bevy_ecs::reflect::ReflectComponent;
 
 use crate::hands::HandGrid;
 
-/// Modificateur porté par un blind. **Deux variantes seulement à cette étape** :
-/// celles qui touchent la base de la figure. L'Étape 6 est propriétaire de
-/// l'énumération complète et y ajoutera les treize autres, sans déplacer ce
+/// Modificateur porté par un blind. **Trois variantes seulement à cette étape** :
+/// les deux qui touchent la base de la figure, et le plafond de relances que la
+/// mise en place d'une manche consomme. L'Étape 6 est propriétaire de
+/// l'énumération complète et y ajoutera les douze autres, sans déplacer ce
 /// fichier.
 #[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BlindModifier {
     HalveBaseScores,
     AllMultToOne,
+    /// Plafond de relances du boss L'Étau. **Un plafond, jamais un delta** : il
+    /// abaisse le compte quand il est plus bas, ne le relève jamais, et le
+    /// maillon relique lui étant postérieur, un bonus de relique le dépasse
+    /// légitimement (`core_engine::config::effective_rerolls`).
+    MaxRerolls(u8),
 }
 
 /// Rang d'un blind dans l'ante.

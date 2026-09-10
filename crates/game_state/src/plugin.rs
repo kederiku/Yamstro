@@ -27,9 +27,10 @@ pub enum GameSet {
 
 /// Plugin racine de la machine à états.
 ///
-/// Il ne fait qu'une chose : poser l'ordre des quatre ensembles, une fois pour
-/// toutes. **Il n'enregistre aucun système** ; chaque ticket aval y branche les
-/// siens dans l'ensemble qui lui revient.
+/// Il pose l'ordre des quatre ensembles, une fois pour toutes, puis délègue
+/// l'enregistrement des systèmes au module qui les porte. Chaque ticket aval y
+/// branche les siens de la même façon : la connaissance de l'ordre et des
+/// gardes reste à côté des systèmes, jamais ici.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GameStatePlugin;
 
@@ -49,6 +50,8 @@ impl Plugin for GameStatePlugin {
             )
                 .chain(),
         );
+
+        crate::systems::setup::register(app);
     }
 }
 

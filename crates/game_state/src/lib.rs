@@ -4,6 +4,7 @@ pub mod components;
 pub mod plugin;
 pub mod resources;
 pub mod states;
+pub mod systems;
 
 pub use components::{DieView, Hidden, Locked, PunchScale, RelicSlotUI, Scoring};
 pub use plugin::{GameSet, GameStatePlugin};
