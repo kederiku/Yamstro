@@ -87,12 +87,27 @@ jobs:
           # variante normative « Hook::OnScoringDie » contient la sous-chaîne
           # « ScoringDie » et ferait échouer la garde ; c'est le TYPE de ce nom
           # qui est proscrit, pas le moment qu'il nomme (CONTEXT.md).
-          forbid  "critère 10 noms proscrits"            -n '\b(evaluate_dice|evaluate_hand|HandEvaluation|RollSession|rerolls_remaining|rerolls_per_hand|ScoringDie|RoundContext)\b' crates/
+          forbid  "critère 10 noms proscrits"            -n '\b(evaluate_dice|evaluate_hand|HandEvaluation|RollSession|rerolls_remaining|rerolls_per_hand|ScoringDie|RoundContext|grid_levels|RelicTrigger|RelicHook)\b' crates/
           # Les quatre hooks sont déclarés dans trigger.rs, mais l'Étape 2 n'en
           # câble que deux. Un point d'appel de OnRoll ou OnRoundEnd ailleurs
           # dans le pipeline produirait des effets fantômes dans le journal.
           forbid  "critère 10 hooks non câblés"          -n 'OnRoll|OnRoundEnd' "$SRC/scoring" -g '!**/trigger.rs'
           forbid  "critère 10 le mot défausse"           -ni 'défausse|defausse' crates/
           forbid  "critère 5  ReflectResource"           -n 'ReflectResource|reflect\(Resource\)' crates/
+
+          # ---- Étape 2 : invariants de clôture (TASK-27, volet 1) ----
+          # Les motifs sont ancrés sur l'USAGE, jamais sur la mention. Dans leur
+          # forme nue, trois d'entre eux échouaient sur des commentaires que
+          # TASK-20, TASK-21 et TASK-26 exigeaient d'écrire : une garde qui
+          # interdit un nom interdit aussi la phrase expliquant qu'on ne s'en
+          # sert pas.
+          forbid  "critère 5  objet-trait relique"       -n 'trait Relic\b|dyn Relic|Box<dyn' crates/core_engine
+          forbid  "critère 5  actions hors des trois"    -n 'MultiplyScore|SetFormula' crates/
+          forbid  "critère 5  resolve renommée"          -n 'ScoringPipeline::(execute|run)\b' crates/
+          forbid  "critère 7  le pipeline ne commet rien" -n '\.current_score|\.hands_remaining|\.used_hands|advance_state\(' "$SRC/scoring"
+          forbid  "critère 7  aucune source d'aléa"      -n '\brng\b|RunRng|rand::|thread_rng' "$SRC/scoring"
+          forbid  "critère 6  feature test-fixtures"     -n 'test-fixtures"|^\s*test-fixtures\s*=' crates/
+          forbid  "critère 2  comparaison approchée"     -n 'assert_relative_eq|EPSILON|\bapprox::|abs\(\)\s*<' crates/
+          require "critère 2  égalités exactes"          -n 'assert_eq!' "$SRC/scoring"
 
           exit $status
