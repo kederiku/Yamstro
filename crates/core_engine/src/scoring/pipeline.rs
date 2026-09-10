@@ -149,7 +149,7 @@ fn scan_relics<O: FnMut(Hook, &TriggerCtx<'_>)>(
 ///
 /// La passe A est **pure** : elle ne touche aucun contexte de score, ne fait
 /// avancer aucun état de relique, et ne fait que produire une liste ordonnée.
-pub fn pass_a(
+fn pass_a(
     hand: &HandMatch,
     dice: &[Die],
     hand_levels: &HandLevels,
@@ -282,7 +282,7 @@ fn pass_a_with<O: FnMut(Hook, &TriggerCtx<'_>)>(
 /// `score_after` se **recalcule** à chaque pas plutôt que de s'accumuler. Une
 /// accumulation serait fausse dès la première multiplication, le score étant
 /// un produit réévalué et non une somme de contributions.
-pub fn pass_b(effects: &[ScoreEffect]) -> ScoringReport {
+fn pass_b(effects: &[ScoreEffect]) -> ScoringReport {
     let mut ctx = ScoreContext::default();
     let mut steps = Vec::with_capacity(effects.len());
 
@@ -310,9 +310,44 @@ pub fn pass_b(effects: &[ScoreEffect]) -> ScoringReport {
     }
 }
 
+/// Point d'entrée du calcul de score.
+///
+/// Structure sans état : elle n'existe que pour donner un nom au pipeline, et
+/// toute sa logique tient dans `resolve`.
+#[derive(Debug, Clone, Copy)]
+pub struct ScoringPipeline;
+
+impl ScoringPipeline {
+    /// Résout une figure et rend le score accompagné du journal qui le
+    /// justifie.
+    ///
+    /// **`resolve` calcule et ne commet rien.** Elle ne prend aucune source
+    /// d'aléa, n'écrit dans aucun état de manche et ne fait avancer aucun état
+    /// de relique : une relique à compteur ressort avec le compteur qu'elle
+    /// avait. Deux appels sur les mêmes entrées rendent deux rapports égaux,
+    /// journal compris. Commettre le score appartient à l'Étape 4, à la fin du
+    /// dépilement de la file d'animation ; le faire aussi ici produirait un
+    /// double comptage systématique.
+    ///
+    /// Le déroulé est celui des deux passes : production ordonnée des effets,
+    /// puis repliement. Rien n'est trié, dédupliqué, ni filtré entre les deux —
+    /// un effet nul reste un palier, que l'Étape 4 anime comme les autres.
+    pub fn resolve(
+        hand: &HandMatch,
+        dice: &[Die],
+        hand_levels: &HandLevels,
+        relics: &RelicInventory,
+        ctx: &BlindContext,
+    ) -> ScoringReport {
+        let effects = pass_a(hand, dice, hand_levels, ctx, relics);
+        pass_b(&effects)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blind::BlindModifier;
     use crate::dice::{Die, DieId, DieModifier, DieSeal};
     use crate::evaluator::HandMatch;
     use crate::relics::{RelicId, RelicInstance, RelicInventory, RelicState};
@@ -988,6 +1023,173 @@ mod tests {
         assert_eq!(report.final_score, 0);
         assert_eq!(report.chips, 0);
         assert_eq!(report.mult, 0);
+    }
+
+    // ---- Orchestration : les deux passes derrière une signature publique ----
+
+    /// Main d'une figure quelconque, `scoring_dice` et écartés maîtrisés.
+    fn main_figure(hand: YahtzeeHand, scoring: &[u32], discarded: &[u32]) -> HandMatch {
+        HandMatch {
+            hand,
+            scoring_dice: scoring.iter().map(|id| DieId(*id)).collect(),
+            discarded_dice: discarded.iter().map(|id| DieId(*id)).collect(),
+            potential_score: 0,
+        }
+    }
+
+    #[test]
+    fn test_nominal_three_of_a_kind_no_relic() {
+        // Brelan de 4 : base (10, 200) de la table normative, plus trois faces
+        // à 4. Les deux dés écartés ne versent rien.
+        let dice = [de(0, 4), de(1, 4), de(2, 4), de(3, 2), de(4, 3)];
+        let hand = main_figure(YahtzeeHand::ThreeOfAKind, &[0, 1, 2], &[3, 4]);
+        let relics = inventaire(&[]);
+
+        let report =
+            ScoringPipeline::resolve(&hand, &dice, &HandLevels::default(), &relics, &blind_nu());
+
+        assert_eq!(report.chips, 22);
+        assert_eq!(report.mult, 200);
+        assert_eq!(report.final_score, 44);
+    }
+
+    #[test]
+    fn test_relic_reorder_changes_score() {
+        // Test central de l'étape : réordonner l'inventaire change le score.
+        // C'est la preuve mécanique d'ADR-005, et le seul garde-fou contre un
+        // regroupement des effets par type d'action.
+        let (dice, hand) = main_pleine();
+        let levels = HandLevels::default();
+        let blind = blind_nu();
+
+        let dans_lordre = ScoringPipeline::resolve(
+            &hand,
+            &dice,
+            &levels,
+            &inventaire(&[Some(RelicId::MagicPair), Some(RelicId::BrokenGlass)]),
+            &blind,
+        );
+        let inverse = ScoringPipeline::resolve(
+            &hand,
+            &dice,
+            &levels,
+            &inventaire(&[Some(RelicId::BrokenGlass), Some(RelicId::MagicPair)]),
+            &blind,
+        );
+
+        // 400 → 800 → 1200 d'un côté, 400 → 600 → 1000 de l'autre.
+        assert_eq!(dans_lordre.final_score, 588);
+        assert_eq!(dans_lordre.mult, 1200);
+        assert_eq!(inverse.final_score, 490);
+        assert_eq!(inverse.mult, 1000);
+        assert_ne!(dans_lordre.final_score, inverse.final_score);
+    }
+
+    #[test]
+    fn test_resolve_is_deterministic() {
+        let (mut dice, hand) = main_pleine();
+        // Un modificateur nul : le pipeline ne filtre pas les effets sans
+        // conséquence sur le score, un palier à zéro restant un palier que
+        // l'Étape 4 anime comme les autres.
+        dice[0].modifiers = vec![DieModifier::BonusChips(0)];
+        let relics = inventaire(&[Some(RelicId::MagicPair), Some(RelicId::BrokenGlass)]);
+        let levels = HandLevels::default();
+        let blind = blind_nu();
+
+        let premier = ScoringPipeline::resolve(&hand, &dice, &levels, &relics, &blind);
+        let second = ScoringPipeline::resolve(&hand, &dice, &levels, &relics, &blind);
+
+        assert!(
+            premier
+                .steps
+                .iter()
+                .any(|step| step.action == ScoreAction::AddChips(0)),
+            "le palier nul a été filtré"
+        );
+
+        // Les rapports **entiers** sont comparés, journal compris : deux scores
+        // égaux obtenus par deux chemins différents passeraient une simple
+        // comparaison de nombres.
+        assert_eq!(premier.final_score, second.final_score);
+        assert_eq!(premier, second);
+    }
+
+    #[test]
+    fn test_mult_floor() {
+        // Les deux premiers pas sont les seuls de source `HandBase` : ils sont
+        // l'étape 1. Le premier porte un Mult nul par construction, la base
+        // n'étant pas encore posée ; le plancher vaut à partir du second.
+        //
+        // Le cas `HalveBaseScores` sur une figure à mult 100 est le seul de
+        // l'étape où le plancher se joue vraiment : `resolved_base` calcule
+        // `(100 + 1) / 2 = 50` avant de remonter par `.max(100)`. Sans ce
+        // relèvement, ce test tombe.
+        let dice = [de(0, 4), de(1, 4), de(2, 4), de(3, 2), de(4, 3)];
+        let relics = inventaire(&[Some(RelicId::MagicPair), Some(RelicId::BrokenGlass)]);
+        let blinds = [
+            BlindContext {
+                modifiers: SmallVec::new(),
+            },
+            BlindContext {
+                modifiers: smallvec::smallvec![BlindModifier::HalveBaseScores],
+            },
+        ];
+
+        for blind in &blinds {
+            for figure in YahtzeeHand::ALL {
+                let hand = main_figure(figure, &[0, 1, 2], &[3, 4]);
+                let report =
+                    ScoringPipeline::resolve(&hand, &dice, &HandLevels::default(), &relics, blind);
+
+                assert_eq!(
+                    report.steps[0].source,
+                    StepSource::HandBase { hand: figure }
+                );
+                for (position, step) in report.steps.iter().enumerate().skip(1) {
+                    assert!(
+                        step.mult_after >= 100,
+                        "figure {figure:?}, pas {} : mult {} sous le plancher",
+                        position + 1,
+                        step.mult_after
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_resolve_does_not_mutate_inputs() {
+        // La pureté est tenue par le type : `resolve` ne reçoit que des
+        // emprunts partagés, et aucune de ses entrées n'a de mutabilité
+        // intérieure. La sonde de borne l'énonce, ce qu'une comparaison de
+        // clones ne peut pas faire.
+        fn exige_pure<
+            T: Fn(&HandMatch, &[Die], &HandLevels, &RelicInventory, &BlindContext) -> ScoringReport,
+        >(
+            _: T,
+        ) {
+        }
+        exige_pure(ScoringPipeline::resolve);
+
+        // Les champs `current_score`, `hands_remaining` et `used_hands` que le
+        // corpus voulait voir comparés ici n'existent pas : ils appartiennent
+        // au contexte de manche de l'Étape 3, pas au `BlindContext` minimal de
+        // l'Étape 2. La comparaison porte sur ce qui existe.
+        let (dice, hand) = main_pleine();
+        let relics = inventaire(&[Some(RelicId::MagicPair), None, Some(RelicId::BrokenGlass)]);
+        let blind = blind_nu();
+        let relics_avant = relics.clone();
+        let blind_avant = blind.clone();
+
+        ScoringPipeline::resolve(&hand, &dice, &HandLevels::default(), &relics, &blind);
+        ScoringPipeline::resolve(&hand, &dice, &HandLevels::default(), &relics, &blind);
+
+        assert_eq!(relics, relics_avant);
+        assert_eq!(blind, blind_avant);
+        // Aucun état de relique n'a avancé : un compteur reste où il était.
+        for (avant, apres) in relics_avant.slots.iter().zip(&relics.slots) {
+            assert_eq!(avant.map(|inst| inst.state), apres.map(|inst| inst.state));
+        }
     }
 
     #[test]
