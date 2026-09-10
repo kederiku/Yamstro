@@ -209,7 +209,14 @@ jobs:
           # est exigée. Et la garde sur le score attrapait les lignes de test
           # qui le POSENT — rien ne l'écrit encore, donc les scénarios doivent
           # bien l'établir. Ce qui l'interdit vraiment est le type.
-          forbid  "critère 4  set nu hors de la soumission" -n 'next\.set\(' crates/game_state/src -g '!**/submission.rs'
+          # **Corrigée à l'audit de TASK-52 : elle ne gardait rien.** Ancrée sur
+          # le nom du receveur `next`, elle laissait passer `phase.set(..)` de
+          # `round_end.rs`, dont le paramètre porte un autre nom — mesuré par
+          # mutation. L'alternance couvre les noms employés en production et
+          # doit s'étendre si un nouveau paraît ; la protection de fond, elle,
+          # est le couple de TASK-29 sur `states.rs`, qui prouve qu'un `set` nu
+          # vers l'état courant despawne, là où `set_if_neq` est inerte.
+          forbid  "critère 4  set nu hors de la soumission" -n '\b(next|phase|app_state|etat)\.set\(' crates/game_state/src -g '!**/submission.rs'
           require "critère 4  arbitre en lecture seule"  -n 'blind: Option<Res<BlindContext>>' "$SETUP/round_end.rs"
           require "critère 4  transitions qualifiées"    -n 'NextState::set_if_neq' "$SETUP/round_end.rs"
 

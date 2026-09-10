@@ -502,6 +502,36 @@ mod tests {
         assert_eq!(phase(&app), Some(RunPhase::RoundEnd));
     }
 
+    #[derive(Resource, Default)]
+    struct EntreesDansRoundEnd(usize);
+
+    #[test]
+    fn test_round_end_transition_once() {
+        // **Trou trouvé par l'audit de fin d'étape.** La transition vers
+        // `RoundEnd` a changé de main à TASK-50 — le commit vit dans le juice,
+        // la sortie de phase reste ici — et personne n'avait écrit qu'elle n'a
+        // lieu qu'une fois. Un `set()` nu au lieu de `set_if_neq`, ou une
+        // condition qui resterait vraie, la rejouerait à chaque frame.
+        let mut app = app_en_run(CupId::Standard);
+        app.init_resource::<EntreesDansRoundEnd>();
+        app.add_systems(
+            OnEnter(RunPhase::RoundEnd),
+            |mut compteur: ResMut<EntreesDansRoundEnd>| compteur.0 += 1,
+        );
+
+        cas_roll_vers_scoring(&mut app);
+        vider_et_commettre(&mut app);
+        for _ in 0..100 {
+            app.update();
+        }
+
+        assert_eq!(
+            app.world().resource::<EntreesDansRoundEnd>().0,
+            1,
+            "la fin de manche a été jouée plusieurs fois"
+        );
+    }
+
     #[test]
     fn test_scoring_never_leaves_while_steps_remain() {
         // **Ceinture et bretelles, et c'est délibéré.** Aujourd'hui `committed`

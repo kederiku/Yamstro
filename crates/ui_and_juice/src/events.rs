@@ -138,8 +138,22 @@ mod tests {
         assert_eq!(message.action, effet.action);
     }
 
+    /// Aucune ressource audio n'est enregistrée par `JuicePlugin`.
+    ///
+    /// **Le nom est celui qu'impose le corpus ; la méthode ne l'est pas.** Il
+    /// proposait de scanner le registre de types du `World`, or
+    /// `ComponentInfo::name()` rend un `DebugName` vide sans la feature
+    /// `bevy_utils/debug`, absente de notre graphe : tous les noms valent le
+    /// même texte de remplacement, un diff par nom annonce que le plugin
+    /// n'ajoute **aucune** ressource alors qu'il en ajoute deux, et un scan
+    /// cherchant « Audio » passerait sur une application pleine de ressources
+    /// audio.
+    ///
+    /// L'inventaire porte donc sur des **types concrets** et un **delta de
+    /// compte** : ajouter la moindre ressource au plugin fait échouer ce test,
+    /// audio ou non.
     #[test]
-    fn test_juice_plugin_inserts_exactly_its_own_resources() {
+    fn test_no_audio_resource_registered() {
         let mut base = App::new();
         base.add_plugins(MinimalPlugins);
         let avant = base.world().iter_resources().count();
