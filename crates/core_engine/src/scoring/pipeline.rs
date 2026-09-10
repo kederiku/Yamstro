@@ -1,4 +1,9 @@
-//! Passe A : production pure des effets, sans aucune mutation.
+//! Les deux passes du calcul de score.
+//!
+//! La **passe A** produit une liste ordonnée d'effets sans jamais toucher au
+//! score ; la **passe B** la replie sur un `ScoreContext` et rend le journal.
+//! Cette séparation est ce qui rend le journal rejouable : l'ordre de
+//! production et l'ordre d'application restent distincts et vérifiables.
 
 use smallvec::SmallVec;
 
@@ -9,7 +14,9 @@ use crate::hands::{HandLevels, YahtzeeHand};
 use crate::relics::effects::effects_for;
 use crate::relics::{RelicInventory, RelicState};
 use crate::scoring::levels::resolved_base;
-use crate::scoring::{Hook, ScoreAction, ScoreEffect, StepSource, TriggerCtx};
+use crate::scoring::{
+    Hook, ScoreAction, ScoreContext, ScoreEffect, ScoreStep, ScoringReport, StepSource, TriggerCtx,
+};
 
 /// Premier segment de la passe A : la base de la figure, en deux effets.
 ///
@@ -249,6 +256,58 @@ fn pass_a_with<O: FnMut(Hook, &TriggerCtx<'_>)>(
     );
 
     effects
+}
+
+/// Passe B : replie les effets de la passe A et rend le journal.
+///
+/// **C'est la seule fonction du moteur qui mute un `ScoreContext`.** Elle
+/// émet exactement un `ScoreStep` par `ScoreEffect`, dans l'ordre reçu :
+/// aucun effet n'est fusionné, aucun palier n'est ajouté « pour la
+/// lisibilité », aucun n'est réordonné. Chaque pas porte l'état **après**
+/// application, jamais avant.
+///
+/// **Le journal est rejouable.** Repartir d'un contexte neuf et appliquer les
+/// actions des pas dans l'ordre reproduit `final_score` exactement. C'est ce
+/// qui autorise l'animation de l'Étape 4 à dépiler le journal palier par
+/// palier sans jamais recalculer : elle rejoue ce qui a été commis.
+///
+/// Le contexte part de `{ chips: 0, mult: 0 }`, si bien que le premier pas
+/// d'un journal rend un score nul tant que le Mult n'est pas posé. Le poser à
+/// cent « pour respecter le plancher » casserait l'exemple normatif : ce
+/// plancher appartient aux producteurs d'effets, et un blind qui ramène tout
+/// le Mult à un a besoin de descendre.
+///
+/// L'arithmétique n'est pas réimplémentée ici : `add_chips`, `add_mult`,
+/// `multiply_mult` et `final_score` sont normatifs dans `context.rs`, et
+/// `score_after` se **recalcule** à chaque pas plutôt que de s'accumuler. Une
+/// accumulation serait fausse dès la première multiplication, le score étant
+/// un produit réévalué et non une somme de contributions.
+pub fn pass_b(effects: &[ScoreEffect]) -> ScoringReport {
+    let mut ctx = ScoreContext::default();
+    let mut steps = Vec::with_capacity(effects.len());
+
+    for effect in effects {
+        match effect.action {
+            ScoreAction::AddChips(chips) => ctx.add_chips(chips),
+            ScoreAction::AddMult(mult) => ctx.add_mult(mult),
+            ScoreAction::MultiplyMult(percent) => ctx.multiply_mult(percent),
+        }
+
+        steps.push(ScoreStep {
+            source: effect.source,
+            action: effect.action,
+            chips_after: ctx.chips,
+            mult_after: ctx.mult,
+            score_after: ctx.final_score(),
+        });
+    }
+
+    ScoringReport {
+        final_score: ctx.final_score(),
+        chips: ctx.chips,
+        mult: ctx.mult,
+        steps,
+    }
 }
 
 #[cfg(test)]
@@ -751,6 +810,184 @@ mod tests {
 
             assert!(effets_de_relique(&effects).is_empty());
         }
+    }
+
+    // ---- Passe B : repliement des effets et journal ----
+
+    /// Les neuf effets de l'exemple résolu du corpus, écrits à la main.
+    ///
+    /// **Fixture partagée avec TASK-26.** Elle est littérale et non produite
+    /// par la passe A : c'est ce qui permet à
+    /// `test_nine_steps_of_the_worked_example` de comparer les deux et de voir
+    /// une divergence entre le corpus et le moteur, au lieu de la masquer.
+    fn neuf_effets_de_lexemple() -> Vec<ScoreEffect> {
+        let base = StepSource::HandBase {
+            hand: YahtzeeHand::FullHouse,
+        };
+        let mut effects = vec![
+            ScoreEffect {
+                source: base,
+                action: ScoreAction::AddChips(30),
+            },
+            ScoreEffect {
+                source: base,
+                action: ScoreAction::AddMult(400),
+            },
+        ];
+        for (id, value) in [(0_u32, 5_u8), (1, 5), (2, 5), (3, 2), (4, 2)] {
+            effects.push(ScoreEffect {
+                source: StepSource::Die {
+                    die_id: DieId(id),
+                    value,
+                },
+                action: ScoreAction::AddChips(u64::from(value)),
+            });
+        }
+        effects.push(ScoreEffect {
+            source: StepSource::Relic {
+                uid: 1,
+                def: RelicId::MagicPair,
+            },
+            action: ScoreAction::AddMult(400),
+        });
+        effects.push(ScoreEffect {
+            source: StepSource::Relic {
+                uid: 2,
+                def: RelicId::BrokenGlass,
+            },
+            action: ScoreAction::MultiplyMult(150),
+        });
+        effects
+    }
+
+    /// Les cinq colonnes de la table du § 2.3, dans l'ordre.
+    const NEUF_PAS: [(u64, i64, u64); 9] = [
+        (30, 0, 0),
+        (30, 400, 120),
+        (35, 400, 140),
+        (40, 400, 160),
+        (45, 400, 180),
+        (47, 400, 188),
+        (49, 400, 196),
+        (49, 800, 392),
+        (49, 1200, 588),
+    ];
+
+    #[test]
+    fn test_steps_are_consistent() {
+        // La passe A est **pure** : aucun `ScoreContext` n'entre dans sa
+        // signature ni n'en sort. La garde était un `rg` sur ce fichier, qui
+        // cesse de garder quoi que ce soit maintenant que la passe B y vit ;
+        // la borne, elle, tombe si un contexte s'y invite.
+        fn exige_pure<
+            T: Fn(&HandMatch, &[Die], &HandLevels, &BlindContext, &RelicInventory) -> Vec<ScoreEffect>,
+        >(
+            _: T,
+        ) {
+        }
+        exige_pure(pass_a);
+
+        fn exige_repli<T: Fn(&[ScoreEffect]) -> ScoringReport>(_: T) {}
+        exige_repli(pass_b);
+
+        let effects = neuf_effets_de_lexemple();
+        let report = pass_b(&effects);
+
+        // Chaque pas porte l'état **après** son action, jamais avant.
+        let mut rejeu = ScoreContext::default();
+        for (position, step) in report.steps.iter().enumerate() {
+            match step.action {
+                ScoreAction::AddChips(n) => rejeu.add_chips(n),
+                ScoreAction::AddMult(n) => rejeu.add_mult(n),
+                ScoreAction::MultiplyMult(p) => rejeu.multiply_mult(p),
+            }
+            assert_eq!(step.chips_after, rejeu.chips, "pas {}", position + 1);
+            assert_eq!(step.mult_after, rejeu.mult, "pas {}", position + 1);
+            assert_eq!(
+                step.score_after,
+                rejeu.final_score(),
+                "pas {}",
+                position + 1
+            );
+        }
+
+        // Rejouer le journal depuis un contexte neuf reproduit le score commis :
+        // c'est ce qui autorise l'Étape 4 à animer le journal sans jamais
+        // recalculer.
+        assert_eq!(rejeu.final_score(), report.final_score);
+        assert_eq!(rejeu.chips, report.chips);
+        assert_eq!(rejeu.mult, report.mult);
+    }
+
+    #[test]
+    fn test_nine_steps_of_the_worked_example() {
+        let attendus = neuf_effets_de_lexemple();
+
+        // Le moteur produit-il l'exemple du corpus ? Sans cette comparaison, le
+        // repliement pourrait être juste sur une liste que la passe A ne
+        // produit jamais.
+        let (dice, hand) = main_pleine();
+        let relics = inventaire(&[Some(RelicId::MagicPair), Some(RelicId::BrokenGlass)]);
+        let produits = pass_a(&hand, &dice, &HandLevels::default(), &blind_nu(), &relics);
+        assert_eq!(produits, attendus);
+
+        let report = pass_b(&attendus);
+
+        assert_eq!(report.steps.len(), 9);
+        for (position, (chips, mult, score)) in NEUF_PAS.iter().enumerate() {
+            let step = &report.steps[position];
+            assert_eq!(
+                step.source,
+                attendus[position].source,
+                "pas {}",
+                position + 1
+            );
+            assert_eq!(
+                step.action,
+                attendus[position].action,
+                "pas {}",
+                position + 1
+            );
+            assert_eq!(step.chips_after, *chips, "pas {}", position + 1);
+            assert_eq!(step.mult_after, *mult, "pas {}", position + 1);
+            assert_eq!(step.score_after, *score, "pas {}", position + 1);
+        }
+
+        // Le premier pas vaut zéro : le Mult n'est pas encore posé et
+        // `30 × 0 = 0`. Poser un plancher pour que « ça ait l'air correct »
+        // casserait l'exemple et l'affichage de l'Étape 4.
+        assert_eq!(report.steps[0].score_after, 0);
+        assert_eq!(report.final_score, 588);
+        assert_eq!(report.chips, 49);
+        assert_eq!(report.mult, 1200);
+    }
+
+    #[test]
+    fn test_one_step_per_effect() {
+        let effects = neuf_effets_de_lexemple();
+
+        for longueur in [1, 3, 7, effects.len()] {
+            let tranche = &effects[..longueur];
+            let report = pass_b(tranche);
+
+            assert_eq!(report.steps.len(), longueur);
+            // Un pas par effet **et dans le même ordre** : compter ne suffit
+            // pas, une permutation ou une substitution de source passerait.
+            for (step, effect) in report.steps.iter().zip(tranche) {
+                assert_eq!(step.source, effect.source);
+                assert_eq!(step.action, effect.action);
+            }
+        }
+    }
+
+    #[test]
+    fn test_empty_effects_yield_empty_report() {
+        let report = pass_b(&[]);
+
+        assert!(report.steps.is_empty());
+        assert_eq!(report.final_score, 0);
+        assert_eq!(report.chips, 0);
+        assert_eq!(report.mult, 0);
     }
 
     #[test]

@@ -9,6 +9,6 @@ mod trigger;
 
 pub use context::ScoreContext;
 pub use effect::{ScoreAction, ScoreEffect, StepSource};
-pub use pipeline::pass_a;
+pub use pipeline::{pass_a, pass_b};
 pub use report::{ScoreStep, ScoringReport};
 pub use trigger::{Hook, TriggerCtx};
