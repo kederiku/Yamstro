@@ -93,6 +93,9 @@ jobs:
           # dans le pipeline produirait des effets fantômes dans le journal.
           forbid  "critère 10 hooks non câblés"          -n 'OnRoll|OnRoundEnd' "$SRC/scoring" -g '!**/trigger.rs'
           forbid  "critère 10 le mot défausse"           -ni 'défausse|defausse' crates/
+          # § 1.5 : RunSession.gold est la seule source de vérité de l'or.
+          # `gold` est canonique ; ces deux noms-là ne le sont pas.
+          forbid  "critère 10 noms proscrits pour l'or"  -n '\bmoney\b|\bRunEconomy\b' crates/
           forbid  "critère 5  ReflectResource"           -n 'ReflectResource|reflect\(Resource\)' crates/
 
           # ---- Étape 2 : invariants de clôture (TASK-27, volet 1) ----
