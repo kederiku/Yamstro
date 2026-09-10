@@ -13,16 +13,12 @@
 //! panique. Même doctrine qu'à TASK-28 pour le gestionnaire d'erreur, le choix
 //! appartient au binaire final.
 //!
-//! # Le gel par l'overlay est posé sur le système, pas sur le set
+//! # Le gel par l'overlay vit dans son propre ensemble
 //!
-//! `SettingsOverlay` gèle ce système, et lui seul. Geler le `SystemSet`
-//! `HandlingInput` entier serait plus économique et poserait un piège
-//! silencieux : `toggle_settings_overlay` (TASK-39) **est** une entrée, et s'il
-//! rejoignait ce set, l'overlay ouvert gèlerait la touche qui le ferme.
-//!
-//! Quand TASK-36 ajoutera `select_hand` et `submit_hand`, le bon geste sera un
-//! sous-ensemble dédié aux entrées gelées par l'overlay, avec la bascule
-//! délibérément dehors — pas un gel du set entier posé aujourd'hui à l'aveugle.
+//! `InputSet::FrozenByOverlay` (déclaré dans `plugin.rs`) porte la condition,
+//! et non `GameSet::HandlingInput` tout entier : `toggle_settings_overlay`
+//! (TASK-39) **est** une entrée, et c'est celle qui ferme l'overlay. La geler
+//! enfermerait le joueur dans un menu qu'aucune touche ne peut plus quitter.
 //!
 //! # Pourquoi deux filtres sur le verrouillage
 //!
@@ -35,10 +31,13 @@
 use bevy::prelude::*;
 use core_engine::dice::{Die, DieId};
 
+use core_engine::hands::{HandGrid, YahtzeeHand};
+
 use crate::components::{DieView, Locked};
-use crate::plugin::GameSet;
+use crate::plugin::InputSet;
 use crate::resources::{HandContext, RunSession};
-use crate::states::{RunPhase, SettingsOverlay};
+use crate::states::RunPhase;
+use crate::systems::evaluation::is_hand_available;
 
 /// Touches de rang, dans l'ordre. `KeyCode` est un enum sans arithmétique : la
 /// correspondance rang vers touche doit bien être écrite quelque part, et ce
@@ -87,9 +86,30 @@ pub(crate) fn toggle_lock(commands: &mut Commands, entity: Entity, die: &mut Die
     }
 }
 
-/// Vrai tant que l'overlay des paramètres est fermé.
-fn overlay_is_closed(overlay: Res<SettingsOverlay>) -> bool {
-    !overlay.open
+/// Choisit une case de la grille.
+///
+/// **Point d'entrée unique de l'écriture de la figure choisie**, la remise à
+/// zéro de `setup_round` mise à part. C'est l'invariant qui empêche
+/// l'auto-sélection de revenir par une porte dérobée (ADR-001), et il se
+/// vérifie mécaniquement.
+///
+/// Une fonction, et non un système : le clic sur une case est câblé aux Étapes
+/// 7 et 11, et aucun composant de case n'existe encore. Un système enregistré
+/// qui ne lit aucune entrée donnerait l'illusion que la sélection est branchée.
+/// Le clic appellera ceci, sans le réécrire.
+///
+/// **La sélection porte sur la case, pas sur une figure réalisée.** Une case
+/// dont la figure n'apparaît pas dans les évaluations reste choisissable :
+/// sans cela, *La Fissure* (Étape 6), qui laisse la liste vide, rendrait la
+/// grille injouable. Une case déjà consommée est un no-op silencieux.
+///
+/// Publique, comme `resolve_rerolls` (TASK-32) : aucun système ne l'appelle
+/// avant que le clic existe, et une fonction privée sans appelant est du code
+/// mort refusé sous `-D warnings`.
+pub fn select_hand(hand: &mut HandContext, used: &HandGrid, cell: YahtzeeHand) {
+    if is_hand_available(used, cell) {
+        hand.selected_hand = Some(cell);
+    }
 }
 
 /// Rang d'affichage visé par une touche. `dice_count` étant un `u8`, la
@@ -158,9 +178,8 @@ pub(crate) fn register(app: &mut App) {
     app.add_systems(
         Update,
         handle_dice_input
-            .in_set(GameSet::HandlingInput)
-            .run_if(in_state(RunPhase::Roll))
-            .run_if(overlay_is_closed),
+            .in_set(InputSet::FrozenByOverlay)
+            .run_if(in_state(RunPhase::Roll)),
     );
 }
 

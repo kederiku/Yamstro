@@ -25,6 +25,27 @@ pub enum GameSet {
     Resolving,
 }
 
+/// Entrées gelées par l'overlay des paramètres.
+///
+/// **Un ensemble à une seule raison d'être.** Il vit dans `GameSet::HandlingInput`
+/// et n'y ajoute que la condition de gel ; chaque système y garde sa propre
+/// condition d'état.
+///
+/// **Ce qui doit rester dehors.** `toggle_settings_overlay` (TASK-39) est une
+/// entrée, et c'est celle qui **ferme** l'overlay : la placer ici enfermerait
+/// le joueur dans un menu qu'aucune touche ne peut plus quitter. C'est
+/// précisément pour éviter ce piège que le gel n'est pas posé sur
+/// `HandlingInput` tout entier.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InputSet {
+    FrozenByOverlay,
+}
+
+/// Vrai tant que l'overlay des paramètres est fermé.
+pub(crate) fn overlay_is_closed(overlay: Res<SettingsOverlay>) -> bool {
+    !overlay.open
+}
+
 /// Plugin racine de la machine à états.
 ///
 /// Il pose l'ordre des quatre ensembles, une fois pour toutes, puis délègue
@@ -51,9 +72,17 @@ impl Plugin for GameStatePlugin {
                 .chain(),
         );
 
+        app.configure_sets(
+            Update,
+            InputSet::FrozenByOverlay
+                .in_set(GameSet::HandlingInput)
+                .run_if(overlay_is_closed),
+        );
+
         crate::systems::setup::register(app);
         crate::systems::input::register(app);
         crate::systems::evaluation::register(app);
+        crate::systems::submission::register(app);
     }
 }
 

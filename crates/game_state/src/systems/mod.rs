@@ -5,3 +5,4 @@ pub mod evaluation;
 pub(crate) mod fixtures;
 pub mod input;
 pub mod setup;
+pub mod submission;
