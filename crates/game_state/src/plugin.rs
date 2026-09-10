@@ -88,6 +88,7 @@ impl Plugin for GameStatePlugin {
         crate::systems::input::register(app);
         crate::systems::evaluation::register(app);
         crate::systems::submission::register(app);
+        crate::systems::round_end::register(app);
     }
 }
 

@@ -222,7 +222,7 @@ fn current_blind_definition(session: &RunSession) -> BlindDefinition {
 /// Les deux variantes en attente de `NextState` sont couvertes : `Pending`,
 /// posée par `set`, et `PendingIfNeq`, posée par `set_if_neq`. N'en couvrir
 /// qu'une laisserait la garde muette selon l'appelant.
-fn victory_is_pending(next: Res<NextState<AppState>>) -> bool {
+pub(crate) fn victory_is_pending(next: Res<NextState<AppState>>) -> bool {
     matches!(
         *next,
         NextState::Pending(AppState::Victory) | NextState::PendingIfNeq(AppState::Victory)
