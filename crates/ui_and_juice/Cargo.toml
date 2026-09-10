@@ -1,0 +1,25 @@
+# crates/ui_and_juice/Cargo.toml
+[package]
+name = "ui_and_juice"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+# Aligné sur les deux autres crates : sans cela, `cargo deny` compte la crate
+# comme non licenciée, `deny.toml` n'ignorant que les paquets privés.
+publish = false
+
+[dependencies]
+# La version accompagne le chemin, sur les deux : une dépendance de chemin nue
+# est comptée comme une dépendance joker, que `deny.toml` refuse.
+core_engine = { path = "../core_engine", version = "0.1.0", features = ["bevy"] }
+game_state = { path = "../game_state", version = "0.1.0" }
+# Liste strictement identique à celle de `game_state` : ni `bevy_audio`, ni
+# `vorbis`, aucune feature 3D. En 0.19 `audio` n'est plus impliquée par `2d`,
+# `3d` ni `ui`, et une feature absente l'est **sans erreur de compilation** :
+# cette liste se lit comme un contrat.
+bevy = { workspace = true, default-features = false, features = [
+  "bevy_asset", "bevy_color", "bevy_core_pipeline",
+  "bevy_render", "bevy_sprite", "bevy_state", "bevy_text",
+  "bevy_ui", "bevy_window", "bevy_winit",
+  "multi_threaded", "png", "x11", "webgl2",
+] }

@@ -221,7 +221,14 @@ jobs:
           # positif. Et sa garde « ParamSet » refusait un ParamSet livré à
           # TASK-34 sur deux requêtes de dés, sans rapport avec les Transform :
           # elle est remplacée, pas contournée.
-          forbid  "critère 4  unique écrivain de Transform" -n '&mut Transform' crates/game_state/src -g '!**/animation.rs'
+          # Élargie à TOUT le workspace à l'ouverture de l'Étape 4, et
+          # l'exclusion porte le **chemin exact** du seul fichier autorisé —
+          # non plus « n'importe quel animation.rs ». Sans cela, la migration
+          # du juice vers `ui_and_juice` créerait un second écrivain dans un
+          # second fichier du même nom, que la garde aurait laissé passer.
+          # Quand le fichier déménagera, cette ligne devra bouger avec lui,
+          # délibérément.
+          forbid  "critère 4  unique écrivain de Transform" -n '&mut Transform' crates/ -g '!crates/game_state/src/systems/animation.rs'
           require "critère 4  l'animation écrit le Transform" -n 'Query<\(Entity, &mut Transform, &mut PunchScale\)>' "$SETUP/animation.rs"
           forbid  "critère 4  overlay transformé en état" -n 'AppState::Settings|RunPhase::Settings|SettingsState' crates/game_state/src
 
@@ -234,6 +241,15 @@ jobs:
           forbid  "critère 4  lto partiel"               -n 'lto\s*=\s*"thin"' .
           forbid  "critère 4  nom wgpu de 0.18"          -n 'WgpuSettingsPriority::Compatibility' .
           require "critère 4  référence de taille wasm"  -n '^[0-9]+$' ci/wasm-size-baseline.txt
+
+          # ---- Étape 4 : mise en scène (TASK-42) ----
+          # Ancrées sur une **déclaration de dépendance**, jamais sur le nom.
+          # Dans leur forme nue, les deux gardes du § 4 de TASK-42 n'attrapent
+          # que le commentaire du manifeste qui dit qu'on n'en veut pas, et le
+          # `//!` qui explique que ces combinateurs n'existent plus. Vingt-
+          # deuxième et vingt-troisième fois dans ce projet.
+          forbid  "critère 4  dépendance de tweening ou audio" -n '^\s*[a-z0-9_-]*(tween|kira|rodio|audio|vorbis|symphonia)[a-z0-9_-]*\s*=|"(bevy_audio|vorbis)"' --glob '**/Cargo.toml' crates/
+          forbid  "critère 4  dépendance inverse vers le juice" -n 'ui_and_juice' crates/game_state crates/core_engine
 
           exit $status
 

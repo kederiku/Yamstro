@@ -1,7 +1,7 @@
 # Cargo.toml — racine du workspace
 [workspace]
 resolver = "3"
-members = ["crates/core_engine", "crates/game_state"]
+members = ["crates/core_engine", "crates/game_state", "crates/ui_and_juice"]
 
 [workspace.package]
 edition = "2024"
