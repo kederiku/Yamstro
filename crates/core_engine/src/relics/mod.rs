@@ -3,6 +3,8 @@
 #[cfg(feature = "bevy")]
 use bevy_ecs::reflect::ReflectComponent;
 
+pub mod effects;
+
 /// Identité d'une relique. Enum **unit-only** : aucune variante ne porte de
 /// donnée, ce qui le garde `Copy` et donc stockable dans un `StepSource` lui
 /// aussi `Copy`. Les paramètres d'une relique vivent dans `effects_for`
