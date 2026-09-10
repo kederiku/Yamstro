@@ -16,3 +16,29 @@ rand_chacha  = { version = "0.10", features = ["serde"] }
 serde        = { version = "1", features = ["derive"] }
 serde_json   = "1"
 smallvec     = { version = "1", features = ["serde", "union"] }
+
+# Profils de compilation — ils vivent **à la racine du workspace**. Placés dans
+# le manifeste d'une crate membre, ils sont ignorés avec un simple
+# avertissement, et la mesure de taille serait faite avec le profil par défaut.
+[profile.release]
+opt-level = 3
+lto = "fat"              # "thin" ne suffit pas pour le budget WASM
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# **Ce profil n'est pas décoratif.** `panic = "abort"` et `strip = true`
+# réduisent la taille et rendent impossible toute remontée de crash symbolisée :
+# un rapport issu d'un binaire `release` est illisible, et rien ne se rattrape
+# après coup. Les trois lignes ci-dessous sont nécessaires **ensemble** :
+# le déroulement de pile pour qu'un collecteur ait quelque chose à lire, le
+# retrait du seul DWARF pour garder la table des symboles, et son rangement
+# dans un paquet séparé, à archiver avec le build et à ne jamais expédier.
+#
+# Le WASM se compile en `release` ; le desktop expédié en `release-with-debug`
+# dès qu'une remontée de crash est branchée.
+[profile.release-with-debug]
+inherits = "release"
+panic = "unwind"
+strip = "debuginfo"
+split-debuginfo = "packed"

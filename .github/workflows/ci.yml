@@ -222,4 +222,55 @@ jobs:
           require "critère 4  l'animation écrit le Transform" -n 'Query<\(Entity, &mut Transform, &mut PunchScale\)>' "$SETUP/animation.rs"
           forbid  "critère 4  overlay transformé en état" -n 'AppState::Settings|RunPhase::Settings|SettingsState' crates/game_state/src
 
+          # ---- Étape 3 : budget WebAssembly (TASK-40) ----
+          # Les profils vivent à la racine du workspace. Dans le manifeste d'une
+          # crate membre ils sont ignorés, avec un simple avertissement, et la
+          # mesure de taille serait faite avec le profil par défaut — c'est-à-
+          # dire fausse de plusieurs mégaoctets, sans que rien ne le signale.
+          forbid  "critère 4  profils hors de la racine" -n '^\[profile' crates/ --glob '**/Cargo.toml'
+          forbid  "critère 4  lto partiel"               -n 'lto\s*=\s*"thin"' .
+          forbid  "critère 4  nom wgpu de 0.18"          -n 'WgpuSettingsPriority::Compatibility' .
+          require "critère 4  référence de taille wasm"  -n '^[0-9]+$' ci/wasm-size-baseline.txt
+
           exit $status
+
+  # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en
+  # `lto = "fat"` avec `codegen-units = 1` se compte en minutes ; l'agréger au
+  # job de validation ferait passer chaque PR d'une minute quarante à vingt
+  # minutes, y compris pour un changement d'une ligne de documentation.
+  taille-wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain (pilotée par rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+          rustup show active-toolchain
+
+      # Les deux versions sont **épinglées**. `wasm-bindgen` doit correspondre
+      # exactement à la version de la crate que Bevy 0.19.1 tire, faute de quoi
+      # l'outil refuse le module. Et une montée de binaryen fait bouger la
+      # mesure sans qu'une seule ligne du projet ait changé : une référence
+      # n'est comparable que si la chaîne est figée.
+      #
+      # Le binaire pré-compilé, jamais `cargo install` : compiler
+      # `wasm-bindgen-cli` à froid dépasse à lui seul le budget de temps du job
+      # de validation.
+      - name: wasm-bindgen 0.2.128 et binaryen 132, épinglés
+        run: |
+          set -euo pipefail
+          curl -sSfL https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.128/wasm-bindgen-0.2.128-x86_64-unknown-linux-musl.tar.gz \
+            | tar -xz --strip-components=1 -C /usr/local/bin --wildcards '*/wasm-bindgen'
+          curl -sSfL https://github.com/WebAssembly/binaryen/releases/download/version_132/binaryen-version_132-x86_64-linux.tar.gz \
+            | tar -xz --strip-components=2 -C /usr/local/bin binaryen-version_132/bin/wasm-opt
+          wasm-bindgen --version
+          wasm-opt --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+
+      - name: Mesure et comparaison à la référence
+        run: ci/check-wasm-size.sh

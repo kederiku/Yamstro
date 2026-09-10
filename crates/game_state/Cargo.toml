@@ -18,3 +18,19 @@ bevy = { workspace = true, default-features = false, features = [
   "bevy_ui", "bevy_window", "bevy_winit",
   "multi_threaded", "png", "x11", "webgl2",
 ] }
+
+# `getrandom` refuse `wasm32-unknown-unknown` par défaut : sans cette feature,
+# la compilation s'arrête sur un `compile_error!`, et il n'y a pas de mesure de
+# taille du tout. Elle arrive ici par `rand`, à travers `core_engine`. C'est la
+# voie documentée en amont, pas un contournement : la crate exige que la cible
+# web déclare explicitement son fournisseur d'aléa.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
+[features]
+# Réserve la cible de mesure de taille WebAssembly. Voir `src/bin/wasm_size.rs`.
+measure = []
+
+[[bin]]
+name = "wasm_size"
+required-features = ["measure"]
