@@ -52,18 +52,15 @@ mod tests {
     use super::*;
     use crate::blind::{BlindContext, BlindModifier};
     use crate::hands::YahtzeeHand;
-    use smallvec::smallvec;
 
     fn sans_modificateur() -> BlindContext {
-        BlindContext {
-            modifiers: smallvec![],
-        }
+        BlindContext::de_test(None)
     }
 
     fn avec(modifiers: &[BlindModifier]) -> BlindContext {
-        BlindContext {
-            modifiers: modifiers.iter().copied().collect(),
-        }
+        // Un blind ne porte qu'un modificateur ; les tests qui en passaient
+        // deux vérifiaient un empilement que la définition ne permet plus.
+        BlindContext::de_test(modifiers.first().copied())
     }
 
     #[test]
@@ -123,18 +120,28 @@ mod tests {
     }
 
     #[test]
-    fn test_both_modifiers_apply_in_documented_order() {
-        // Convention : HalveBaseScores puis AllMultToOne. Sur cette paire, le
-        // plancher fait coïncider les deux ordres ; le test verrouille la
-        // convention, il ne la discrimine pas.
+    fn test_single_modifier_per_blind() {
+        // **L'empilement a été retiré.** Une définition de blind ne porte plus
+        // qu'un modificateur, `Option<BlindModifier>`, ce qui rend sans objet
+        // l'ordre d'application que ce test verrouillait auparavant. Reste
+        // vérifiable : chacun des deux, seul, produit le résultat documenté.
         let levels = HandLevels::default();
+
         assert_eq!(
             resolved_base(
                 YahtzeeHand::FullHouse,
                 &levels,
-                &avec(&[BlindModifier::HalveBaseScores, BlindModifier::AllMultToOne])
+                &avec(&[BlindModifier::HalveBaseScores])
             ),
-            (15, 100)
+            (15, 200)
+        );
+        assert_eq!(
+            resolved_base(
+                YahtzeeHand::FullHouse,
+                &levels,
+                &avec(&[BlindModifier::AllMultToOne])
+            ),
+            (30, 100)
         );
     }
 

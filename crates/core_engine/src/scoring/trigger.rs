@@ -89,7 +89,6 @@ impl<'a> TriggerCtx<'a> {
 
 #[cfg(test)]
 mod tests {
-    use smallvec::SmallVec;
 
     use super::*;
     use crate::blind::BlindContext;
@@ -113,9 +112,7 @@ mod tests {
     }
 
     fn blind() -> BlindContext {
-        BlindContext {
-            modifiers: SmallVec::new(),
-        }
+        BlindContext::de_test(None)
     }
 
     fn effects() -> Vec<ScoreEffect> {
