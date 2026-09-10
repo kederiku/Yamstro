@@ -341,6 +341,32 @@ jobs:
           require "critère 4  plafond de vitesse"        -n '\.min\(8\.0\)' crates/game_state/src/resources.rs
           forbid  "critère 4  vitesse écrite hors du setter" -n '^\s*[A-Za-z_][A-Za-z0-9_.]*\.speed_multiplier\s*[-+*/]?=' crates/ -g '!crates/game_state/src/resources.rs'
 
+          # ---- Étape 4 : cadence de dépilement (TASK-48) ----
+          # Le compte exact des périodes franchies, jamais un booléen : un
+          # `Repeating` réenroule son elapsed, et `finished()` jetterait tout ce
+          # qui dépasse une période dans le même tic.
+          require "critère 4  compte exact des périodes" -n 'times_finished_this_tick\(\)' crates/ui_and_juice/src/queue.rs
+          forbid  "critère 4  cadence testée par un booléen" -n 'step_timer\.(finished|just_finished)\(\)' crates/
+          # L'accélération multiplie le pas de temps ; `Timer` n'a pas de champ
+          # vitesse, et régler l'horloge globale accélérerait aussi la pause
+          # finale et les animations.
+          require "critère 4  pas de temps multiplié" -n 'time\.delta\(\)\.mul_f32\(' crates/ui_and_juice/src/queue.rs
+          forbid  "critère 4  horloge globale détournée" -n 'set_relative_speed|Virtual>|relative_speed\(' crates/
+          # Ancrés sur un accès, pas sur le mot : le module doit pouvoir écrire
+          # que la pause finale et le commit ne sont pas de son ressort.
+          forbid  "critère 4  pause finale touchée par le dépileur" -n '\.final_pause' crates/ui_and_juice/src/queue.rs
+          # Ancré sur les trois champs du commit, sans `NextState` : la fixture
+          # de test pilote légitimement les états pour entrer dans la phase, et
+          # TASK-50 y écrira sa transition — une garde que le ticket suivant
+          # doit supprimer n'est pas une garde.
+          forbid  "critère 4  commit avancé dans le dépileur" -n '\.(current_score|hands_remaining|used_hands)\b' crates/ui_and_juice/src/queue.rs
+          forbid  "critère 4  dépilement par la fin"      -n 'steps\.pop_back|steps\.remove\(' crates/
+          forbid  "critère 4  panique par unwrap"         -n '\.unwrap\(\)' crates/
+          # L'accès du dépileur est énuméré dans un seul type : y ajouter un
+          # Transform se voit là, et la file n'y est pas.
+          require "critère 4  accès du dépileur groupés" -nU 'derive\(SystemParam\)\]\npub struct DispatchParams' crates/ui_and_juice/src/queue.rs
+          forbid  "critère 4  file empruntée par le dépileur" -n 'fn dispatch_step\([^)]*ScoringStepQueue' crates/ui_and_juice/src/queue.rs
+
           exit $status
 
   # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en

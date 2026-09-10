@@ -36,6 +36,7 @@
 
 pub mod animation;
 pub mod events;
+pub mod queue;
 pub mod settings;
 
 use bevy::prelude::*;
@@ -95,12 +96,24 @@ impl Plugin for JuicePlugin {
             )
                 .in_set(JuiceSet::Animation),
         );
+
+        // Les deux premiers maillons du dépilement. Le chaînage et la garde
+        // d'état viennent du `configure_sets` ci-dessus : les répéter ici ne
+        // ferait que doubler ce qui existe déjà.
+        app.add_systems(
+            Update,
+            (
+                crate::queue::read_fast_forward_input.in_set(JuiceSet::ReadInput),
+                crate::queue::tick_scoring_queue.in_set(JuiceSet::TickQueue),
+            ),
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::input::InputPlugin;
     use bevy::state::app::StatesPlugin;
     use game_state::{AppState, RunPhase};
 
@@ -110,23 +123,27 @@ mod tests {
 
     fn app_juice() -> App {
         let mut app = App::new();
-        app.add_plugins((MinimalPlugins, StatesPlugin, JuicePlugin));
+        app.add_plugins((MinimalPlugins, StatesPlugin, InputPlugin, JuicePlugin));
         app
     }
 
-    /// Pose les deux états à la main.
+    /// Pose les deux états et la file à la main.
     ///
-    /// `JuicePlugin` ne les initialise pas — c'est le travail de
+    /// `JuicePlugin` n'initialise ni l'un ni l'autre — c'est le travail de
     /// `GameStatePlugin` — et le monter ici ferait entrer toute la machine de
-    /// jeu, plus `InputPlugin` dont il dépend depuis TASK-39, dans un test qui
-    /// ne vérifie que l'ordonnancement de ce plugin-ci.
+    /// jeu dans un test qui ne vérifie que l'ordonnancement de ce plugin-ci.
     ///
     /// **Sans états, les trois sets gardés ne tournent jamais** : la condition
     /// rend `false` sans paniquer, et un test d'ordre passerait sur une liste
-    /// vide.
+    /// vide. **Avec** les états, en revanche, le dépilement de TASK-48 tourne,
+    /// et il réclame la file : sans elle le système panique, sans même pouvoir
+    /// nommer la ressource manquante — les noms de type valent tous
+    /// « Enable the debug feature to see the name » dans notre graphe.
+    /// `InputPlugin` est requis pour la même raison, depuis TASK-48.
     fn poser_les_etats(app: &mut App) {
         app.init_state::<AppState>();
         app.add_sub_state::<RunPhase>();
+        app.insert_resource(game_state::ScoringStepQueue::default());
     }
 
     fn entrer_dans_le_comptage(app: &mut App) {
