@@ -228,8 +228,16 @@ jobs:
           # second fichier du même nom, que la garde aurait laissé passer.
           # Quand le fichier déménagera, cette ligne devra bouger avec lui,
           # délibérément.
-          forbid  "critère 4  unique écrivain de Transform" -n '&mut Transform' crates/ -g '!crates/game_state/src/systems/animation.rs'
-          require "critère 4  l'animation écrit le Transform" -n 'Query<\(Entity, &mut Transform, &mut PunchScale\)>' "$SETUP/animation.rs"
+          # **Les deux lignes ont déménagé avec le fichier**, à TASK-43. C'était
+          # prévu : TASK-42 avait posé l'exclusion sur un chemin exact
+          # précisément pour que la migration ne puisse pas laisser deux
+          # écrivains derrière elle, un par crate.
+          forbid  "critère 4  unique écrivain de Transform" -n '&mut Transform' crates/ -g '!crates/ui_and_juice/src/animation.rs'
+          require "critère 4  l'animation écrit le Transform" -n 'Query<\(Entity, &mut Transform, &mut PunchScale\)>' crates/ui_and_juice/src/animation.rs
+          # Une migration est un déplacement, pas une duplication : deux
+          # `PunchScale` homonymes dans deux crates compilent parfaitement et
+          # donnent deux systèmes écrivant des `Transform`.
+          forbid  "critère 4  PunchScale resté dans game_state" -n 'PunchScale' crates/game_state
           forbid  "critère 4  overlay transformé en état" -n 'AppState::Settings|RunPhase::Settings|SettingsState' crates/game_state/src
 
           # ---- Étape 3 : budget WebAssembly (TASK-40) ----

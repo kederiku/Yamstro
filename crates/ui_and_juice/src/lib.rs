@@ -34,6 +34,8 @@
 //! `run_in`, `run_after` et `run_before` sont supprimés en 0.19 ; `.chain()`,
 //! `.before()` et `.after()` restent les combinateurs ordinaires.
 
+pub mod animation;
+
 use bevy::prelude::*;
 use game_state::RunPhase;
 
@@ -74,6 +76,10 @@ impl Plugin for JuicePlugin {
 
         // `JuiceSet::Animation` n'est volontairement ni chaîné ni gardé : il
         // n'est pas configuré du tout.
+        app.add_systems(
+            Update,
+            crate::animation::animate_punch_scale.in_set(JuiceSet::Animation),
+        );
     }
 }
 
