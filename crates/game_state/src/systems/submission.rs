@@ -30,10 +30,12 @@
 use bevy::prelude::*;
 use core_engine::blind::BlindContext;
 use core_engine::dice::Die;
+use core_engine::relics::RelicInventory;
+use core_engine::scoring::ScoringPipeline;
 
-use crate::components::Scoring;
+use crate::components::{DieView, Scoring};
 use crate::plugin::InputSet;
-use crate::resources::HandContext;
+use crate::resources::{HandContext, RunSession, ScoringStepQueue};
 use crate::states::RunPhase;
 use crate::systems::evaluation::is_hand_available;
 
@@ -82,7 +84,78 @@ fn submit_hand(
     next.set(RunPhase::Scoring);
 }
 
-/// Branche la soumission.
+/// `OnEnter(RunPhase::Scoring)` : calcule le rapport et remplit la file.
+///
+/// **Une fois par entrée dans la phase**, jamais en `Update`. Il remplit ; le
+/// dépilement et le commit sont l'Étape 4.
+///
+/// La file est **remplacée**, jamais complétée : une seconde entrée dans la
+/// phase doit rendre la même file, pas une file doublée. Elle est donc remise à
+/// zéro d'entrée de jeu, avant même les refus, ce qui évite qu'un rapport
+/// périmé survive à une entrée qui ne calcule rien et se fasse commettre deux
+/// fois par l'Étape 4.
+///
+/// **Deux refus, et aucune synthèse.** Sans figure choisie — cas réel : on
+/// entre dans cette phase autrement que par la soumission — ou sans
+/// `HandMatch` correspondant — cas voulu par TASK-36, la figure choisie
+/// pouvant n'être pas réalisée — la file reste vide et le rapport absent.
+/// Fabriquer un `HandMatch` à `scoring_dice` vide donnerait au joueur la base
+/// de la figure, chips et mult au niveau courant : ce serait un arbitrage
+/// d'équilibrage, et le corpus ne chiffre pas ce « score faible ».
+fn build_scoring_report(
+    session: Option<Res<RunSession>>,
+    blind: Option<Res<BlindContext>>,
+    hand: Option<Res<HandContext>>,
+    relics: Option<Res<RelicInventory>>,
+    dice: Query<(&DieView, &Die)>,
+    queue: Option<ResMut<ScoringStepQueue>>,
+) {
+    let (Some(session), Some(blind), Some(hand), Some(relics), Some(mut queue)) =
+        (session, blind, hand, relics, queue)
+    else {
+        return;
+    };
+
+    *queue = ScoringStepQueue::default();
+
+    let Some(cell) = hand.selected_hand else {
+        return;
+    };
+    let Some(found) = hand
+        .active_evaluations
+        .iter()
+        .find(|evaluated| evaluated.hand == cell)
+    else {
+        return;
+    };
+
+    // **La main entière**, jamais les seuls dés marqués. La raison n'est pas
+    // que la résolution casserait — elle ignore sans panique un identifiant
+    // absent — ni que le score changerait, le marqueur étant posé depuis
+    // `scoring_dice` : c'est que ce slice devient `TriggerCtx.dice`, ce que les
+    // reliques liront aux Étapes 5 et 9. Une relique qui compte les dés écartés
+    // verrait sinon une main tronquée.
+    //
+    // Trié sur le rang d'affichage, puis sur l'identifiant : l'ordre
+    // d'itération d'une requête n'est pas un contrat, et le rang seul n'est pas
+    // une clé totale.
+    let mut roll: Vec<(u8, Die)> = dice
+        .iter()
+        .map(|(view, die)| (view.order, die.clone()))
+        .collect();
+    roll.sort_unstable_by_key(|(order, die)| (*order, die.id));
+    let roll: Vec<Die> = roll.into_iter().map(|(_, die)| die).collect();
+
+    let report = ScoringPipeline::resolve(found, &roll, &session.hand_levels, &relics, &blind);
+
+    // Les paliers sont déplacés tels quels : ni tri, ni déduplication, ni
+    // filtrage des paliers nuls. Un palier nul reste un palier, l'Étape 4
+    // l'anime.
+    queue.steps = report.steps.iter().cloned().collect();
+    queue.report = Some(report);
+}
+
+/// Branche la soumission et le calcul du rapport.
 pub(crate) fn register(app: &mut App) {
     app.add_systems(
         Update,
@@ -90,6 +163,8 @@ pub(crate) fn register(app: &mut App) {
             .in_set(InputSet::FrozenByOverlay)
             .run_if(in_state(RunPhase::Roll)),
     );
+
+    app.add_systems(OnEnter(RunPhase::Scoring), build_scoring_report);
 }
 
 #[cfg(test)]
@@ -100,8 +175,11 @@ mod tests {
     use core_engine::dice::{Die, DieId};
     use core_engine::hands::YahtzeeHand;
 
+    use core_engine::relics::RelicInventory;
+    use core_engine::scoring::ScoreStep;
+
     use crate::components::{Locked, Scoring};
-    use crate::resources::HandContext;
+    use crate::resources::{HandContext, ScoringStepQueue};
     use crate::states::SettingsOverlay;
     use crate::systems::fixtures::{app_en_run, des_tries, entites_des, entrer_dans_roll, frapper};
     use crate::systems::input::select_hand;
@@ -155,6 +233,275 @@ mod tests {
 
     fn figure_selectionnee(app: &App) -> Option<YahtzeeHand> {
         app.world().resource::<HandContext>().selected_hand
+    }
+
+    /// Soumet la figure choisie et laisse la transition s'appliquer.
+    fn soumettre(app: &mut App) {
+        frapper(app, KeyCode::Enter);
+        app.update();
+        app.update();
+    }
+
+    /// Ré-entre dans la phase de comptage, mêmes entrées. Un `set` nu vers
+    /// l'état courant : la transition a bien lieu, et `OnEnter` retourne.
+    fn reentrer_dans_scoring(app: &mut App) {
+        app.world_mut()
+            .resource_mut::<NextState<RunPhase>>()
+            .set(RunPhase::Scoring);
+        app.update();
+    }
+
+    fn paliers(app: &App) -> Vec<ScoreStep> {
+        app.world()
+            .resource::<ScoringStepQueue>()
+            .steps
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn test_scoring_phase_commits_nothing() {
+        let mut app = app_prete(Some(YahtzeeHand::FullHouse));
+        let avant = app.world().resource::<BlindContext>().clone();
+
+        soumettre(&mut app);
+        assert_eq!(phase(&app), RunPhase::Scoring);
+
+        let apres = app.world().resource::<BlindContext>();
+        assert_eq!(apres.current_score, avant.current_score, "score commis");
+        assert_eq!(
+            apres.hands_remaining, avant.hands_remaining,
+            "main décomptée"
+        );
+        assert_eq!(apres.used_hands, avant.used_hands, "case consommée");
+
+        let file = app.world().resource::<ScoringStepQueue>();
+        assert!(
+            !file.steps.is_empty(),
+            "la file est vide : rien n'a été calculé"
+        );
+        assert!(file.report.is_some(), "le rapport complet manque");
+    }
+
+    #[test]
+    fn test_queue_length_matches_report() {
+        let mut app = app_prete(Some(YahtzeeHand::FullHouse));
+        soumettre(&mut app);
+
+        let file = app.world().resource::<ScoringStepQueue>();
+        let rapport = file.report.as_ref().expect("rapport posé");
+
+        assert_eq!(
+            file.steps.len(),
+            rapport.steps.len(),
+            "un palier a été perdu ou fusionné"
+        );
+        assert!(
+            file.steps.iter().eq(rapport.steps.iter()),
+            "les paliers ont été triés, dédupliqués ou filtrés"
+        );
+    }
+
+    #[test]
+    fn test_scoring_entry_is_deterministic() {
+        let mut app = app_prete(Some(YahtzeeHand::FullHouse));
+        soumettre(&mut app);
+
+        let premiers = paliers(&app);
+        let total = app
+            .world()
+            .resource::<ScoringStepQueue>()
+            .report
+            .as_ref()
+            .expect("rapport posé")
+            .final_score;
+
+        reentrer_dans_scoring(&mut app);
+
+        assert_eq!(
+            paliers(&app),
+            premiers,
+            "la file diffère d'une entrée à l'autre"
+        );
+        assert_eq!(
+            app.world()
+                .resource::<ScoringStepQueue>()
+                .report
+                .as_ref()
+                .expect("rapport posé")
+                .final_score,
+            total
+        );
+    }
+
+    #[test]
+    fn test_queue_is_replaced_not_appended() {
+        let mut app = app_prete(Some(YahtzeeHand::FullHouse));
+        soumettre(&mut app);
+        let longueur = paliers(&app).len();
+        assert!(longueur > 0);
+
+        reentrer_dans_scoring(&mut app);
+
+        assert_eq!(
+            paliers(&app).len(),
+            longueur,
+            "la file s'est allongée : le rapport a été ajouté au lieu de remplacer"
+        );
+    }
+
+    #[test]
+    fn test_report_is_built_once_per_entry() {
+        // « Une fois par entrée dans la phase, jamais en `Update` ». Pour le
+        // voir, il faut faire ce que fera l'Étape 4 : dépiler. Un système posé
+        // en `Update` remplirait la file à nouveau à la frame suivante, et le
+        // décompte n'avancerait jamais.
+        let mut app = app_prete(Some(YahtzeeHand::FullHouse));
+        soumettre(&mut app);
+        assert!(!paliers(&app).is_empty());
+
+        app.world_mut()
+            .resource_mut::<ScoringStepQueue>()
+            .steps
+            .clear();
+        app.update();
+
+        assert!(
+            paliers(&app).is_empty(),
+            "la file s'est remplie à nouveau : le rapport est reconstruit à chaque frame"
+        );
+    }
+
+    #[test]
+    fn test_scoring_does_not_leave_the_phase() {
+        // La transition vers la fin de manche a lieu quand la file est vide,
+        // à l'Étape 4. Posée ici, elle sauterait tout le décompte.
+        let mut app = app_prete(Some(YahtzeeHand::FullHouse));
+        soumettre(&mut app);
+
+        app.update();
+        app.update();
+
+        assert_eq!(phase(&app), RunPhase::Scoring, "la phase a été quittée");
+    }
+
+    #[test]
+    fn test_report_uses_session_hand_levels() {
+        let mut app = app_prete(Some(YahtzeeHand::FullHouse));
+        soumettre(&mut app);
+        let au_niveau_un = app
+            .world()
+            .resource::<ScoringStepQueue>()
+            .report
+            .as_ref()
+            .expect("rapport posé")
+            .final_score;
+
+        {
+            let mut session = app.world_mut().resource_mut::<RunSession>();
+            session.hand_levels.upgrade(YahtzeeHand::FullHouse);
+            session.hand_levels.upgrade(YahtzeeHand::FullHouse);
+        }
+        reentrer_dans_scoring(&mut app);
+
+        let au_niveau_trois = app
+            .world()
+            .resource::<ScoringStepQueue>()
+            .report
+            .as_ref()
+            .expect("rapport posé")
+            .final_score;
+        assert!(
+            au_niveau_trois > au_niveau_un,
+            "les niveaux de la session ne sont pas appliqués : {au_niveau_un} puis {au_niveau_trois}"
+        );
+    }
+
+    #[test]
+    fn test_stale_report_is_cleared_on_a_barren_entry() {
+        // Un rapport calculé, puis une entrée dans la phase qui ne calcule
+        // rien : sans remise à zéro, l'Étape 4 dépilerait et commettrait deux
+        // fois le rapport précédent.
+        let mut app = app_prete(Some(YahtzeeHand::FullHouse));
+        soumettre(&mut app);
+        assert!(!paliers(&app).is_empty());
+
+        // Retour au lancer : `setup_round` remet la figure choisie à zéro.
+        entrer_dans_roll(&mut app);
+        assert_eq!(figure_selectionnee(&app), None);
+
+        reentrer_dans_scoring(&mut app);
+
+        let file = app.world().resource::<ScoringStepQueue>();
+        assert!(file.steps.is_empty(), "un rapport périmé a survécu");
+        assert!(file.report.is_none(), "un rapport périmé a survécu");
+    }
+
+    #[test]
+    fn test_relic_states_unchanged_by_scoring() {
+        // **Tautologique aujourd'hui, et il faut le dire.** `RelicId` porte ses
+        // variantes sous `cfg(test)` de `core_engine` (TASK-21) : hors de ce
+        // build l'enum est inhabité, donc aucun `RelicInstance` ne peut être
+        // construit d'ici, et l'inventaire de test n'est qu'une suite de
+        // `None`. Ce qui garantit réellement la propriété est la **signature** :
+        // l'inventaire entre en `Res`, jamais en `ResMut`, et faire avancer un
+        // état de relique ne compile pas.
+        //
+        // L'assertion ci-dessous est un fil de détente : le jour où TASK-17
+        // peuplera le catalogue et où un montage pourra porter une vraie
+        // relique, elle tombera et forcera à muscler ce test.
+        let mut app = app_prete(Some(YahtzeeHand::FullHouse));
+        let avant = app.world().resource::<RelicInventory>().clone();
+        assert!(
+            avant.slots.iter().all(Option::is_none),
+            "un RelicInstance est constructible : ce test peut redevenir un vrai test"
+        );
+
+        soumettre(&mut app);
+
+        assert_eq!(*app.world().resource::<RelicInventory>(), avant);
+    }
+
+    #[test]
+    fn test_scoring_without_selection_is_inert() {
+        // Mesuré : on entre dans la phase de comptage sans passer par la
+        // soumission — un test livré à TASK-35 le fait déjà. La figure choisie
+        // vaut alors `None`, et un `expect` y paniquerait.
+        let mut app = app_prete(None);
+        reentrer_dans_scoring(&mut app);
+
+        assert_eq!(phase(&app), RunPhase::Scoring);
+        let file = app.world().resource::<ScoringStepQueue>();
+        assert!(file.steps.is_empty());
+        assert!(file.report.is_none());
+    }
+
+    #[test]
+    fn test_unrealised_figure_produces_no_report() {
+        // Une case choisie mais non réalisée n'a aucun `HandMatch`, et
+        // `resolve` en exige un. Rien n'est synthétisé : la case sera
+        // consommée pour zéro, faute d'un chiffre que le corpus n'a pas donné.
+        let mut app = app_prete(None);
+        let realisees: Vec<YahtzeeHand> = app
+            .world()
+            .resource::<HandContext>()
+            .active_evaluations
+            .iter()
+            .map(|m| m.hand)
+            .collect();
+        let absente = YahtzeeHand::ALL
+            .into_iter()
+            .find(|figure| !realisees.contains(figure))
+            .expect("une figure au moins n'est pas réalisée");
+        choisir(&mut app, absente);
+
+        soumettre(&mut app);
+
+        assert_eq!(phase(&app), RunPhase::Scoring);
+        let file = app.world().resource::<ScoringStepQueue>();
+        assert!(file.steps.is_empty());
+        assert!(file.report.is_none());
     }
 
     #[test]

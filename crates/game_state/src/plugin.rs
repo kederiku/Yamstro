@@ -10,6 +10,7 @@
 
 use bevy::prelude::*;
 
+use crate::resources::ScoringStepQueue;
 use crate::states::{AppState, RunPhase, SettingsOverlay};
 
 /// Les quatre ensembles de systèmes du tour de jeu, dans leur ordre
@@ -59,7 +60,11 @@ impl Plugin for GameStatePlugin {
     fn build(&self, app: &mut App) {
         app.init_state::<AppState>()
             .add_sub_state::<RunPhase>()
-            .init_resource::<SettingsOverlay>();
+            .init_resource::<SettingsOverlay>()
+            // Ressource d'application, dont le défaut vide est un état
+            // légitime — contrairement au contexte de main, que `setup_round`
+            // doit poser parce qu'aucun `Default` n'y aurait de sens.
+            .init_resource::<ScoringStepQueue>();
 
         app.configure_sets(
             Update,

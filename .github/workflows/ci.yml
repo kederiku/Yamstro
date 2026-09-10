@@ -177,8 +177,20 @@ jobs:
           # de compter des lignes, ce que le ticket faisait de travers : la
           # remise à zéro de setup.rs s'écrit avec deux-points et n'était pas
           # comptée, tandis qu'une ligne de test l'était.
-          forbid  "critère 4  commit unique de l'Étape 4" -n 'used_hands\s*\.\s*mark|\.current_score\s*[-+]?=|\.hands_remaining\s*[-+]?=' "$SETUP/submission.rs"
+          forbid  "critère 4  commit unique de l'Étape 4" -n 'used_hands\s*\.\s*mark|\.current_score\s*[-+]?=|\.hands_remaining\s*[-+]?=|advance_state\(' "$SETUP/submission.rs"
           forbid  "critère 4  aucun dé retiré à la soumission" -n '\.despawn\(|remove::<Die>|Without<Locked>' "$SETUP/submission.rs"
           forbid  "critère 4  écriture de la figure choisie" -n 'selected_hand\s*=[^=]' crates/game_state/src -g '!**/input.rs' -g '!**/setup.rs'
+
+          # ---- Étape 3 : rapport de score (TASK-37) ----
+          # Deux propriétés du § 2.2 de TASK-37 sont **inobservables** par un
+          # test d'Étape 3, et le ticket se trompait en les croyant testables :
+          # `pass_a_with` itère `hand.scoring_dice` et résout chaque
+          # identifiant dans le slice, donc ni le filtrage du slice sur le
+          # marqueur ni l'absence de tri ne changent le rapport. Elles
+          # comptent pour `TriggerCtx.dice`, que les reliques liront aux
+          # Étapes 5 et 9. Faute de test, on épingle la forme.
+          require "critère 4  main complète passée au pipeline" -n 'dice: Query<\(&DieView, &Die\)>' "$SETUP/submission.rs"
+          require "critère 4  slice de dés trié"          -n 'sort_unstable_by_key' "$SETUP/submission.rs"
+          forbid  "critère 4  fin de manche hors Étape 4" -n 'RunPhase::RoundEnd' "$SETUP/submission.rs"
 
           exit $status
