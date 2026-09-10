@@ -52,6 +52,7 @@ impl Plugin for GameStatePlugin {
         );
 
         crate::systems::setup::register(app);
+        crate::systems::input::register(app);
     }
 }
 

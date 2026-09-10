@@ -112,12 +112,23 @@ pub struct SettingsOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::input::InputPlugin;
     use bevy::state::app::StatesPlugin;
 
     /// Application montée en headless, jamais de fenêtre.
+    ///
+    /// `InputPlugin` n'est pas décoratif : `handle_dice_input` (TASK-34) lit
+    /// `Res<ButtonInput<KeyCode>>` sous `in_state(RunPhase::Roll)`, et
+    /// `app_en_phase(RunPhase::Roll)` fait tourner ce système. Sans le plugin,
+    /// la ressource manque et la construction des paramètres panique.
     fn app_nue() -> App {
         let mut app = App::new();
-        app.add_plugins((MinimalPlugins, StatesPlugin, crate::GameStatePlugin));
+        app.add_plugins((
+            MinimalPlugins,
+            StatesPlugin,
+            InputPlugin,
+            crate::GameStatePlugin,
+        ));
         app
     }
 

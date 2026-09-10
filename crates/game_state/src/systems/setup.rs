@@ -410,36 +410,19 @@ mod tests {
     // `use super::*` apporte déjà le prélude de Bevy, ainsi que les types de
     // `core_engine` importés par l'implémentation.
     use super::*;
-    use bevy::state::app::StatesPlugin;
     use core_engine::config::RunConfig;
+    use core_engine::cups::CupId;
     use core_engine::cups::definitions::cup;
-    use core_engine::cups::{CupDeck, CupId};
     use core_engine::evaluator::HandMatch;
-    use core_engine::hands::{HandLevels, YahtzeeHand};
-    use core_engine::rng::RunRng;
+    use core_engine::hands::YahtzeeHand;
     use std::collections::BTreeSet;
 
     use crate::components::{Locked, Scoring};
     use crate::resources::HandContext;
-
-    fn session(id: CupId, stake_level: u8) -> RunSession {
-        let deck = cup(id);
-        RunSession {
-            config: RunConfig::from_cup(&deck),
-            ante: 1,
-            gold: deck.starting_gold,
-            cup_id: id,
-            stake_level,
-            hand_levels: HandLevels::default(),
-            rng: RunRng::from_seed(1),
-        }
-    }
-
-    fn inventaire(config: &RunConfig) -> RelicInventory {
-        RelicInventory {
-            slots: vec![None; usize::from(config.relic_capacity)],
-        }
-    }
+    use crate::systems::fixtures::{
+        app_a_la_graine, app_en_run, deck_de, des_tries, entites_des, entrer_dans_roll, inventaire,
+        session,
+    };
 
     /// Définition inerte, au plafond de relances près.
     fn blind(cap: Option<u8>) -> BlindDefinition {
@@ -447,25 +430,6 @@ mod tests {
             modifier: cap.map(BlindModifier::MaxRerolls),
             ..BlindDefinition::default()
         }
-    }
-
-    /// Application montée en headless, session et inventaire posés **avant**
-    /// l'entrée dans la run : le premier `OnEnter(BlindSelect)` suit
-    /// immédiatement `OnEnter(InRun)`, dans la même transition.
-    fn app_en_run(id: CupId) -> App {
-        let partie = session(id, 0);
-        let stock = inventaire(&partie.config);
-
-        let mut app = App::new();
-        app.add_plugins((MinimalPlugins, StatesPlugin, crate::GameStatePlugin));
-        app.insert_resource(partie);
-        app.insert_resource(stock);
-        app.update();
-        app.world_mut()
-            .resource_mut::<NextState<AppState>>()
-            .set(AppState::InRun);
-        app.update();
-        app
     }
 
     /// Arme le contexte courant sur les trois conditions de victoire, puis
@@ -495,45 +459,6 @@ mod tests {
             .resource_mut::<NextState<RunPhase>>()
             .set(RunPhase::BlindSelect);
         app.update();
-    }
-
-    /// Gobelet ad hoc, pour les tailles de main que le catalogue ne porte pas.
-    /// **Aucun gobelet n'est ajouté au catalogue**, arrêté à l'Étape 9.
-    fn deck_de(n: u8) -> CupDeck {
-        CupDeck {
-            dice_count: n,
-            sides: vec![6; usize::from(n)],
-            ..cup(CupId::Standard)
-        }
-    }
-
-    /// Application en run, sur une graine maîtresse choisie.
-    fn app_a_la_graine(id: CupId, seed: u64) -> App {
-        let mut app = app_en_run(id);
-        app.world_mut().resource_mut::<RunSession>().rng = RunRng::from_seed(seed);
-        app
-    }
-
-    fn entrer_dans_roll(app: &mut App) {
-        app.world_mut()
-            .resource_mut::<NextState<RunPhase>>()
-            .set(RunPhase::Roll);
-        app.update();
-    }
-
-    /// Les dés du monde, triés par `DieId`.
-    fn des_tries(app: &mut App) -> Vec<(Entity, Die, DieView)> {
-        let mut etat = app.world_mut().query::<(Entity, &Die, &DieView)>();
-        let mut v: Vec<(Entity, Die, DieView)> = etat
-            .iter(app.world())
-            .map(|(e, d, w)| (e, d.clone(), *w))
-            .collect();
-        v.sort_unstable_by_key(|(_, d, _)| d.id);
-        v
-    }
-
-    fn entites_des(app: &mut App) -> Vec<Entity> {
-        des_tries(app).into_iter().map(|(e, _, _)| e).collect()
     }
 
     #[test]

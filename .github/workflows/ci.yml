@@ -138,6 +138,20 @@ jobs:
           # Aucun test ne peut voir cette relance : après le nettoyage des
           # verrous, force = true et force = false donnent le même résultat.
           # Le texte est donc la seule garde possible.
-          forbid  "critère 5  relance forcée hors Étape 9" -n 'roll\([^)]*,\s*true\s*\)' "$SETUP"
+          forbid  "critère 5  relance forcée hors Étape 9" -n 'roll\([^)]*,\s*true\s*\)|force\s*:\s*true' "$SETUP"
+
+          # ---- Étape 3 : entrées de la phase de lancer (TASK-34) ----
+          # La garde « Digit[1-9] » du § 4 de TASK-34 n'est pas vérifiable par
+          # une machine : elle demande que rg « ne remonte qu'une conversion
+          # générique », ce qui est un jugement sur les lignes rendues et non
+          # un code de sortie. Et KeyCode étant un enum sans arithmétique,
+          # TOUTE conversion rang vers touche nomme les variantes quelque part.
+          # On interdit donc ce qu'elle visait : brancher sur une touche.
+          forbid  "critère 4  branches par touche"       -n '(if|match|==).*KeyCode::Digit' "$SETUP"
+          # Le décrément à zéro est inatteignable, la relance étant refusée
+          # avant : aucun test ne distingue saturating_sub d'un sub qui boucle.
+          forbid  "critère 8  sub non saturants (états)" -n 'wrapping_sub|overflowing_sub|unchecked_sub' "$SETUP"
+          forbid  "critère 4  figure choisie hors de select_hand" -n 'selected_hand' "$SETUP/input.rs"
+          forbid  "critère 10 noms de sélection proscrits" -n '\b(Selected|SelectedForScore)\b' crates/
 
           exit $status
