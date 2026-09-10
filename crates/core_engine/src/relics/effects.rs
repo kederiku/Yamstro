@@ -138,9 +138,7 @@ mod tests {
                 },
                 dice: (0..5).map(|index| Die::new(DieId(index), 6)).collect(),
                 hand_levels: HandLevels::default(),
-                blind: BlindContext {
-                    modifiers: SmallVec::new(),
-                },
+                blind: BlindContext::de_test(None),
                 left_effects: Vec::new(),
             }
         }

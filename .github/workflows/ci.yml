@@ -93,6 +93,9 @@ jobs:
           # dans le pipeline produirait des effets fantômes dans le journal.
           forbid  "critère 10 hooks non câblés"          -n 'OnRoll|OnRoundEnd' "$SRC/scoring" -g '!**/trigger.rs'
           forbid  "critère 10 le mot défausse"           -ni 'défausse|defausse' crates/
+          # § 1.5 : RunSession.gold est la seule source de vérité de l'or.
+          # `gold` est canonique ; ces deux noms-là ne le sont pas.
+          forbid  "critère 10 noms proscrits pour l'or"  -n '\bmoney\b|\bRunEconomy\b' crates/
           forbid  "critère 5  ReflectResource"           -n 'ReflectResource|reflect\(Resource\)' crates/
 
           # ---- Étape 2 : invariants de clôture (TASK-27, volet 1) ----
@@ -107,7 +110,170 @@ jobs:
           forbid  "critère 7  le pipeline ne commet rien" -n '\.current_score|\.hands_remaining|\.used_hands|advance_state\(' "$SRC/scoring"
           forbid  "critère 7  aucune source d'aléa"      -n '\brng\b|RunRng|rand::|thread_rng' "$SRC/scoring"
           forbid  "critère 6  feature test-fixtures"     -n 'test-fixtures"|^\s*test-fixtures\s*=' crates/
-          forbid  "critère 2  comparaison approchée"     -n 'assert_relative_eq|EPSILON|\bapprox::|abs\(\)\s*<' crates/
+          # L'exclusion de animation.rs n'est pas une échappatoire : c'est la
+          # distinction que le corpus pose lui-même à TASK-30 — « les flottants
+          # sont légitimes ici : l'interdiction porte sur l'arithmétique de
+          # score, tenue en point fixe, pas sur l'animation ». Un ressort a
+          # besoin d'un seuil de repos, qui EST une comparaison approchée.
+          forbid  "critère 2  comparaison approchée"     -n 'assert_relative_eq|EPSILON|\bapprox::|abs\(\)\s*<' crates/ -g '!**/animation.rs'
           require "critère 2  égalités exactes"          -n 'assert_eq!' "$SRC/scoring"
 
+          # ---- Étape 3 : mise en place d'une manche (TASK-32) ----
+          # Deux ancrages de plus, même défaut que ci-dessus. La garde du § 4
+          # de TASK-32 interdit « - » entouré d'espaces dans tout le fichier :
+          # elle vise une soustraction nue sur un compteur, pas un tiret de
+          # prose. Et la garde des trois combinateurs supprimés en 0.19
+          # attraperait le commentaire qui explique justement qu'on ne les
+          # écrit pas ; elle est donc ancrée sur un appel.
+          SETUP=crates/game_state/src/systems
+
+          forbid  "critère 4  soustraction nue (manche)" -n '\w*(reroll|hand|gold|slot|capacity|count|interest|score|target|ante)\w*\s*(-=|- )' "$SETUP"
+          forbid  "critère 4  aucun flottant (manche)"   -n '\bf32\b|\bf64\b' "$SETUP" -g '!**/animation.rs'
+          forbid  "critère 4  combinateurs de 0.18"      -n '\b(run_in|run_after|run_before)\s*\(' crates/
+          require "critère 4  stubs de malus marqués"    -n 'Étape 5|Étape 10' "$SETUP/setup.rs"
+
+          # ---- Étape 3 : entrée dans une main (TASK-33) ----
+          # Deux ancrages de plus, dix-septième et dix-huitième du corpus. La
+          # garde « slot » du § 4 de TASK-33 vise un adressage par position
+          # fixe ; nue, elle attrape « RelicInventory { slots: … } », nom d'un
+          # champ public de core_engine. Et la garde « DicePool » vise une
+          # instanciation ; nue, elle attrape les commentaires qui expliquent
+          # justement qu'on n'en crée pas.
+          forbid  "critère 4  positions fixes de dés"    -n '0\.\.5|\[Entity; 5\]|\[Die; 5\]|\b(die_slots?|dice_slots?)\b|slots?\s*\[' "$SETUP"
+          forbid  "critère 4  littéraux de main"         -n 'rerolls_left\s*=\s*[0-9]|dice_count\s*=\s*[0-9]' "$SETUP"
+          forbid  "critère 4  flux hors des dés"         -n 'rng\.(shop|boss|relic_effects)|thread_rng|from_entropy' "$SETUP"
+          forbid  "critère 4  pool de dés en parallèle"  -n 'DicePool::new|DicePool\s*\{|:\s*DicePool\b|<DicePool>' crates/game_state/src
+          # Aucun test ne peut voir cette relance : après le nettoyage des
+          # verrous, force = true et force = false donnent le même résultat.
+          # Le texte est donc la seule garde possible.
+          forbid  "critère 5  relance forcée hors Étape 9" -n 'roll\([^)]*,\s*true\s*\)|force\s*:\s*true' "$SETUP"
+
+          # ---- Étape 3 : entrées de la phase de lancer (TASK-34) ----
+          # La garde « Digit[1-9] » du § 4 de TASK-34 n'est pas vérifiable par
+          # une machine : elle demande que rg « ne remonte qu'une conversion
+          # générique », ce qui est un jugement sur les lignes rendues et non
+          # un code de sortie. Et KeyCode étant un enum sans arithmétique,
+          # TOUTE conversion rang vers touche nomme les variantes quelque part.
+          # On interdit donc ce qu'elle visait : brancher sur une touche.
+          forbid  "critère 4  branches par touche"       -n '(if|match|==).*KeyCode::Digit' "$SETUP"
+          # Le décrément à zéro est inatteignable, la relance étant refusée
+          # avant : aucun test ne distingue saturating_sub d'un sub qui boucle.
+          forbid  "critère 8  sub non saturants (états)" -n 'wrapping_sub|overflowing_sub|unchecked_sub' "$SETUP"
+          # La garde posée ici par TASK-34 interdisait « selected_hand » dans
+          # tout input.rs, ce qui était juste tant que select_hand n'y était
+          # pas. TASK-36 l'y a écrite : l'invariant n'est plus « ce fichier
+          # n'en parle pas » mais « deux fichiers seulement l'écrivent », et
+          # c'est la garde du bloc TASK-36 qui le tient.
+          forbid  "critère 10 noms de sélection proscrits" -n '\b(Selected|SelectedForScore)\b' crates/
+
+          # ---- Étape 3 : évaluation des figures (TASK-35) ----
+          # Trois ancrages. Les deux premiers remplacent des gardes du § 4 de
+          # TASK-35 qui demandaient un jugement sur les lignes rendues et non un
+          # code de sortie. Le troisième est le critère central du ticket : dans
+          # sa forme nue, « selected_hand » interdit la ligne du test qui
+          # prouve justement qu'aucune figure n'est choisie sans le joueur.
+          # C'est l'ÉCRITURE du champ qui est proscrite, pas sa lecture.
+          forbid  "critère 4  niveaux en ressource"      -n 'init_resource::<HandLevels>|insert_resource\(HandLevels' crates/game_state/src
+          forbid  "critère 4  grille consommée écrite"   -n 'used_hands\s*\.\s*mark|used_hands\s*=' "$SETUP/evaluation.rs"
+          forbid  "critère 4  figure choisie sans le joueur" -n 'selected_hand\s*=[^=]' "$SETUP/evaluation.rs"
+
+          # ---- Étape 3 : sélection et soumission (TASK-36) ----
+          # Trois ancrages de plus. La forme nue de la première attrape les
+          # assertions du test qui prouve, précisément, que ces champs ne sont
+          # pas écrits. La troisième exprime l'invariant réel — deux fichiers
+          # autorisés à écrire la figure choisie, et deux seulement — au lieu
+          # de compter des lignes, ce que le ticket faisait de travers : la
+          # remise à zéro de setup.rs s'écrit avec deux-points et n'était pas
+          # comptée, tandis qu'une ligne de test l'était.
+          forbid  "critère 4  commit unique de l'Étape 4" -n 'used_hands\s*\.\s*mark|\.current_score\s*[-+]?=|\.hands_remaining\s*[-+]?=|advance_state\(' "$SETUP/submission.rs"
+          forbid  "critère 4  aucun dé retiré à la soumission" -n '\.despawn\(|remove::<Die>|Without<Locked>' "$SETUP/submission.rs"
+          forbid  "critère 4  écriture de la figure choisie" -n 'selected_hand\s*=[^=]' crates/game_state/src -g '!**/input.rs' -g '!**/setup.rs'
+
+          # ---- Étape 3 : rapport de score (TASK-37) ----
+          # Deux propriétés du § 2.2 de TASK-37 sont **inobservables** par un
+          # test d'Étape 3, et le ticket se trompait en les croyant testables :
+          # `pass_a_with` itère `hand.scoring_dice` et résout chaque
+          # identifiant dans le slice, donc ni le filtrage du slice sur le
+          # marqueur ni l'absence de tri ne changent le rapport. Elles
+          # comptent pour `TriggerCtx.dice`, que les reliques liront aux
+          # Étapes 5 et 9. Faute de test, on épingle la forme.
+          require "critère 4  main complète passée au pipeline" -n 'dice: Query<\(&DieView, &Die\)>' "$SETUP/submission.rs"
+          require "critère 4  slice de dés trié"          -n 'sort_unstable_by_key' "$SETUP/submission.rs"
+          forbid  "critère 4  fin de manche hors Étape 4" -n 'RunPhase::RoundEnd' "$SETUP/submission.rs"
+
+          # ---- Étape 3 : arbitrage de fin de manche (TASK-38) ----
+          # Le § 4 de TASK-38 demandait que « chaque site utilise set_if_neq ou
+          # justifie en commentaire » : un grep ne lit pas les justifications.
+          # Le seul site justifié est la soumission, qui vise une phase ne
+          # pouvant pas être la phase courante ; ailleurs, la forme qualifiée
+          # est exigée. Et la garde sur le score attrapait les lignes de test
+          # qui le POSENT — rien ne l'écrit encore, donc les scénarios doivent
+          # bien l'établir. Ce qui l'interdit vraiment est le type.
+          forbid  "critère 4  set nu hors de la soumission" -n 'next\.set\(' crates/game_state/src -g '!**/submission.rs'
+          require "critère 4  arbitre en lecture seule"  -n 'blind: Option<Res<BlindContext>>' "$SETUP/round_end.rs"
+          require "critère 4  transitions qualifiées"    -n 'NextState::set_if_neq' "$SETUP/round_end.rs"
+
+          # ---- Étape 3 : overlay et animation (TASK-39) ----
+          # Le § 4 de TASK-39 demandait « exactement une occurrence de
+          # &mut Transform » : un compte de lignes, que le commentaire
+          # expliquant le conflit d'accès fait déjà passer à deux. Le couple
+          # interdire-dehors / exiger-dedans dit la même chose sans faux
+          # positif. Et sa garde « ParamSet » refusait un ParamSet livré à
+          # TASK-34 sur deux requêtes de dés, sans rapport avec les Transform :
+          # elle est remplacée, pas contournée.
+          forbid  "critère 4  unique écrivain de Transform" -n '&mut Transform' crates/game_state/src -g '!**/animation.rs'
+          require "critère 4  l'animation écrit le Transform" -n 'Query<\(Entity, &mut Transform, &mut PunchScale\)>' "$SETUP/animation.rs"
+          forbid  "critère 4  overlay transformé en état" -n 'AppState::Settings|RunPhase::Settings|SettingsState' crates/game_state/src
+
+          # ---- Étape 3 : budget WebAssembly (TASK-40) ----
+          # Les profils vivent à la racine du workspace. Dans le manifeste d'une
+          # crate membre ils sont ignorés, avec un simple avertissement, et la
+          # mesure de taille serait faite avec le profil par défaut — c'est-à-
+          # dire fausse de plusieurs mégaoctets, sans que rien ne le signale.
+          forbid  "critère 4  profils hors de la racine" -n '^\[profile' crates/ --glob '**/Cargo.toml'
+          forbid  "critère 4  lto partiel"               -n 'lto\s*=\s*"thin"' .
+          forbid  "critère 4  nom wgpu de 0.18"          -n 'WgpuSettingsPriority::Compatibility' .
+          require "critère 4  référence de taille wasm"  -n '^[0-9]+$' ci/wasm-size-baseline.txt
+
           exit $status
+
+  # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en
+  # `lto = "fat"` avec `codegen-units = 1` se compte en minutes ; l'agréger au
+  # job de validation ferait passer chaque PR d'une minute quarante à vingt
+  # minutes, y compris pour un changement d'une ligne de documentation.
+  taille-wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain (pilotée par rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+          rustup show active-toolchain
+
+      # Les deux versions sont **épinglées**. `wasm-bindgen` doit correspondre
+      # exactement à la version de la crate que Bevy 0.19.1 tire, faute de quoi
+      # l'outil refuse le module. Et une montée de binaryen fait bouger la
+      # mesure sans qu'une seule ligne du projet ait changé : une référence
+      # n'est comparable que si la chaîne est figée.
+      #
+      # Le binaire pré-compilé, jamais `cargo install` : compiler
+      # `wasm-bindgen-cli` à froid dépasse à lui seul le budget de temps du job
+      # de validation.
+      - name: wasm-bindgen 0.2.128 et binaryen 132, épinglés
+        run: |
+          set -euo pipefail
+          curl -sSfL https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.128/wasm-bindgen-0.2.128-x86_64-unknown-linux-musl.tar.gz \
+            | tar -xz --strip-components=1 -C /usr/local/bin --wildcards '*/wasm-bindgen'
+          curl -sSfL https://github.com/WebAssembly/binaryen/releases/download/version_132/binaryen-version_132-x86_64-linux.tar.gz \
+            | tar -xz --strip-components=2 -C /usr/local/bin binaryen-version_132/bin/wasm-opt
+          wasm-bindgen --version
+          wasm-opt --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+
+      - name: Mesure et comparaison à la référence
+        run: ci/check-wasm-size.sh

@@ -78,6 +78,43 @@ const LEVEL_CHIPS_STEP: u64 = 15;
 /// Mult conféré par chaque niveau supplémentaire, en centièmes.
 const LEVEL_MULT_STEP: i64 = 100;
 
+/// Bitset des treize figures déjà consommées dans la blind courante.
+///
+/// Il vit ici, aux côtés de `YahtzeeHand::ALL` dont il est le bitset, et non
+/// dans la crate d'états : c'est `BlindContext` qui le porte, et l'Étape 8 le
+/// relira. Le glossaire l'attribuait à l'Étape 1 quand le document de cette
+/// étape l'excluait de son périmètre ; ni l'un ni l'autre backlog ne l'avait
+/// livré.
+///
+/// **Il n'est écrit qu'au moment où une figure est commise**, et remis à zéro
+/// à la mise en place d'une blind. L'Étape 3 ne fait que le lire.
+#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct HandGrid(u16);
+
+impl HandGrid {
+    /// Marque une figure comme consommée. Marquer deux fois est sans effet.
+    pub fn mark(&mut self, hand: YahtzeeHand) {
+        self.0 |= 1 << (hand as u16);
+    }
+
+    /// Vrai si la figure a déjà été consommée dans cette blind.
+    pub fn contains(&self, hand: YahtzeeHand) -> bool {
+        self.0 & (1 << (hand as u16)) != 0
+    }
+
+    /// Vide la grille. Appelé à la mise en place d'une blind, jamais en cours
+    /// de manche.
+    pub fn clear(&mut self) {
+        self.0 = 0;
+    }
+
+    /// Vrai tant qu'aucune figure n'a été consommée.
+    pub fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+}
+
 /// Niveau courant de chacune des treize figures, dans `1..=MAX_HAND_LEVEL`.
 ///
 /// Le stockage est un tableau indexé par `hand as usize`, jamais une table de
@@ -129,6 +166,35 @@ impl HandLevels {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_hand_grid_mark_contains_clear() {
+        // Le test vit ici, auprès du type, et non dans la crate qui le
+        // consomme : mesuré, les quatre mutations de ce bitset ne sont tuées
+        // que par les tests de l'appelant, si bien qu'un `cargo test` sur cette
+        // seule crate ne garderait rien.
+        let mut grille = HandGrid::default();
+        assert!(grille.is_empty());
+
+        grille.mark(YahtzeeHand::Yahtzee);
+        grille.mark(YahtzeeHand::Chance);
+
+        for figure in YahtzeeHand::ALL {
+            let attendu = matches!(figure, YahtzeeHand::Yahtzee | YahtzeeHand::Chance);
+            assert_eq!(grille.contains(figure), attendu, "figure {figure:?}");
+        }
+        assert!(!grille.is_empty());
+
+        // Marquer deux fois est sans effet.
+        grille.mark(YahtzeeHand::Yahtzee);
+        assert!(grille.contains(YahtzeeHand::Yahtzee));
+
+        grille.clear();
+        assert!(grille.is_empty());
+        for figure in YahtzeeHand::ALL {
+            assert!(!grille.contains(figure), "figure {figure:?} après clear");
+        }
+    }
     use std::collections::BTreeSet;
 
     /// Table normative du § 4.1 du glossaire, recopiée en dur : ce test compare

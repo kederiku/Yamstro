@@ -351,7 +351,6 @@ mod tests {
     use crate::dice::{Die, DieId, DieModifier, DieSeal};
     use crate::evaluator::HandMatch;
     use crate::relics::{RelicId, RelicInstance, RelicInventory, RelicState};
-    use smallvec::SmallVec;
 
     /// Journal des tranches `left_effects` vues par chaque slot, dans l'ordre
     /// des appels. C'est le seul moyen d'observer un canal qu'aucune fixture ne
@@ -403,9 +402,7 @@ mod tests {
     }
 
     fn blind_nu() -> BlindContext {
-        BlindContext {
-            modifiers: SmallVec::new(),
-        }
+        BlindContext::de_test(None)
     }
 
     fn inventaire(slots: &[Option<RelicId>]) -> RelicInventory {
@@ -709,7 +706,6 @@ mod tests {
     use crate::blind::BlindContext;
     use crate::hands::{HandLevels, YahtzeeHand};
     use crate::scoring::{ScoreAction, StepSource};
-    use smallvec::smallvec;
 
     // ---- Étape 3 : les reliques déclenchées une fois pour la main ----
 
@@ -1127,12 +1123,8 @@ mod tests {
         let dice = [de(0, 4), de(1, 4), de(2, 4), de(3, 2), de(4, 3)];
         let relics = inventaire(&[Some(RelicId::MagicPair), Some(RelicId::BrokenGlass)]);
         let blinds = [
-            BlindContext {
-                modifiers: SmallVec::new(),
-            },
-            BlindContext {
-                modifiers: smallvec::smallvec![BlindModifier::HalveBaseScores],
-            },
+            BlindContext::de_test(None),
+            BlindContext::de_test(Some(BlindModifier::HalveBaseScores)),
         ];
 
         for blind in &blinds {
@@ -1195,9 +1187,7 @@ mod tests {
     #[test]
     fn test_base_emits_chips_then_mult() {
         let levels = HandLevels::default();
-        let blind = BlindContext {
-            modifiers: smallvec![],
-        };
+        let blind = BlindContext::de_test(None);
 
         let effects = base_effects(YahtzeeHand::FullHouse, &levels, &blind);
 
