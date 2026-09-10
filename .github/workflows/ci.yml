@@ -154,4 +154,15 @@ jobs:
           forbid  "critère 4  figure choisie hors de select_hand" -n 'selected_hand' "$SETUP/input.rs"
           forbid  "critère 10 noms de sélection proscrits" -n '\b(Selected|SelectedForScore)\b' crates/
 
+          # ---- Étape 3 : évaluation des figures (TASK-35) ----
+          # Trois ancrages. Les deux premiers remplacent des gardes du § 4 de
+          # TASK-35 qui demandaient un jugement sur les lignes rendues et non un
+          # code de sortie. Le troisième est le critère central du ticket : dans
+          # sa forme nue, « selected_hand » interdit la ligne du test qui
+          # prouve justement qu'aucune figure n'est choisie sans le joueur.
+          # C'est l'ÉCRITURE du champ qui est proscrite, pas sa lecture.
+          forbid  "critère 4  niveaux en ressource"      -n 'init_resource::<HandLevels>|insert_resource\(HandLevels' crates/game_state/src
+          forbid  "critère 4  grille consommée écrite"   -n 'used_hands\s*\.\s*mark|used_hands\s*=' "$SETUP/evaluation.rs"
+          forbid  "critère 4  figure choisie sans le joueur" -n 'selected_hand\s*=[^=]' "$SETUP/evaluation.rs"
+
           exit $status

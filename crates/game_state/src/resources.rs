@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn test_hand_levels_is_not_a_world_resource() {
         // Les niveaux vivent dans la session, et nulle part ailleurs. Ce test
-        // tombe si quelqu'un ajoute un `init_resource::<HandLevels>()`.
+        // tombe si quelqu'un insère les niveaux comme ressource du monde.
         let mut app = app_avec_ressources(CupId::Standard);
         app.update();
 

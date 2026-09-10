@@ -547,11 +547,21 @@ mod tests {
 
         entrer_dans_roll(&mut app);
 
-        // Avant l'`Update` : les commandes d'un `OnEnter` sont appliquées en
-        // fin de `StateTransition`, donc le contexte est déjà neuf ici.
         let main = app.world().resource::<HandContext>();
         assert_eq!(main.selected_hand, None);
-        assert!(main.active_evaluations.is_empty());
+
+        // `setup_round` vide la liste en `StateTransition` ; depuis TASK-35,
+        // `update_hand_evaluations` la remplit dans la **même frame**, en
+        // `Update`. Ce qui se vérifie ici est donc la disparition de l'entrée
+        // témoin, et non une liste vide : une figure réelle retient toujours au
+        // moins un dé, le témoin n'en retient aucun.
+        assert!(
+            !main
+                .active_evaluations
+                .iter()
+                .any(|figure| figure.scoring_dice.is_empty()),
+            "l'évaluation témoin a survécu à l'entrée dans la main"
+        );
     }
 
     #[test]
