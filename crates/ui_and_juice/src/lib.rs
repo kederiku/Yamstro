@@ -35,6 +35,7 @@
 //! `.before()` et `.after()` restent les combinateurs ordinaires.
 
 pub mod animation;
+pub mod events;
 pub mod settings;
 
 use bevy::prelude::*;
@@ -70,6 +71,11 @@ impl Plugin for JuicePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<crate::animation::ScreenShake>()
             .init_resource::<crate::settings::JuiceSettings>();
+
+        // Enregistrement **unique** du tampon. Un second `add_message` ne
+        // doublerait pas la file : il ne ferait rien (0.19 teste la présence de
+        // `Messages<M>` avant d'enregistrer) et masquerait l'oubli du premier.
+        app.add_message::<crate::events::ScoreStepPlayed>();
 
         app.configure_sets(
             Update,

@@ -256,7 +256,7 @@ jobs:
           # que le commentaire du manifeste qui dit qu'on n'en veut pas, et le
           # `//!` qui explique que ces combinateurs n'existent plus. Vingt-
           # deuxième et vingt-troisième fois dans ce projet.
-          forbid  "critère 4  dépendance de tweening ou audio" -n '^\s*[a-z0-9_-]*(tween|kira|rodio|audio|vorbis|symphonia)[a-z0-9_-]*\s*=|"(bevy_audio|vorbis)"' --glob '**/Cargo.toml' crates/
+          forbid  "critère 4  dépendance de tweening ou audio" -n '^\s*[a-z0-9_-]*(tween|kira|rodio|audio|vorbis|symphonia|seedling)[a-z0-9_-]*\s*=|"(bevy_audio|vorbis)"' --glob '**/Cargo.toml' crates/
           forbid  "critère 4  dépendance inverse vers le juice" -n 'ui_and_juice' crates/game_state crates/core_engine
 
           # ---- Étape 4 : compteurs interpolés (TASK-44) ----
@@ -297,6 +297,30 @@ jobs:
           # ces ressources sur une entité despawnerait silencieusement les
           # autres porteurs.
           forbid  "critère 4  réglages posés en composant" -n 'derive\(.*Component' crates/ui_and_juice/src/settings.rs
+
+          # ---- Étape 4 : palier joué et fermeture du périmètre audio (TASK-46) ----
+          # Les trois noms proscrits sont ancrés sur une **déclaration ou un
+          # emploi**, jamais sur le nom nu : le module `events.rs` doit pouvoir
+          # écrire pourquoi la v1 avait trois ressources pour un rôle sans
+          # déclencher la garde qui l'interdit. Même ancrage que `f64` à
+          # TASK-44. Une garde sur le mot « audio » serait déjà rouge
+          # aujourd'hui : le titre de section de `lib.rs` et le commentaire de
+          # `Cargo.toml` documentent tous deux cette absence.
+          forbid  "critère 4  ressource de son déclarée ou employée" -n '(struct|enum|impl|::<|Res<|ResMut<|insert_resource\()\s*(AudioFeedbackConfig|ScoringAudioPool|SoundEffectBank)' crates/
+          forbid  "critère 4  API audio de Bevy dans le juice" -n '\b(AudioPlayer|AudioSource|AudioSink|AudioBundle|PlaybackSettings)\b' crates/
+          forbid  "critère 4  module audio dans le juice" --files crates/ui_and_juice/src -g 'audio.rs'
+          # La hauteur est un livrable de l'Étape 8 (demi-ton tempéré, C41).
+          # Ancré sur des identifiants : le `0\.05` que réclamait le ticket
+          # proscrivait un littéral numérique, et mordait deux bornes de ressort
+          # de TASK-43 sans aucun rapport avec le son.
+          forbid  "critère 4  hauteur de son dans le juice" -n '(PitchScaleTracker|pitch_factor|pitch_scale|semitone)' crates/ui_and_juice/src
+          # Le plafond de deux champs est tout l'objet du ticket, et la liste de
+          # dérivés est épinglée : y ajouter Component ou Resource casse la
+          # contre-épreuve.
+          require "critère 4  message à deux champs"     -n 'pub source: StepSource,\n    pub action: ScoreAction,' -U crates/ui_and_juice/src/events.rs
+          require "critère 4  dérivés du message"        -n '#\[derive\(Message, Debug, Clone, Copy, PartialEq, Eq\)\]' crates/ui_and_juice/src/events.rs
+          require "critère 4  point de conversion unique" -n 'impl From<ScoreEffect> for ScoreStepPlayed \{' crates/ui_and_juice/src/events.rs
+          require "critère 4  tampon enregistré par le plugin" -n 'add_message::<crate::events::ScoreStepPlayed>' crates/ui_and_juice/src/lib.rs
 
           exit $status
 
