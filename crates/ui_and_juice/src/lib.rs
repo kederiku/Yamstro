@@ -105,6 +105,7 @@ impl Plugin for JuicePlugin {
             (
                 crate::queue::read_fast_forward_input.in_set(JuiceSet::ReadInput),
                 crate::queue::tick_scoring_queue.in_set(JuiceSet::TickQueue),
+                crate::queue::commit_score_when_drained.in_set(JuiceSet::Commit),
             ),
         );
     }
@@ -144,6 +145,13 @@ mod tests {
         app.init_state::<AppState>();
         app.add_sub_state::<RunPhase>();
         app.insert_resource(game_state::ScoringStepQueue::default());
+        app.insert_resource(core_engine::blind::BlindContext {
+            blind: core_engine::blind::BlindDefinition::default(),
+            target_score: 0,
+            current_score: 0,
+            hands_remaining: 0,
+            used_hands: core_engine::hands::HandGrid::default(),
+        });
     }
 
     fn entrer_dans_le_comptage(app: &mut App) {

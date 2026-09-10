@@ -354,12 +354,16 @@ jobs:
           forbid  "critère 4  horloge globale détournée" -n 'set_relative_speed|Virtual>|relative_speed\(' crates/
           # Ancrés sur un accès, pas sur le mot : le module doit pouvoir écrire
           # que la pause finale et le commit ne sont pas de son ressort.
-          forbid  "critère 4  pause finale touchée par le dépileur" -n '\.final_pause' crates/ui_and_juice/src/queue.rs
-          # Ancré sur les trois champs du commit, sans `NextState` : la fixture
-          # de test pilote légitimement les états pour entrer dans la phase, et
-          # TASK-50 y écrira sa transition — une garde que le ticket suivant
-          # doit supprimer n'est pas une garde.
-          forbid  "critère 4  commit avancé dans le dépileur" -n '\.(current_score|hands_remaining|used_hands)\b' crates/ui_and_juice/src/queue.rs
+          # Contre-épreuve sur l'instruction exacte plutôt qu'interdiction du
+          # `mul_f32` : `[^)]*` ne franchit pas la parenthèse de `delta()`, et
+          # `[^;]*` mordrait le commentaire qui explique la règle. Épingler
+          # l'instruction casse à toute modification, accélération comprise.
+          require "critère 4  pause finale au pas de temps nu" -n 'final_pause\.tick\(time\.delta\(\)\);' crates/ui_and_juice/src/queue.rs
+          # **Retirée à TASK-50**, qui écrit ces trois champs : j'avais énoncé à
+          # TASK-48 qu'une garde que le ticket suivant doit supprimer n'est pas
+          # une garde, et je ne l'avais appliqué qu'à `NextState`. Le § du
+          # commit ci-dessous la remplace par des contre-épreuves qui, elles,
+          # survivent au ticket suivant.
           forbid  "critère 4  dépilement par la fin"      -n 'steps\.pop_back|steps\.remove\(' crates/
           forbid  "critère 4  panique par unwrap"         -n '\.unwrap\(\)' crates/
           # L'accès du dépileur est énuméré dans un seul type : y ajouter un
@@ -387,6 +391,27 @@ jobs:
           # Le marqueur des compteurs vit avec AnimatedNumber, pas ici.
           require "critère 4  marqueur des trois compteurs" -n 'pub enum CounterKind \{' crates/ui_and_juice/src/animation.rs
           forbid  "critère 4  repli par filtre d'exclusion" -n 'ParamSet<|Without<DieView>|Without<RelicSlotUI>' crates/ui_and_juice/src
+
+          # ---- Étape 4 : commit unique du score (TASK-50) ----
+          # Trois écritures, dans cet ordre, et une signature à trois
+          # paramètres : sans `NextState`, sans `RunSession`, sans `AppState`,
+          # le commit **ne peut pas** arbitrer. C'est le typage qui tient la
+          # règle, la contre-épreuve tient le typage.
+          require "critère 4  signature du commit"       -nU 'fn commit_score_when_drained\(\n    time: Res<Time>,\n    mut queue: ResMut<ScoringStepQueue>,\n    mut blind: ResMut<BlindContext>,\n\) \{' crates/ui_and_juice/src/queue.rs
+          require "critère 4  total ajouté au score"     -n 'current_score\.saturating_add\(queue\.final_score\)' crates/ui_and_juice/src/queue.rs
+          require "critère 4  main décomptée sans débordement" -n 'hands_remaining\.saturating_sub\(1\)' crates/ui_and_juice/src/queue.rs
+          require "critère 4  case consommée au commit"  -n 'used_hands\.mark\(queue\.hand\)' crates/ui_and_juice/src/queue.rs
+          require "critère 4  garde-fou refermé"         -n 'queue\.committed = true;' crates/ui_and_juice/src/queue.rs
+          # La soustraction nue est proscrite partout : à zéro, un u8 rend 255.
+          forbid  "critère 4  main décomptée par soustraction nue" -n 'hands_remaining\s*-[^=]|hands_remaining\s*-=' crates/
+          # Le commit vit dans le juice, et nulle part ailleurs. **Ancré sur sa
+          # forme**, pas sur l'affectation : les fixtures de test posent
+          # légitimement un score ou une grille, et aucune garde textuelle ne
+          # sait distinguer un montage d'un commit. La forme, elle, est unique.
+          forbid  "critère 4  commit dupliqué hors du juice" -n 'current_score\.saturating_add|hands_remaining\.saturating_sub|used_hands\.mark\(' crates/game_state/src crates/core_engine/src
+          # La sortie de phase attend le drapeau : sans lui, RoundEnd arbitrerait
+          # sur un contexte où rien n'a été ajouté.
+          require "critère 4  sortie de phase liée au commit" -n 'steps\.is_empty\(\) && queue\.committed' crates/game_state/src/systems/round_end.rs
 
           exit $status
 

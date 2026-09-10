@@ -22,6 +22,7 @@
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use core_engine::blind::BlindContext;
 use core_engine::dice::Die;
 use core_engine::scoring::{ScoreAction, ScoreStep, StepSource};
 use game_state::{DieView, RelicSlotUI, ScoringStepQueue};
@@ -103,6 +104,65 @@ pub fn tick_scoring_queue(
         };
         dispatch_step(&step, &mut ctx);
     }
+}
+
+/// **Commet le score. C'est le seul endroit du projet qui le fait.**
+///
+/// Deux gardes cumulatives, dans cet ordre : la file doit être vide, puis la
+/// pause finale écoulée. Le drapeau `committed` retient le reste — sans lui,
+/// chaque frame de la même phase recommettrait le total, et le score partirait
+/// à l'infini en quelques dixièmes de seconde sans qu'aucun test de dépilement
+/// ne le voie. La garde d'état ne suffirait pas : `NextState` ne s'applique
+/// qu'au prochain `StateTransition`.
+///
+/// # La pause finale n'est jamais accélérée
+///
+/// `final_pause.tick(time.delta())`, sans `mul_f32`. C'est le respirateur qui
+/// rend le total lisible ; l'accélération porte sur `step_timer`, et sur lui
+/// seul. Le drapeau, lui, est remis à `false` au **remplissage** de la file, à
+/// l'entrée dans la phase, jamais ici.
+///
+/// # Ce système ne transite pas, et ne le peut pas
+///
+/// **Dérogation au corpus, motivée.** Le § 3.6 du document source terminait par
+/// un `next.set_if_neq(RunPhase::RoundEnd)`. La transition appartient à
+/// `game_state` depuis TASK-38, qui la teste et l'a déclarée sienne par écrit ;
+/// l'y reprendre laisserait `game_state` incapable de quitter une phase qu'il
+/// sait pourtant entrer, et rendrait trois tests d'audit invérifiables.
+/// `leave_scoring_when_queue_is_empty` attend donc le drapeau, et l'ordre est
+/// garanti par lui plutôt que par l'ordonnancement de deux crates.
+///
+/// Le bénéfice n'est pas que d'économie : sans `NextState` dans la signature,
+/// **ce système ne peut pas arbitrer**. Ni victoire, ni défaite, ni boutique.
+/// La règle « l'Étape 4 n'arbitre rien » cesse d'être une consigne pour devenir
+/// une impossibilité de compilation. `RunSession` et `AppState` en sont absents
+/// pour la même raison.
+///
+/// Le total commis est le `u64` du pipeline, transporté tel quel : cette étape
+/// **rejoue** un score, elle ne le calcule pas. Aucun `f64` n'entre ici,
+/// `AnimatedNumber` étant un affichage et non une source. Et marquer
+/// `used_hands` **est** la consommation de la case (ADR-001) : une main
+/// abandonnée avant la fin du dépilement ne consomme rien, ce qui est voulu.
+pub fn commit_score_when_drained(
+    time: Res<Time>,
+    mut queue: ResMut<ScoringStepQueue>,
+    mut blind: ResMut<BlindContext>,
+) {
+    if queue.committed || !queue.steps.is_empty() {
+        return;
+    }
+    queue.final_pause.tick(time.delta()); // JAMAIS multipliée par effective_speed()
+    if !queue.final_pause.is_finished() {
+        return;
+    }
+
+    // ---- COMMIT UNIQUE. Aucun autre système du projet ne fait ceci. ----
+    blind.current_score = blind.current_score.saturating_add(queue.final_score);
+    // `saturating_sub` : à zéro, un `-` nu rendrait 255 en release et
+    // paniquerait en debug.
+    blind.hands_remaining = blind.hands_remaining.saturating_sub(1);
+    blind.used_hands.mark(queue.hand); // grille consommable
+    queue.committed = true;
 }
 
 /// Amplitude d'une pulsation ordinaire, et de la pulsation renforcée d'une
@@ -250,6 +310,10 @@ mod tests {
         app.init_resource::<Time>();
         app.init_state::<AppState>();
         app.add_sub_state::<RunPhase>();
+        // Le commit réclame la manche : `ui_and_juice` n'est pas montable sans
+        // `game_state`, et une manche absente pendant le comptage est un
+        // montage cassé, pas un cas nominal.
+        app.insert_resource(manche(0, 3, 9_999));
         app.insert_resource(ScoringStepQueue::new(
             (1..=nombre).map(palier).collect::<VecDeque<_>>(),
             YahtzeeHand::FullHouse,
@@ -308,6 +372,158 @@ mod tests {
         } else {
             touches.release(KeyCode::Space);
         }
+    }
+
+    // ---- Commit unique du score (TASK-50) ----
+
+    use core_engine::blind::{BlindContext, BlindDefinition};
+    use core_engine::hands::HandGrid;
+
+    /// Une manche prête à recevoir un commit.
+    fn manche(score: u64, mains: u8, cible: u64) -> BlindContext {
+        BlindContext {
+            blind: BlindDefinition::default(),
+            target_score: cible,
+            current_score: score,
+            hands_remaining: mains,
+            used_hands: HandGrid::default(),
+        }
+    }
+
+    /// App du commit, **sans garde d'état** : le système tourne à chaque frame,
+    /// de sorte que les tests éprouvent le drapeau `committed` et non la garde.
+    /// Sous garde, `test_score_committed_exactly_once` ne prouverait que la
+    /// sortie de phase.
+    fn app_commit(file: ScoringStepQueue, manche: BlindContext) -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins.build().disable::<TimePlugin>());
+        app.init_resource::<Time>();
+        app.insert_resource(file);
+        app.insert_resource(manche);
+        app.add_systems(Update, commit_score_when_drained);
+        app
+    }
+
+    fn file_drainee(total: u64, figure: YahtzeeHand) -> ScoringStepQueue {
+        ScoringStepQueue::new(VecDeque::new(), figure, total)
+    }
+
+    fn avancer_de(app: &mut App, microsecondes: u64) {
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_micros(microsecondes));
+        app.update();
+    }
+
+    fn score(app: &App) -> u64 {
+        app.world().resource::<BlindContext>().current_score
+    }
+
+    #[test]
+    fn test_score_committed_exactly_once() {
+        let mut app = app_commit(
+            file_drainee(1_000, YahtzeeHand::FullHouse),
+            manche(500, 3, 9_999),
+        );
+        avancer_de(&mut app, 500_000);
+        assert_eq!(score(&app), 1_500, "le total n'a pas été commis");
+
+        // Cent frames de plus, système toujours actif : le drapeau seul retient.
+        for _ in 0..100 {
+            avancer_de(&mut app, 16_667);
+        }
+        assert_eq!(score(&app), 1_500, "le score a été commis plus d'une fois");
+        assert_eq!(app.world().resource::<BlindContext>().hands_remaining, 2);
+    }
+
+    #[test]
+    fn test_final_pause_is_not_accelerated() {
+        let mut file = file_drainee(1_000, YahtzeeHand::FullHouse);
+        file.set_speed_multiplier(2).expect("vitesse admise");
+        file.fast_forward = true;
+        assert_eq!(file.effective_speed(), 8.0, "le montage ne teste rien");
+
+        let mut app = app_commit(file, manche(0, 3, 9_999));
+        // 0,49 s : rien. La pause vaut 0,5 s même à x8.
+        avancer_de(&mut app, 490_000);
+        assert_eq!(score(&app), 0, "la pause finale a été accélérée");
+        avancer_de(&mut app, 10_000);
+        assert_eq!(score(&app), 1_000);
+    }
+
+    #[test]
+    fn test_nothing_is_committed_while_steps_remain() {
+        let mut file = file_drainee(1_000, YahtzeeHand::FullHouse);
+        file.steps.push_back(palier_de(
+            StepSource::HandBase {
+                hand: YahtzeeHand::FullHouse,
+            },
+            ScoreAction::AddChips(10),
+        ));
+        let mut app = app_commit(file, manche(0, 3, 9_999));
+        for _ in 0..60 {
+            avancer_de(&mut app, 16_667);
+        }
+        assert_eq!(score(&app), 0, "commis avec des paliers en attente");
+    }
+
+    #[test]
+    fn test_hands_remaining_saturates() {
+        let mut app = app_commit(
+            file_drainee(10, YahtzeeHand::FullHouse),
+            manche(0, 0, 9_999),
+        );
+        avancer_de(&mut app, 500_000);
+        assert_eq!(
+            app.world().resource::<BlindContext>().hands_remaining,
+            0,
+            "une soustraction nue aurait rendu 255"
+        );
+    }
+
+    #[test]
+    fn test_used_hands_marks_played_hand() {
+        let mut app = app_commit(
+            file_drainee(10, YahtzeeHand::FullHouse),
+            manche(0, 3, 9_999),
+        );
+        avancer_de(&mut app, 500_000);
+        let grille = app.world().resource::<BlindContext>().used_hands;
+        for figure in YahtzeeHand::ALL {
+            assert_eq!(
+                grille.contains(figure),
+                figure == YahtzeeHand::FullHouse,
+                "grille fausse pour {figure:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_closed_queue_commits_nothing() {
+        // Entrée stérile : la file au repos naît `committed`, elle n'a rien à
+        // rejouer ni à commettre. C'est la raison d'être du `Default` de
+        // TASK-47, et ce test en fait une décision.
+        let mut app = app_commit(ScoringStepQueue::default(), manche(500, 3, 9_999));
+        avancer_de(&mut app, 500_000);
+        assert_eq!(score(&app), 500);
+        assert_eq!(app.world().resource::<BlindContext>().hands_remaining, 3);
+    }
+
+    #[test]
+    fn test_commit_precedes_the_phase_exit() {
+        // La sortie de phase appartient à `game_state`, qui attend le drapeau.
+        // Ici on vérifie l'ordre : quand `committed` passe à vrai, les trois
+        // écritures sont **déjà** faites, donc `RoundEnd` arbitrera sur un
+        // contexte à jour.
+        let mut app = app_commit(
+            file_drainee(1_000, YahtzeeHand::FullHouse),
+            manche(0, 3, 9_999),
+        );
+        avancer_de(&mut app, 500_000);
+        let file = app.world().resource::<ScoringStepQueue>();
+        assert!(file.committed);
+        assert_eq!(score(&app), 1_000);
+        assert_eq!(app.world().resource::<BlindContext>().hands_remaining, 2);
     }
 
     // ---- Mise en scène d'un palier (TASK-49) ----

@@ -121,7 +121,20 @@ fn resolve_round_outcome(
 }
 
 /// `Update`, sous `in_state(RunPhase::Scoring)` : la phase se quitte quand la
-/// file est vide. L'Étape 4 la vide au rythme de son animation.
+/// file est vide **et le score commis**. L'Étape 4 la vide au rythme de son
+/// animation, puis commet après sa pause finale.
+///
+/// **Les deux conditions, et pas seulement la première.** La file est vide dès
+/// que le dernier palier est dépilé, mais le commit n'a lieu qu'une demi-seconde
+/// plus tard : quitter à la première condition ferait arbitrer `RoundEnd` sur un
+/// `BlindContext` où rien n'a été ajouté, où aucune main n'a été décomptée, et la
+/// run boucherait sur `Roll` avec un score nul. Le drapeau ordonne les deux
+/// crates sans dépendre de l'ordonnancement des systèmes de l'une et de l'autre.
+///
+/// **La transition reste ici, la décision de TASK-38 ne bouge pas.** Sans Étape 4
+/// montée, la file ne se vide jamais et la phase attend, ce qui est le
+/// comportement voulu ; une file au repos, elle, naît `committed` et sort
+/// aussitôt, n'ayant rien à rejouer.
 fn leave_scoring_when_queue_is_empty(
     queue: Option<Res<ScoringStepQueue>>,
     mut phase: ResMut<NextState<RunPhase>>,
@@ -129,7 +142,7 @@ fn leave_scoring_when_queue_is_empty(
     let Some(queue) = queue else {
         return;
     };
-    if queue.steps.is_empty() {
+    if queue.steps.is_empty() && queue.committed {
         NextState::set_if_neq(&mut phase, RunPhase::RoundEnd);
     }
 }
@@ -304,10 +317,7 @@ mod tests {
     fn cas_scoring_vers_round_end(app: &mut App) {
         entrer_dans_roll(app);
         entrer_dans(app, RunPhase::Scoring);
-        app.world_mut()
-            .resource_mut::<ScoringStepQueue>()
-            .steps
-            .clear();
+        vider_et_commettre(app);
         deux_frames(app);
     }
 
@@ -448,6 +458,15 @@ mod tests {
         assert_eq!(phase(&app), Some(RunPhase::Roll));
     }
 
+    /// Vide la file **et pose le drapeau de commit**, comme le fera l'Étape 4
+    /// après sa pause finale. Les deux gestes vont ensemble : la phase ne se
+    /// quitte plus sur la seule file vide.
+    fn vider_et_commettre(app: &mut App) {
+        let mut file = app.world_mut().resource_mut::<ScoringStepQueue>();
+        file.steps.clear();
+        file.committed = true;
+    }
+
     #[test]
     fn test_scoring_leaves_only_when_the_queue_is_empty() {
         // La file se remplit par une **vraie** soumission : `build_scoring_report`
@@ -463,13 +482,45 @@ mod tests {
             "la phase a été quittée avec une file pleine"
         );
 
-        // Vidée à la main, comme le fera le dépilement de l'Étape 4.
+        // Vidée à la main, comme le fera le dépilement de l'Étape 4 — **sans
+        // commettre** : la file vide ne suffit plus.
         app.world_mut()
             .resource_mut::<ScoringStepQueue>()
             .steps
             .clear();
         deux_frames(&mut app);
+        assert_eq!(
+            phase(&app),
+            Some(RunPhase::Scoring),
+            "la phase a été quittée avant que le score soit commis"
+        );
+
+        // Puis commise, comme le fera `commit_score_when_drained` après sa
+        // pause finale.
+        app.world_mut().resource_mut::<ScoringStepQueue>().committed = true;
+        deux_frames(&mut app);
         assert_eq!(phase(&app), Some(RunPhase::RoundEnd));
+    }
+
+    #[test]
+    fn test_scoring_never_leaves_while_steps_remain() {
+        // **Ceinture et bretelles, et c'est délibéré.** Aujourd'hui `committed`
+        // n'est jamais vrai avec des paliers en attente : le remplissage rend
+        // toujours un garde-fou ouvert. Le banc a montré que la condition sur la
+        // file est donc redondante — mais elle protège d'un futur remplissage
+        // qui oublierait de rouvrir le garde-fou, et qui ferait sinon quitter la
+        // phase en plein dépilement. Ce test tient cette protection.
+        let mut app = app_en_run(CupId::Standard);
+        cas_roll_vers_scoring(&mut app);
+
+        app.world_mut().resource_mut::<ScoringStepQueue>().committed = true;
+        deux_frames(&mut app);
+
+        assert_eq!(
+            phase(&app),
+            Some(RunPhase::Scoring),
+            "la phase a été quittée avec des paliers en attente"
+        );
     }
 
     #[test]
@@ -554,10 +605,7 @@ mod tests {
         // Cible atteinte : l'arbitre enverra en boutique. Posé avant que la
         // file ne se vide, sinon l'arbitre tranche sur l'ancien contexte.
         arbitrer(&mut app, 500, 300, 2);
-        app.world_mut()
-            .resource_mut::<ScoringStepQueue>()
-            .steps
-            .clear();
+        vider_et_commettre(&mut app);
         deux_frames(&mut app);
         deux_frames(&mut app);
         assert_eq!(phase(&app), Some(RunPhase::Shop), "blind battue");
