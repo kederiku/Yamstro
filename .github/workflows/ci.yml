@@ -272,6 +272,32 @@ jobs:
           forbid  "critère 9  font_size en flottant nu"  -n 'font_size:\s*[0-9]' crates/
           forbid  "critère 9  cosmic-text"               -n 'cosmic' crates/
 
+          # ---- Étape 4 : secousse de caméra et réglages (TASK-45) ----
+          # Le ticket demandait un « test » qui n'en est pas un : une commande
+          # rg dans un tableau de tests unitaires. Sa place est ici, et le
+          # motif est ancré sur des **identifiants**, jamais sur le mot : le
+          # commentaire d'`apply_screen_shake` doit pouvoir expliquer qu'il ne
+          # puise dans aucun flux de la partie sans déclencher la garde qu'il
+          # documente. C'est le défaut que le corpus rejoue de ticket en
+          # ticket.
+          forbid  "critère 4  flux déterministe puisé par le juice" -n '\bRunRng\b|\brng\b|thread_rng|rand::|gen_range|random' crates/ui_and_juice/src
+          # La caméra est le second écrivain de `Transform`, et le seul admis.
+          # La garde du critère 4 plus haut l'autorise dans ce fichier ; celle-ci
+          # exige qu'il y soit, et que la dérogation reste écrite.
+          require "critère 4  la secousse écrit la caméra" -n 'Query<&mut Transform, With<Camera2d>>' crates/ui_and_juice/src/animation.rs
+          require "critère 4  exception caméra documentée" -n 'la seule exception admise' crates/ui_and_juice/src/animation.rs
+          # Écriture absolue : un cumul par frame et la caméra dérive hors cadre
+          # sans que rien ne le signale.
+          forbid  "critère 4  écriture caméra cumulative" -n 'translation(\.[xyz])?\s*\+=' crates/ui_and_juice/src
+          # `flash_intensity` existe dès maintenant et n'est consommée qu'à
+          # TASK-51. Ancré sur le champ hors de son fichier de déclaration :
+          # `settings.rs` a le droit de le nommer, personne d'autre.
+          forbid  "critère 4  consommateur de flash avant TASK-51" -n 'flash_intensity' crates/ui_and_juice/src -g '!crates/ui_and_juice/src/settings.rs'
+          # `Resource` est un sous-trait de `Component` en 0.19 : poser une de
+          # ces ressources sur une entité despawnerait silencieusement les
+          # autres porteurs.
+          forbid  "critère 4  réglages posés en composant" -n 'derive\(.*Component' crates/ui_and_juice/src/settings.rs
+
           exit $status
 
   # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en

@@ -35,6 +35,7 @@
 //! `.before()` et `.after()` restent les combinateurs ordinaires.
 
 pub mod animation;
+pub mod settings;
 
 use bevy::prelude::*;
 use game_state::RunPhase;
@@ -67,6 +68,9 @@ pub struct JuicePlugin;
 
 impl Plugin for JuicePlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<crate::animation::ScreenShake>()
+            .init_resource::<crate::settings::JuiceSettings>();
+
         app.configure_sets(
             Update,
             (JuiceSet::ReadInput, JuiceSet::TickQueue, JuiceSet::Commit)
@@ -81,6 +85,7 @@ impl Plugin for JuicePlugin {
             (
                 crate::animation::animate_punch_scale,
                 crate::animation::animate_numbers,
+                crate::animation::apply_screen_shake,
             )
                 .in_set(JuiceSet::Animation),
         );

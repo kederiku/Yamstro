@@ -28,6 +28,8 @@
 
 use bevy::prelude::*;
 
+use crate::settings::JuiceSettings;
+
 /// Impulsion d'échelle, posée par commande sur l'entité à secouer.
 ///
 /// **`Component` uniquement.** En 0.19, `Resource` est un sous-trait de
@@ -175,6 +177,120 @@ pub fn animate_punch_scale(
             transform.scale = punch.base_scale;
             commands.entity(entity).remove::<PunchScale>();
         }
+    }
+}
+
+/// Secousse de caméra : un trauma borné qui décroît, et une amplitude
+/// quadratique.
+///
+/// **`Resource` uniquement**, pour la même raison que `JuiceSettings`.
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub struct ScreenShake {
+    /// Borné à `1.0`.
+    pub trauma: f32,
+    /// Unités de trauma par seconde.
+    pub decay: f32,
+    /// Amplitude maximale, en pixels.
+    pub max_offset: f32,
+}
+
+impl Default for ScreenShake {
+    /// **Un `derive(Default)` serait faux** : il donnerait `decay = 0.0` et
+    /// `max_offset = 0.0`, c'est-à-dire une secousse qui ne retombe jamais et
+    /// ne bouge jamais.
+    ///
+    /// Ces deux valeurs sont des **réglages**, à confirmer par la direction
+    /// artistique à l'Étape 7 — contrairement aux constantes du ressort, qui
+    /// sont figées. `decay = 1.5` fait retomber un trauma plein en deux tiers
+    /// de seconde.
+    fn default() -> Self {
+        Self {
+            trauma: 0.0,
+            decay: 1.5,
+            max_offset: 12.0,
+        }
+    }
+}
+
+impl ScreenShake {
+    /// Ajoute du trauma, **borné à `1.0`** : plusieurs ajouts dans la même
+    /// frame n'empilent pas au-delà.
+    pub fn add_trauma(&mut self, amount: f32) {
+        self.trauma = (self.trauma + amount).min(1.0);
+    }
+
+    /// Amplitude appliquée, extraite pour être testable **sans dépendre de la
+    /// phase du déplacement**.
+    ///
+    /// Le carré n'est pas cosmétique : à trauma 0,5 l'amplitude vaut le
+    /// **quart** de celle à trauma 1,0, pas la moitié. Une relation linéaire
+    /// donnerait un tremblement de fond permanent pendant toute la traîne de
+    /// décroissance — fatigant à l'œil, illisible sur les paliers suivants, et
+    /// sans rien gagner sur les gros impacts.
+    pub fn amplitude(&self, shake_intensity: f32) -> f32 {
+        self.max_offset * self.trauma * self.trauma * shake_intensity
+    }
+}
+
+/// Fréquences du déplacement, en hertz. Premières entre elles, pour que le
+/// motif ne se referme jamais.
+///
+/// **Ce ne sont pas des valeurs anodines.** Elles décident de ce qu'on voit :
+/// à 2 Hz on obtient un balancement de bateau, à 31 et 37 un tremblement. Le
+/// corpus ne les chiffrait pas.
+///
+/// **Et ce n'est pas du bruit.** Deux sinusoïdes tracent une figure de
+/// Lissajous, c'est-à-dire une courbe lisse. À ces fréquences elle se lit comme
+/// du tremblement, mais si la direction artistique veut du vrai bruit il faudra
+/// une fonction de hachage, pas un ajustement de fréquence. Réglages d'Étape 7.
+const SHAKE_FREQ_X: f32 = 31.0;
+const SHAKE_FREQ_Y: f32 = 37.0;
+
+/// `Update`, dans `JuiceSet::Animation`, sans garde d'état : si le système
+/// s'arrêtait à la transition vers la fin de manche, la caméra resterait
+/// décalée de son dernier offset.
+///
+/// # L'exception caméra
+///
+/// `animate_punch_scale` est le seul système qui écrit dans le `Transform`
+/// d'une entité **de jeu**. **Celui-ci écrit dans celui de la caméra, et c'est
+/// la seule exception admise** — l'audit de fin d'étape compte deux écrivains
+/// et doit savoir pourquoi.
+///
+/// Il n'y a pas de conflit d'accès : les deux requêtes empruntent
+/// `&mut Transform`, donc l'ordonnanceur les sérialise au lieu de les
+/// paralléliser. Ce qui panique, c'est deux requêtes sur `&mut Transform` dans
+/// **un même** système.
+///
+/// # L'écriture est absolue, jamais cumulative
+///
+/// `translation.x = offset` et non `+=`. C'est le défaut classique de la
+/// secousse : un cumul par frame et la caméra dérive lentement hors cadre, sans
+/// que rien ne le signale. La base est l'origine en `x` et `y` ; `z` n'est
+/// jamais touché, c'est l'ordre de tri 2D. Si une étape ultérieure fait bouger
+/// la caméra, cette convention devra être rouverte explicitement.
+///
+/// # La direction ne puise dans aucun des quatre flux de la partie
+///
+/// Ceux-ci sont du gameplay déterministe : y puiser pour du visuel
+/// désynchroniserait la partie selon la cadence d'affichage. Le déplacement est
+/// dérivé du temps écoulé, donc reproductible et sans état supplémentaire.
+pub fn apply_screen_shake(
+    time: Res<Time>,
+    settings: Res<JuiceSettings>,
+    mut shake: ResMut<ScreenShake>,
+    mut camera: Query<&mut Transform, With<Camera2d>>,
+) {
+    // Jamais sous zéro : un trauma négatif redonnerait une amplitude positive
+    // par le carré, et la secousse repartirait toute seule.
+    shake.trauma = (shake.trauma - shake.decay * time.delta_secs()).max(0.0);
+
+    let amplitude = shake.amplitude(settings.shake_intensity);
+    let t = time.elapsed_secs() * std::f32::consts::TAU;
+
+    for mut transform in &mut camera {
+        transform.translation.x = amplitude * (t * SHAKE_FREQ_X).sin();
+        transform.translation.y = amplitude * (t * SHAKE_FREQ_Y).sin();
     }
 }
 
@@ -737,5 +853,198 @@ mod tests {
 
         assert!(affiche(&app, entite) > 0.0, "le compteur n'a pas avancé");
         assert_ne!(echelle(&app, entite), Vec3::ONE, "le ressort n'a pas joué");
+    }
+
+    // ---- ScreenShake ----
+
+    use crate::settings::JuiceSettings;
+
+    /// Application avec une caméra posée à un endroit connu.
+    ///
+    /// La caméra est **déplacée** exprès : à l'origine, « l'amplitude vaut
+    /// zéro » et « le système n'écrit rien » sont indistinguables.
+    fn app_camera(x: f32, y: f32, z: f32) -> (App, Entity) {
+        let mut app = app_animation();
+        let camera = app
+            .world_mut()
+            .spawn((Camera2d, Transform::from_xyz(x, y, z)))
+            .id();
+        (app, camera)
+    }
+
+    fn position(app: &App, camera: Entity) -> Vec3 {
+        app.world()
+            .get::<Transform>(camera)
+            .expect("caméra")
+            .translation
+    }
+
+    fn trauma(app: &App) -> f32 {
+        app.world().resource::<ScreenShake>().trauma
+    }
+
+    #[test]
+    fn test_trauma_is_clamped_to_one() {
+        let mut secousse = ScreenShake::default();
+        for _ in 0..3 {
+            secousse.add_trauma(0.6);
+        }
+        assert_eq!(secousse.trauma, 1.0, "le trauma s'est empilé au-delà de 1");
+    }
+
+    #[test]
+    fn test_screen_shake_defaults_are_not_zero() {
+        // **Un `derive(Default)` serait faux** : il donnerait une secousse qui
+        // ne décroît jamais et ne bouge jamais. Ces deux valeurs sont des
+        // **réglages d'Étape 7**, contrairement aux constantes du ressort.
+        let secousse = ScreenShake::default();
+        assert_eq!(secousse.trauma, 0.0);
+        assert!(secousse.decay > 0.0, "une secousse qui ne retombe jamais");
+        assert!(
+            secousse.max_offset > 0.0,
+            "une secousse qui ne bouge jamais"
+        );
+    }
+
+    #[test]
+    fn test_amplitude_is_quadratic() {
+        // À trauma 0,5 l'amplitude vaut le **quart** de celle à trauma 1,0, et
+        // non la moitié : les petites secousses restent discrètes, les grosses
+        // sont franches. Une relation linéaire donnerait un tremblement de fond
+        // permanent pendant toute la traîne de décroissance.
+        //
+        // Le test porte sur `amplitude()`, jamais sur la translation : la phase
+        // du déplacement n'a pas à entrer dans l'assertion.
+        let mut plein = ScreenShake::default();
+        plein.add_trauma(1.0);
+        let mut moitie = ScreenShake::default();
+        moitie.add_trauma(0.5);
+
+        assert_eq!(moitie.amplitude(1.0) * 4.0, plein.amplitude(1.0));
+    }
+
+    #[test]
+    fn test_camera_actually_moves_with_trauma() {
+        // Sans ce test, un système qui n'écrirait **rien** passerait tous les
+        // autres : la caméra reposant à l'origine, « ramenée à la base » et
+        // « jamais touchée » se ressemblent.
+        let (mut app, camera) = app_camera(0.0, 0.0, 999.0);
+        app.world_mut()
+            .resource_mut::<ScreenShake>()
+            .add_trauma(1.0);
+
+        let mut ecart_max = 0.0_f32;
+        for _ in 0..10 {
+            avancer(&mut app);
+            let p = position(&app, camera);
+            ecart_max = ecart_max.max(p.x.abs()).max(p.y.abs());
+        }
+
+        assert!(
+            ecart_max > 3.0,
+            "la caméra n'a pas bougé : écart max {ecart_max}"
+        );
+    }
+
+    #[test]
+    fn test_decay_controls_the_settling_time() {
+        // `decay` est un **taux**, en unités de trauma par seconde : le doubler
+        // divise par deux le temps de retour au calme. Sans ce test, un `decay`
+        // ignoré au profit de sa valeur par défaut passe inaperçu — le banc l'a
+        // montré.
+        fn frames_jusqu_au_calme(decay: f32) -> usize {
+            let (mut app, _) = app_camera(0.0, 0.0, 0.0);
+            {
+                let mut secousse = app.world_mut().resource_mut::<ScreenShake>();
+                secousse.decay = decay;
+                secousse.add_trauma(1.0);
+            }
+            for tour in 0..300 {
+                if trauma(&app) == 0.0 {
+                    return tour;
+                }
+                avancer(&mut app);
+            }
+            300
+        }
+
+        let lent = frames_jusqu_au_calme(1.5);
+        let rapide = frames_jusqu_au_calme(3.0);
+
+        assert!(lent < 300 && rapide < 300, "aucune des deux n'est retombée");
+        assert!(
+            (lent as i32 - rapide as i32 * 2).abs() <= 2,
+            "décroissance non proportionnelle : {lent} frames contre {rapide}"
+        );
+    }
+
+    #[test]
+    fn test_shake_moves_in_two_dimensions() {
+        // Deux fréquences **distinctes**, sinon `x` et `y` sont égaux à chaque
+        // instant et la caméra ne tremble que sur une diagonale. Le banc a
+        // montré qu'aucun test ne le voyait.
+        let (mut app, camera) = app_camera(0.0, 0.0, 0.0);
+        app.world_mut()
+            .resource_mut::<ScreenShake>()
+            .add_trauma(1.0);
+
+        let mut ecart_max = 0.0_f32;
+        for _ in 0..10 {
+            avancer(&mut app);
+            let p = position(&app, camera);
+            ecart_max = ecart_max.max((p.x - p.y).abs());
+        }
+
+        assert!(
+            ecart_max > 1.0,
+            "x et y bougent ensemble : la secousse est diagonale, écart max {ecart_max}"
+        );
+    }
+
+    #[test]
+    fn test_trauma_decays_to_zero_and_camera_returns() {
+        let (mut app, camera) = app_camera(0.0, 0.0, 999.0);
+        app.world_mut()
+            .resource_mut::<ScreenShake>()
+            .add_trauma(1.0);
+
+        for _ in 0..120 {
+            avancer(&mut app);
+            if trauma(&app) == 0.0 {
+                break;
+            }
+        }
+
+        assert_eq!(trauma(&app), 0.0, "le trauma n'est pas retombé à zéro");
+        // Un trauma négatif redonnerait une amplitude positive par le carré :
+        // une secousse qui repart toute seule.
+        assert!(trauma(&app) >= 0.0);
+
+        let p = position(&app, camera);
+        assert_eq!(p.x, 0.0, "la caméra est restée décalée en x");
+        assert_eq!(p.y, 0.0, "la caméra est restée décalée en y");
+        assert_eq!(p.z, 999.0, "l'ordre de tri 2D a été touché");
+    }
+
+    #[test]
+    fn test_zero_shake_intensity_freezes_camera() {
+        // La caméra part **décalée** : à intensité nulle elle doit être ramenée
+        // à sa base, ce qui pince à la fois que l'écriture a lieu, qu'elle est
+        // absolue et non cumulative, et que `z` n'est jamais touché.
+        let (mut app, camera) = app_camera(5.0, 7.0, 999.0);
+        app.world_mut()
+            .resource_mut::<JuiceSettings>()
+            .shake_intensity = 0.0;
+        app.world_mut()
+            .resource_mut::<ScreenShake>()
+            .add_trauma(1.0);
+
+        for _ in 0..10 {
+            avancer(&mut app);
+            let p = position(&app, camera);
+            assert_eq!(p.x, 0.0, "la caméra bouge malgré une intensité nulle");
+            assert_eq!(p.y, 0.0, "la caméra bouge malgré une intensité nulle");
+            assert_eq!(p.z, 999.0);
+        }
     }
 }
