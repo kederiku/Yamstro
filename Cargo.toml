@@ -1,14 +1,14 @@
 # Cargo.toml — racine du workspace
 [workspace]
 resolver = "3"
-members = ["crates/core_engine"]
+members = ["crates/core_engine", "crates/game_state"]
 
 [workspace.package]
 edition = "2024"
 rust-version = "1.95"
 
 [workspace.dependencies]
-bevy         = "=0.19.1"
+bevy         = { version = "=0.19.1", default-features = false }
 bevy_ecs     = "=0.19.1"
 bevy_reflect = "=0.19.1"
 rand         = "0.10"
