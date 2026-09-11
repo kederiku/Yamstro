@@ -144,6 +144,23 @@ fn scan_relics<O: FnMut(Hook, &TriggerCtx<'_>)>(
     }
 }
 
+/// Valeurs d'attente des deux champs de lancer. **À câbler par TASK-61**, qui
+/// retirera ces deux constantes et la garde de CI qui les épingle.
+///
+/// Le pipeline ne connaît ni le rang du lancer ni les relances restantes : ni
+/// l'un ni l'autre n'entre dans sa signature, et le rang n'est compté nulle part
+/// dans le projet à cette étape.
+///
+/// **Le choix des valeurs inverse le mode de défaillance.** Un `roll_index` à
+/// zéro rendrait **vraie** la garde entière de *Dé Fantôme* — `roll_index == 0`
+/// — et ferait déclencher la relique à chaque main : une erreur de score
+/// silencieuse. À `u8::MAX`, la garde est fausse, et un câblage oublié donne une
+/// relique qui ne part jamais, ce qu'un test de TASK-61 verra. `rerolls_left`
+/// vaut zéro pour la raison symétrique : *Tirelire en Terre* accumule cette
+/// valeur, et zéro n'accumule rien.
+const ROLL_INDEX_NON_CABLE: u8 = u8::MAX;
+const REROLLS_LEFT_NON_CABLE: u8 = 0;
+
 /// Passe A complète telle qu'elle existe à ce stade : la base de la figure,
 /// puis les dés comptabilisés et le déclencheur `OnScoringDie`.
 ///
@@ -196,6 +213,8 @@ fn pass_a_with<O: FnMut(Hook, &TriggerCtx<'_>)>(
         base_chips,
         base_mult,
         left_effects: &[],
+        roll_index: ROLL_INDEX_NON_CABLE,
+        rerolls_left: REROLLS_LEFT_NON_CABLE,
     };
 
     for die_id in &hand.scoring_dice {

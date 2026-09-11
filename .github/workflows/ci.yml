@@ -481,6 +481,30 @@ jobs:
           # davantage à un aller-retour serde.
           forbid  "critère 5  table associative dans les reliques" -n 'HashMap|BTreeMap' crates/core_engine/src/relics
 
+          # ---- Étape 5 : contexte de déclenchement (TASK-55) ----
+          # La vue est en lecture seule, et c'est sa raison d'être : un emprunt
+          # exclusif rouvrirait le mur de borrow-checker de *Miroir Double*.
+          # L'en-tête du fichier énonce la règle **sans écrire le motif** : une
+          # garde large se contourne par le sens, jamais par une exception.
+          # Le motif couvre `&'a mut` : la commande du corpus, `rg '&mut'`, le
+          # manquait — et c'est précisément la forme qu'un emprunt exclusif
+          # prendrait dans une structure paramétrée par une durée de vie.
+          forbid  "critère 5  emprunt exclusif dans le contexte" -n "&\\s*('[a-z_]+\\s+)?mut\\b|Cell|RefCell|UnsafeCell|Mutex|HashMap|HashSet|f64|f32" crates/core_engine/src/scoring/trigger.rs
+          require "critère 5  les treize champs du contexte" -nU 'pub left_effects: &.a \[ScoreEffect\],[^}]*pub roll_index: u8,[^}]*pub rerolls_left: u8,\n\}' crates/core_engine/src/scoring/trigger.rs
+          # Les deux types du retour de `OnRoll` sont normatifs : un delta non
+          # signé supprimerait la capacité d'exprimer un retrait de relance, et
+          # un index de position serait faux dès qu'un dé quitte la manche.
+          require "critère 5  delta de relance signé" -n 'pub reroll_delta: i8,' crates/core_engine/src/scoring/trigger.rs
+          require "critère 5  dés forcés adressés par identité" -n 'pub force_values: Vec<\(DieId, u8\)>,' crates/core_engine/src/scoring/trigger.rs
+          forbid  "critère 5  dés forcés adressés par position" -n 'force_values: \[|force_values: Vec<\(usize|reroll_delta: u8' crates/
+          # Ancré sur les deux types, pas sur le fichier : `Hook` porte
+          # légitimement serde, et la commande du corpus l'ignorait.
+          forbid  "critère 5  contexte ou modificateur sérialisés" -nU 'serde::(Serialize|Deserialize)[^\n]*\n(#\[[^\n]*\n)*pub struct (TriggerCtx|RollModifier)' crates/core_engine/src/scoring/trigger.rs
+          # **Dette datée, à lever par TASK-61.** Le pipeline ne connaît pas
+          # encore le rang du lancer ; cette garde nomme le ticket qui doit la
+          # retirer, ce qui distingue une dette inscrite d'une dette oubliée.
+          require "critère 5  valeurs d'attente du lancer, à câbler par TASK-61" -n 'const ROLL_INDEX_NON_CABLE: u8 = u8::MAX;' crates/core_engine/src/scoring/pipeline.rs
+
           exit $status
 
   # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en

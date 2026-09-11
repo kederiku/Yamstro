@@ -179,6 +179,8 @@ mod tests {
                 base_chips: 30,
                 base_mult: 400,
                 left_effects: &self.left_effects,
+                roll_index: 0,
+                rerolls_left: 0,
             }
         }
     }
