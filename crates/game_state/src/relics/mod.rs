@@ -41,7 +41,7 @@ use core_engine::scoring::{Hook, TriggerCtx};
 
 use crate::resources::{HandContext, RunSession};
 use crate::states::RunPhase;
-use core_engine::blind::BlindContext;
+use core_engine::blinds::BlindContext;
 
 /// Valeurs d'attente des champs que seule la passe de score renseigne.
 ///

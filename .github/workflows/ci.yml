@@ -839,6 +839,40 @@ jobs:
           forbid  "critère 5  valeurs forcées adressées par position" -n 'forcees\[|dice\[' "$SETUP"
           forbid  "critère 5  aléa tiré à l'application des valeurs forcées" -nU 'fn apply_forced_values[^}]*rng' "$SETUP"
 
+
+          # ---- Étape 6 : contraintes de manche (TASK-68) ----
+          BLINDS=$SRC/blinds/mod.rs
+          # Une seule énumération, à un seul endroit : un second `BlindModifier`
+          # « complet » à côté de l'ancien laisserait le pipeline sur l'un et la
+          # boutique sur l'autre, sans erreur de compilation.
+          require "critère 6  l'énumération des contraintes, à un seul endroit" -n 'pub enum BlindModifier \{' "$BLINDS"
+          # **L'arité inline n'est pas observable** : une `SmallVec` déborde sur
+          # le tas, donc `[T; 1]` porte deux figures aussi bien que `[T; 2]` et
+          # aucun test ne les distingue. Le glossaire impose la forme ; seule
+          # une garde sur la déclaration la tient.
+          require "critère 6  capacité inline des figures affaiblies" -n 'DebuffHands\(SmallVec<\[YahtzeeHand; 2\]>\)' "$BLINDS"
+          require "critère 6  capacité inline des figures imposées" -n 'OnlyHands\(SmallVec<\[YahtzeeHand; 2\]>\)' "$BLINDS"
+          forbid  "critère 6  seconde énumération de contraintes" -n 'enum BlindModifier' crates/ -g '!**/blinds/mod.rs'
+          # L'absence de contrainte est le `None` de l'Option, jamais une
+          # variante ; et le singulier ne pouvait pas exprimer *L'Oubli*.
+          # Ancrée sur l'**acte** : la variante employée en code, jamais son
+          # nom en prose. La note du module doit pouvoir écrire le singulier
+          # écarté pour dire pourquoi il l'est.
+          forbid  "critère 6  variante None ou figure au singulier" -n 'BlindModifier::None\b|BlindModifier::DebuffHand\(' crates/
+          # Aucun bras attrape-tout sur une contrainte : l'Étape 9 n'ajoutera
+          # aucune variante, donc tout `match` écrit ici doit rester exhaustif.
+          forbid  "critère 6  bras attrape-tout sur une contrainte" -nU 'match [^{]*modifier[^{]*\{[^}]*\n\s*_ =>' "$SRC"
+          # Le renommage est complet : deux chemins pour un même type feraient
+          # diverger les importateurs.
+          forbid  "critère 6  ancien chemin du module de manche" -n 'core_engine::blind\b|crate::blind\b|mod blind;' crates/
+          # Reflect seul sur les trois types de données ; seul le contexte est
+          # une ressource.
+          forbid  "critère 6  contrainte rendue composant ou ressource" -nU 'reflect\(Resource\)[^\n]*\n(#[^\n]*\n)*pub (enum BlindModifier|enum BlindType|struct BlindDefinition)' "$BLINDS"
+          # Le pipeline n'accède au modificateur de **manche** que par
+          # `has_modifier`. Ancré sur ce champ-là : `die.modifiers` désigne les
+          # modificateurs de dé, sans rapport, et un motif nu les attrape.
+          forbid  "critère 6  le pipeline rouvre le modificateur de manche" -n 'blind\.modifier\b|blind\.blind\.modifier' "$SRC/scoring"
+
           exit $status
 
   # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en

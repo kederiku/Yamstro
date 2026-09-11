@@ -1,6 +1,6 @@
 //! `core_engine` — moteur de Yams pur, sans dépendance au moteur de rendu.
 
-pub mod blind;
+pub mod blinds;
 pub mod config;
 pub mod cups;
 pub mod dice;

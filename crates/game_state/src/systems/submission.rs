@@ -28,7 +28,7 @@
 //! courante ; `set_if_neq` sera requis en TASK-38, pour le retour au lancer.
 
 use bevy::prelude::*;
-use core_engine::blind::BlindContext;
+use core_engine::blinds::BlindContext;
 use core_engine::dice::Die;
 use core_engine::relics::RelicInventory;
 use core_engine::scoring::ScoringPipeline;
@@ -194,7 +194,7 @@ pub(crate) fn register(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_engine::blind::BlindContext;
+    use core_engine::blinds::BlindContext;
     use core_engine::cups::CupId;
     use core_engine::dice::{Die, DieId};
     use core_engine::hands::YahtzeeHand;

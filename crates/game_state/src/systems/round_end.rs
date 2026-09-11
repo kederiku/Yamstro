@@ -58,7 +58,7 @@
 //! vit à TASK-29, sur une transition vers l'état courant.
 
 use bevy::prelude::*;
-use core_engine::blind::BlindContext;
+use core_engine::blinds::BlindContext;
 
 use crate::plugin::{GameSet, InputSet};
 use crate::resources::ScoringStepQueue;
@@ -204,7 +204,7 @@ mod tests {
     use crate::resources::{HandContext, RunSession, ScoringStepQueue};
     use crate::systems::fixtures::{app_en_run, entrer_dans_roll, frapper};
     use crate::systems::input::select_hand;
-    use core_engine::blind::{BlindContext, BlindType};
+    use core_engine::blinds::{BlindContext, BlindType};
     use core_engine::cups::CupId;
 
     type Paire = (Option<RunPhase>, Option<RunPhase>);

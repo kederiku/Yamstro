@@ -7,7 +7,7 @@
 
 use smallvec::SmallVec;
 
-use crate::blind::BlindContext;
+use crate::blinds::BlindContext;
 use crate::dice::{Die, DieId, DieModifier, DieSeal};
 use crate::evaluator::HandMatch;
 use crate::hands::{HandLevels, YahtzeeHand};
@@ -378,7 +378,7 @@ impl ScoringPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blind::BlindModifier;
+    use crate::blinds::BlindModifier;
     use crate::dice::{Die, DieId, DieModifier, DieSeal};
     use crate::evaluator::HandMatch;
     use crate::relics::{RelicId, RelicInstance, RelicInventory, RelicState};
@@ -734,7 +734,7 @@ mod tests {
         assert!(!suite.iter().any(|e| e.action == ScoreAction::AddChips(10)));
     }
 
-    use crate::blind::BlindContext;
+    use crate::blinds::BlindContext;
     use crate::hands::{HandLevels, YahtzeeHand};
     use crate::scoring::{ScoreAction, StepSource};
 

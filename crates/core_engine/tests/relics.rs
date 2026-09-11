@@ -281,7 +281,7 @@ fn test_full_inventory_add_returns_none_and_burns_no_uid() {
 
 // ---- Squelette des quatre comportements (TASK-56) ----
 
-use core_engine::blind::{BlindContext, BlindDefinition};
+use core_engine::blinds::{BlindContext, BlindDefinition};
 use core_engine::dice::{Die, DieId};
 use core_engine::economy::round_end_gold;
 use core_engine::evaluator::HandMatch;

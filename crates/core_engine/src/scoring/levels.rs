@@ -1,6 +1,6 @@
 //! Base de la figure : niveaux puis modificateurs de blind.
 
-use crate::blind::{BlindContext, BlindModifier};
+use crate::blinds::{BlindContext, BlindModifier};
 use crate::hands::YahtzeeHand;
 
 /// `HandLevels` reste chez les figures, c'est un concept de figure et non de
@@ -50,7 +50,7 @@ pub fn resolved_base(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blind::{BlindContext, BlindModifier};
+    use crate::blinds::{BlindContext, BlindModifier};
     use crate::hands::YahtzeeHand;
 
     fn sans_modificateur() -> BlindContext {
@@ -60,7 +60,7 @@ mod tests {
     fn avec(modifiers: &[BlindModifier]) -> BlindContext {
         // Un blind ne porte qu'un modificateur ; les tests qui en passaient
         // deux vérifiaient un empilement que la définition ne permet plus.
-        BlindContext::de_test(modifiers.first().copied())
+        BlindContext::de_test(modifiers.first().cloned())
     }
 
     #[test]

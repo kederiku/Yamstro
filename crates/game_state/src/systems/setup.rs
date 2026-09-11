@@ -61,7 +61,7 @@
 //! battue donc pas de victoire possible.
 
 use bevy::prelude::*;
-use core_engine::blind::{BlindContext, BlindDefinition, BlindModifier, BlindType};
+use core_engine::blinds::{BlindContext, BlindDefinition, BlindModifier, BlindType};
 use core_engine::config::effective_rerolls;
 use core_engine::cups::definitions::cup;
 use core_engine::dice::{Die, DieId};

@@ -22,7 +22,7 @@
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use core_engine::blind::BlindContext;
+use core_engine::blinds::BlindContext;
 use core_engine::dice::Die;
 use core_engine::scoring::{ScoreAction, ScoreStep, StepSource};
 use game_state::{DieView, RelicSlotUI, ScoringStepQueue};
@@ -658,7 +658,7 @@ mod tests {
 
     // ---- Commit unique du score (TASK-50) ----
 
-    use core_engine::blind::{BlindContext, BlindDefinition};
+    use core_engine::blinds::{BlindContext, BlindDefinition};
     use core_engine::hands::HandGrid;
 
     /// Une manche prête à recevoir un commit.

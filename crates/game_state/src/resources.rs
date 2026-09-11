@@ -262,7 +262,7 @@ mod tests {
 
     use bevy::input::InputPlugin;
     use bevy::state::app::StatesPlugin;
-    use core_engine::blind::{BlindContext, BlindDefinition};
+    use core_engine::blinds::{BlindContext, BlindDefinition};
     use core_engine::cups::CupId;
     use core_engine::cups::definitions::cup;
     use core_engine::hands::{HandGrid, HandLevels, YahtzeeHand};
@@ -387,7 +387,7 @@ mod tests {
         // Le type de la ressource **est** celui de `core_engine` : une fonction
         // qui n'accepte que celui-là reçoit la ressource sans conversion. Un
         // second type homonyme dans cette crate ferait échouer la compilation.
-        fn exige_le_type_de_core(_: &core_engine::blind::BlindContext) {}
+        fn exige_le_type_de_core(_: &core_engine::blinds::BlindContext) {}
 
         let mut app = app_avec_ressources(CupId::Standard);
         app.update();

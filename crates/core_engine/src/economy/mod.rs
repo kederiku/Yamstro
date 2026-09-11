@@ -39,7 +39,7 @@ pub fn round_end_gold(inventory: &RelicInventory, base: &TriggerCtx<'_>) -> u32 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blind::{BlindContext, BlindDefinition};
+    use crate::blinds::{BlindContext, BlindDefinition};
     use crate::dice::{Die, DieId};
     use crate::evaluator::HandMatch;
     use crate::hands::{HandGrid, HandLevels, YahtzeeHand};
