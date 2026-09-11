@@ -248,7 +248,8 @@ mod tests {
     use crate::dice::{Die, DieId};
     use crate::evaluator::HandMatch;
     use crate::hands::{HandLevels, YahtzeeHand};
-    use crate::relics::{CATALOG, RelicId, RelicState};
+    use crate::relics::definitions::rarity_of;
+    use crate::relics::{CATALOG, RelicId, RelicRarity, RelicState};
     use crate::scoring::{Hook, ScoreAction, ScoreEffect, StepSource, TriggerCtx};
 
     const UID: u32 = 7;
@@ -446,5 +447,46 @@ mod tests {
 
         assert_eq!(premier, second);
         assert_eq!(ctx.state, RelicState::Counter(2));
+    }
+
+    /// **L'invariant de budget ne voit pas les fixtures, et c'est ici qu'il
+    /// faut le compléter.**
+    ///
+    /// `test_rarity_budget_invariant` vit dans `tests/relics.rs`, une cible
+    /// d'intégration liée à la crate compilée **sans `cfg(test)`** : les trois
+    /// fixtures n'y existent pas et n'entrent jamais dans sa matrice. Sans ce
+    /// test-ci, le commentaire de `rarity_of` — « une Commune qui multiplie
+    /// ferait échouer l'invariant de budget » — décrirait une garde qui
+    /// n'existe nulle part.
+    #[test]
+    fn test_fixture_rarities_obey_the_multiply_rule() {
+        assert_eq!(rarity_of(RelicId::BrokenGlass), RelicRarity::Rare);
+
+        for def in [RelicId::SixFire, RelicId::MagicPair, RelicId::BrokenGlass] {
+            for figure in YahtzeeHand::ALL {
+                let fixture = Fixture::new(figure);
+                for hook in [
+                    Hook::OnRoll,
+                    Hook::OnScoringDie,
+                    Hook::OnHandScored,
+                    Hook::OnRoundEnd,
+                ] {
+                    for valeur in 1u8..=8 {
+                        let ctx = fixture.ctx(Some((DieId(0), valeur)));
+                        let multiplie = effects_for(def, hook, &ctx)
+                            .iter()
+                            .any(|effet| matches!(effet.action, ScoreAction::MultiplyMult(_)));
+                        assert!(
+                            !multiplie
+                                || matches!(
+                                    rarity_of(def),
+                                    RelicRarity::Rare | RelicRarity::Legendary
+                                ),
+                            "{def:?} multiplie sans être Rare ni Légendaire ({figure:?}, {hook:?})"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

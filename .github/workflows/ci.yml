@@ -459,8 +459,13 @@ jobs:
           # catalogue, et leurs variantes restent sous cfg(test).
           forbid  "critère 5  fixture entrée au catalogue" -nU 'pub const CATALOG[^]]*(SixFire|MagicPair|BrokenGlass)' crates/core_engine/src/relics/mod.rs
           # La composition du catalogue n'est pas la loi de tirage : aucune
-          # pondération ici. Ancré sur les mots du tirage, jamais sur un nombre.
-          forbid  "critère 5  pondération de tirage dans le moteur" -n '\b(weight|weighted|chance|probabilit|\bpoids\b|drop_rate)' crates/core_engine/src/relics
+          # pondération ici. **Ré-ancrée sur l'acte à TASK-63** — un champ, une
+          # constante, une fonction — et non sur les mots : le tableau de budget
+          # doit pouvoir écrire qu'une relique se déclenche avec telle
+          # probabilité, c'est même ce qui justifie ses valeurs. Ancrée sur les
+          # mots, elle interdisait la justification en même temps que la
+          # pondération. Vingt-sixième fois dans ce projet.
+          forbid  "critère 5  pondération de tirage dans le moteur" -n '\b(weight|weighted|chance|probabilit\w*|poids|drop_rate)\w*\s*[:=]|fn \w*(weight|weighted|drop_rate)|const \w*(WEIGHT|CHANCE|PROBA|DROP_RATE)' crates/core_engine/src/relics
           # Les douze reliques sont énumérées dans effects_for tant qu'elles
           # n'ont pas de comportement : TASK-56 remplacera ces noms un à un.
           # **Retirée à TASK-57**, et c'est ma faute de l'avoir posée ainsi :
@@ -689,6 +694,39 @@ jobs:
           # Les deux sites, qui sont la décision centrale du ticket.
           require "critère 5  avancement à la sortie du scoring" -n 'OnExit\(RunPhase::Scoring\), advance_relic_states_on_hand' crates/game_state/src/relics/mod.rs
           require "critère 5  or encaissé à la fin de la blind" -n 'OnEnter\(RunPhase::Shop\), collect_relic_gold_on_blind_end' crates/game_state/src/relics/mod.rs
+
+
+          # ---- Étape 5 : invariant de budget de puissance (TASK-63) ----
+          DEFS=$SRC/relics/definitions
+          TESTS=crates/core_engine/tests/relics.rs
+          # Ancrée sur l'**acte** — la ligne qui *construit* l'action — et non
+          # sur le nom : deux notes du dépôt doivent nommer `MultiplyMult` pour
+          # servir, celle de l'alignement stellaire (qu'une garde exige) et
+          # celle qui explique la rareté de la fixture *Verre Brisé*.
+          forbid  "critère 5  multiplication hors des trois Rares" -n 'action: ScoreAction::MultiplyMult\(' "$DEFS" -g '!pendulum.rs' -g '!unstable_obsidian.rs' -g '!divine_yahtzee.rs'
+          forbid  "critère 5  flottant dans les tests de reliques" -n '\bf64\b|\bf32\b|abs\(\) <' "$TESTS"
+          # Le tableau de budget, par sa **structure** : douze lignes numérotées
+          # et l'en-tête de ses colonnes. Compter les pourcents laisserait passer
+          # n'importe quelle prose.
+          require "critère 5  en-tête du tableau de budget" -n '^//! \| # \| Relique \| Rareté \| Action émise \| Budget consommé \|' "$DEFS/mod.rs"
+          for ligne in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            require "critère 5  ligne $ligne du tableau de budget" -n "^//! \\| $ligne \\| " "$DEFS/mod.rs"
+          done
+          require "critère 5  les 133 % assumés de l'obsidienne" -n '133 %' "$DEFS/mod.rs"
+          require "critère 5  la valeur du dé fantôme reste à mesurer" -n 'à mesurer au harnais de l.Étape 6 bis' "$DEFS/mod.rs"
+          # L'invariant lui-même : le catalogue épinglé, et les six axes de la
+          # matrice. Le sixième — la parité de la somme des dés — est celui que
+          # le ticket avait omis ; mesuré, sans lui une Commune qui ne
+          # multiplierait que sur somme impaire survit à toute la matrice.
+          require "critère 5  le catalogue reste à douze"   -nU 'assert_eq!\(\n        CATALOG.len\(\),\n        12,' "$TESTS"
+          require "critère 5  axe de parité de la somme des dés" -n 'for \(valeurs, somme_paire\) in \[\(\[2u8, 2, 2, 2, 2\], true\), \(\[1, 2, 2, 2, 2\], false\)\]' "$TESTS"
+          require "critère 5  axe des treize figures"       -n 'for figure in YahtzeeHand::ALL' "$TESTS"
+          require "critère 5  axe des huit valeurs de dé"   -n 'for valeur_de_de in 1u8..=8' "$TESTS"
+          require "critère 5  axe des quatre déclencheurs"  -n 'for hook in HOOKS' "$TESTS"
+          require "critère 5  axe des cinq états"           -n 'for etat in ETATS_BUDGET' "$TESTS"
+          # Aucune exception ne doit être ouverte dans l'invariant : une liste
+          # blanche le vide de son sens et rend l'Étape 9 inéquilibrable.
+          forbid  "critère 5  exception nominative dans l'invariant" -nU 'fn test_rarity_budget_invariant[^}]*def != RelicId::' "$TESTS"
 
           exit $status
 

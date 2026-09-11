@@ -29,11 +29,16 @@ fn test_catalog_has_no_duplicates() {
 #[test]
 fn test_rarity_of_is_total() {
     // La totalité est garantie par l'exhaustivité du `match` : retirer un bras
-    // produit E0004 et rien ne compile. Ce test n'en est que le témoin
-    // d'exécution — il ne peut pas échouer là où le compilateur a déjà parlé.
+    // produit E0004 et rien ne compile. Cette boucle-ci n'en est que le témoin
+    // d'exécution — elle ne peut pas échouer là où le compilateur a déjà parlé.
     for def in CATALOG {
         let _ = rarity_of(*def);
     }
+
+    // **La répartition est déjà testée**, et ailleurs : TASK-53 a écrit
+    // `test_rarity_distribution_is_four_four_four`, aux mêmes quatre
+    // assertions. La recopier ici donnerait deux exemplaires à maintenir et un
+    // à oublier le jour où l'Étape 9 fera passer le catalogue à soixante.
 }
 
 #[test]
@@ -1875,4 +1880,348 @@ fn test_round_end_gold_saturates() {
         round_end_gold(&inventaire, &decor.ctx(RelicState::None)),
         25
     );
+}
+
+// ---- L'invariant de budget de puissance (TASK-63) ----
+
+/// Budgets du § 4.2 du glossaire, en unités de compte. **1 Mult ≡ 10 Chips.**
+const BUDGET_COMMUNE: u64 = 40;
+const BUDGET_PEU_COMMUNE: u64 = 80;
+
+/// Facteur de dépassement maximal accordé à une relique conditionnelle.
+const PLAFOND_CONDITIONNEL: u64 = 3;
+
+/// Les cinq variantes d'état de la matrice : les quatre du type, `Counter`
+/// comptant double pour séparer le compteur vide du compteur plein.
+const ETATS_BUDGET: [RelicState; 5] = [
+    RelicState::None,
+    RelicState::Counter(0),
+    RelicState::Counter(7),
+    RelicState::Perishable { rounds_left: 2 },
+    RelicState::Disabled,
+];
+
+/// Un point de la matrice, avec de quoi nommer le contexte fautif.
+struct ScenarioBudget<'a> {
+    ctx: TriggerCtx<'a>,
+    figure: YahtzeeHand,
+    valeur_de_de: u8,
+    hook: Hook,
+    etat: RelicState,
+    somme_paire: bool,
+}
+
+/// Le produit cartésien sur lequel l'invariant s'évalue.
+///
+/// **Six axes, et non cinq.** Le sixième — la parité de la somme des dés
+/// comptabilisés — manquait au ticket, alors qu'il est l'axe de déclenchement
+/// du *Balancier* : faire varier `ctx.die` ne le touche pas, puisqu'il lit
+/// `ctx.hand.scoring_dice` à travers `ctx.dice`. Sans cet axe, une relique
+/// Commune gardée par une somme impaire traverserait toute la matrice sans être
+/// vue, ce qui est exactement le défaut que le ticket décrit sur l'axe des
+/// figures.
+///
+/// `left_effects` est non vide et porte une multiplication : une relique qui
+/// ré-émettrait naïvement la tranche de sa voisine est prise.
+fn pour_chaque_contexte(mut visiter: impl FnMut(&ScenarioBudget<'_>)) {
+    let niveaux = HandLevels::default();
+    let manche = blind_nu();
+    let gauche = [ScoreEffect {
+        source: StepSource::Relic {
+            uid: 99,
+            def: RelicId::UnstableObsidian,
+        },
+        action: ScoreAction::MultiplyMult(200),
+    }];
+
+    for (valeurs, somme_paire) in [([2u8, 2, 2, 2, 2], true), ([1, 2, 2, 2, 2], false)] {
+        let dice = des(&valeurs);
+        let identifiants: Vec<DieId> = dice.iter().map(|de| de.id).collect();
+
+        for figure in YahtzeeHand::ALL {
+            let main = HandMatch {
+                hand: figure,
+                scoring_dice: identifiants.clone(),
+                discarded_dice: Vec::new(),
+                potential_score: 0,
+            };
+
+            for valeur_de_de in 1u8..=8 {
+                for hook in HOOKS {
+                    for etat in ETATS_BUDGET {
+                        let ctx = TriggerCtx {
+                            hand: &main,
+                            dice: &dice,
+                            hand_levels: &niveaux,
+                            blind: &manche,
+                            uid: 1,
+                            slot: 0,
+                            state: etat,
+                            // Le dé courant n'existe que sur son propre
+                            // déclencheur : le poser ailleurs testerait un
+                            // contexte que le pipeline ne construit jamais.
+                            die: (hook == Hook::OnScoringDie)
+                                .then_some((identifiants[0], valeur_de_de)),
+                            base_chips: 30,
+                            base_mult: 400,
+                            left_effects: &gauche,
+                            roll_index: 0,
+                            rerolls_left: 2,
+                        };
+                        visiter(&ScenarioBudget {
+                            ctx,
+                            figure,
+                            valeur_de_de,
+                            hook,
+                            etat,
+                            somme_paire,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn multiplie(def: RelicId, cas: &ScenarioBudget<'_>) -> bool {
+    effects_for(def, cas.hook, &cas.ctx)
+        .iter()
+        .any(|effet| matches!(effet.action, ScoreAction::MultiplyMult(_)))
+}
+
+#[test]
+fn test_rarity_budget_invariant() {
+    // **Ce test ne doit jamais être assoupli.** Si une valeur ne tient pas dans
+    // le budget, c'est la valeur qui change. Une liste blanche, un `if def !=`,
+    // et l'Étape 9 équilibre soixante reliques à l'aveugle.
+    assert_eq!(
+        CATALOG.len(),
+        12,
+        "le catalogue reste à douze jusqu'à l'Étape 9"
+    );
+
+    for def in CATALOG {
+        let rarete = rarity_of(*def);
+        if !matches!(rarete, RelicRarity::Common | RelicRarity::Uncommon) {
+            continue;
+        }
+        pour_chaque_contexte(|cas| {
+            assert!(
+                !multiplie(*def, cas),
+                "{def:?} ({rarete:?}) multiplie le Mult — figure {:?}, dé {}, {:?}, {:?}, somme {}",
+                cas.figure,
+                cas.valeur_de_de,
+                cas.hook,
+                cas.etat,
+                if cas.somme_paire { "paire" } else { "impaire" }
+            );
+        });
+    }
+}
+
+#[test]
+fn test_budget_matrix_reaches_every_rare() {
+    // **« Au moins un `MultiplyMult` » ne prouve rien.** *Obsidienne Instable*
+    // est inconditionnelle : elle en émet dans chacun des milliers de contextes,
+    // donc une matrice qui n'atteindrait aucune branche conditionnelle passerait
+    // quand même. Ce qui se mesure, c'est que **chacune** des quatre Rares est
+    // atteinte : le *Balancier* par la parité, le *Yams Divin* par la figure, le
+    // *Miroir* par la tranche gauche, l'*Obsidienne* sans condition.
+    let emetteurs: Vec<RelicId> = CATALOG
+        .iter()
+        .copied()
+        .filter(|def| {
+            let mut vu = false;
+            pour_chaque_contexte(|cas| vu |= multiplie(*def, cas));
+            vu
+        })
+        .collect();
+
+    assert_eq!(
+        emetteurs,
+        vec![
+            RelicId::Pendulum,
+            RelicId::UnstableObsidian,
+            RelicId::DivineYahtzee,
+            RelicId::DoubleMirror,
+        ]
+    );
+}
+
+#[test]
+fn test_multiply_mult_emitters_are_rare_or_legendary() {
+    for def in [
+        RelicId::Pendulum,
+        RelicId::UnstableObsidian,
+        RelicId::DivineYahtzee,
+        RelicId::DoubleMirror,
+    ] {
+        assert!(
+            matches!(rarity_of(def), RelicRarity::Rare | RelicRarity::Legendary),
+            "{def:?} multiplie sans être Rare ni Légendaire"
+        );
+    }
+}
+
+/// Unités de compte d'une action. **1 Mult ≡ 10 Chips**, et le Mult est en
+/// centièmes : `AddMult(100)` vaut dix unités.
+///
+/// `MultiplyMult` rend zéro : une multiplication n'est pas une quantité
+/// additive, son budget est une autre échelle (§ 2.1).
+fn unites(action: ScoreAction) -> u64 {
+    match action {
+        ScoreAction::AddChips(chips) => chips,
+        ScoreAction::AddMult(mult) => u64::try_from(mult).unwrap_or(0) / 10,
+        ScoreAction::MultiplyMult(_) => 0,
+    }
+}
+
+fn unites_de(effets: &[ScoreEffect]) -> u64 {
+    effets.iter().map(|effet| unites(effet.action)).sum()
+}
+
+/// Somme des unités sur les six faces et les cinq dés comptabilisés, **sans
+/// jamais diviser**.
+///
+/// L'espérance vaut ce total sur six, et `2,5` dés impairs n'est pas un entier.
+/// Plutôt que d'introduire un flottant — que ce projet interdit — on compare le
+/// total à six fois le budget : tout reste entier et exact.
+fn total_sur_les_six_faces(def: RelicId) -> u64 {
+    let dice = des(&[1, 1, 1, 1, 1]);
+    let main = HandMatch {
+        hand: YahtzeeHand::Chance,
+        scoring_dice: dice.iter().map(|de| de.id).collect(),
+        discarded_dice: Vec::new(),
+        potential_score: 0,
+    };
+    let niveaux = HandLevels::default();
+    let manche = blind_nu();
+    let base = TriggerCtx {
+        hand: &main,
+        dice: &dice,
+        hand_levels: &niveaux,
+        blind: &manche,
+        uid: 1,
+        slot: 0,
+        state: RelicState::None,
+        die: None,
+        base_chips: 30,
+        base_mult: 400,
+        left_effects: &[],
+        roll_index: 0,
+        rerolls_left: 0,
+    };
+
+    (1u8..=6)
+        .map(|valeur| {
+            dice.iter()
+                .map(|de| {
+                    let ctx = TriggerCtx {
+                        die: Some((de.id, valeur)),
+                        ..base
+                    };
+                    unites_de(&effects_for(def, Hook::OnScoringDie, &ctx))
+                })
+                .sum::<u64>()
+        })
+        .sum()
+}
+
+/// Unités brutes émises par une relique sur la figure qui la déclenche.
+fn brut_sur_figure(def: RelicId, figure: YahtzeeHand) -> u64 {
+    let decor = Decor::avec_figure(figure);
+    unites_de(&effects_for(
+        def,
+        Hook::OnHandScored,
+        &decor.ctx(RelicState::None),
+    ))
+}
+
+#[test]
+fn test_common_relics_within_forty_units() {
+    // Trois faces impaires x un Mult x cinq dés : l'espérance est de 25 unités,
+    // soit 63 % d'un budget Commune de 40.
+    assert_eq!(total_sur_les_six_faces(RelicId::CrackedDie), 150);
+    assert!(total_sur_les_six_faces(RelicId::CrackedDie) <= 6 * BUDGET_COMMUNE);
+
+    assert_eq!(total_sur_les_six_faces(RelicId::PolishedStone), 150);
+    assert!(total_sur_les_six_faces(RelicId::PolishedStone) <= 6 * BUDGET_COMMUNE);
+}
+
+#[test]
+fn test_uncommon_per_die_within_eighty_units() {
+    // Une seule face sur six, quinze Chips, cinq dés : 12,5 unités d'espérance,
+    // 16 % d'un budget Peu commune de 80.
+    assert_eq!(total_sur_les_six_faces(RelicId::PyramidOfSixes), 75);
+    assert!(total_sur_les_six_faces(RelicId::PyramidOfSixes) <= 6 * BUDGET_PEU_COMMUNE);
+}
+
+/// Les cinq reliques conditionnelles du § 2.4, avec le dénominateur de leur
+/// fréquence de déclenchement et le facteur de dépassement que la
+/// documentation leur accorde.
+const CONDITIONNELLES: [(RelicId, u64, u64); 5] = [
+    (RelicId::TripletMaster, 3, 3),
+    (RelicId::FullHouseArchitect, 6, 3),
+    (RelicId::StellarAlignment, 6, 3),
+    (RelicId::Pendulum, 2, 2),
+    (RelicId::DivineYahtzee, 20, 3),
+];
+
+#[test]
+fn test_conditional_cap_never_exceeds_three() {
+    // **La moitié documentaire de ce test n'en est pas une.** Le ticket demande
+    // de vérifier que le `//!` « nomme `f` et le plafond » : un test ne lit pas
+    // une documentation à l'exécution, et y parvenir demanderait de fouiller de
+    // la prose française — le défaut que ce corpus rejoue depuis TASK-59. La
+    // présence du tableau est une garde de CI ; ce qui se teste ici est la
+    // règle numérique, qui échoue si quelqu'un écrit un plafond à quatre.
+    for (def, denominateur, facteur) in CONDITIONNELLES {
+        assert_eq!(
+            facteur,
+            denominateur.min(PLAFOND_CONDITIONNEL),
+            "{def:?} : le facteur documenté ne découle pas de sa fréquence"
+        );
+        assert!(facteur <= PLAFOND_CONDITIONNEL, "{def:?}");
+    }
+}
+
+#[test]
+fn test_additive_conditionals_stay_under_their_cap() {
+    // Les trois conditionnelles additives, mesurées sur la figure qui les
+    // déclenche, contre le plafond que leur rareté et leur fréquence leur
+    // accordent. C'est la seule moitié du budget qui se compare en unités : les
+    // deux conditionnelles multiplicatives vivent sur l'autre échelle.
+    for (def, figure, brut, budget) in [
+        (
+            RelicId::TripletMaster,
+            YahtzeeHand::ThreeOfAKind,
+            60,
+            BUDGET_COMMUNE,
+        ),
+        (
+            RelicId::FullHouseArchitect,
+            YahtzeeHand::FullHouse,
+            90,
+            BUDGET_PEU_COMMUNE,
+        ),
+        (
+            RelicId::StellarAlignment,
+            YahtzeeHand::SmallStraight,
+            80,
+            BUDGET_PEU_COMMUNE,
+        ),
+    ] {
+        assert_eq!(brut_sur_figure(def, figure), brut, "{def:?}");
+
+        let facteur = CONDITIONNELLES
+            .iter()
+            .find(|(candidate, _, _)| *candidate == def)
+            .map(|(_, _, facteur)| *facteur)
+            .expect("relique conditionnelle tabulée");
+        assert!(
+            brut <= budget * facteur,
+            "{def:?} : {brut} u dépasse le plafond de {} u",
+            budget * facteur
+        );
+    }
 }
