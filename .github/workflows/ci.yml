@@ -551,6 +551,27 @@ jobs:
           # montrant huit ne déclenche pas la pyramide.
           forbid  "critère 5  pyramide sur la face maximale" -n '\bsides\b|max_face|value == de\.sides' crates/core_engine/src/relics/definitions/pyramid_of_sixes.rs
 
+          # ---- Étape 5 : les trois reliques additives par main (TASK-58) ----
+          # **Ancrée sur l'émission, pas sur le nom.** La note de
+          # `stellar_alignment.rs` doit pouvoir écrire la valeur d'origine en
+          # toutes lettres : son travail est d'être reconnaissable par qui
+          # retrouvera « ×1,75 » dans d'anciennes notes, et une note qui ne peut
+          # pas nommer ce qu'elle interdit ne sera pas rapprochée de la valeur
+          # qu'elle empêche de restaurer. On ancre donc sur l'acte.
+          forbid  "critère 5  multiplication par une relique additive" -n 'ScoreAction::MultiplyMult\(' crates/core_engine/src/relics/definitions/triplet_master.rs crates/core_engine/src/relics/definitions/full_house_architect.rs crates/core_engine/src/relics/definitions/stellar_alignment.rs
+          require "critère 5  note de vigilance sur l'alignement" -n 'MultiplyMult\(175\)' crates/core_engine/src/relics/definitions/stellar_alignment.rs
+          # Ces trois reliques se déclenchent sur la figure retenue, jamais sur
+          # le dé courant ni sur un recomptage des faces.
+          forbid  "critère 5  relique de main qui lit le dé" -n 'ctx\.die' crates/core_engine/src/relics/definitions/triplet_master.rs crates/core_engine/src/relics/definitions/full_house_architect.rs crates/core_engine/src/relics/definitions/stellar_alignment.rs
+          require "critère 5  condition sur la figure retenue" -n 'ctx\.hand\.hand' crates/core_engine/src/relics/definitions/triplet_master.rs
+          # Les quatre valeurs normatives, chacune dans son module.
+          require "critère 5  six Mult sur un brelan"    -n 'ScoreAction::AddMult\(600\)' crates/core_engine/src/relics/definitions/triplet_master.rs
+          require "critère 5  quarante Chips sur un full" -n 'ScoreAction::AddChips\(40\)' crates/core_engine/src/relics/definitions/full_house_architect.rs
+          require "critère 5  cinq Mult sur un full"     -n 'ScoreAction::AddMult\(500\)' crates/core_engine/src/relics/definitions/full_house_architect.rs
+          require "critère 5  huit Mult sur une suite"   -n 'ScoreAction::AddMult\(800\)' crates/core_engine/src/relics/definitions/stellar_alignment.rs
+          # L'ordre des deux effets du full est normatif : les Chips d'abord.
+          require "critère 5  ordre des effets du full"  -nU 'AddChips\(40\),\n    \}\);[^}]*AddMult\(500\)' crates/core_engine/src/relics/definitions/full_house_architect.rs
+
           exit $status
 
   # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en

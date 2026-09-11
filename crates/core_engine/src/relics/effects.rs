@@ -124,12 +124,12 @@ pub fn effects_for(def: RelicId, hook: Hook, ctx: &TriggerCtx) -> SmallVec<[Scor
         (RelicId::CrackedDie, _) => definitions::cracked_die::effects(hook, ctx),
         (RelicId::PolishedStone, _) => definitions::polished_stone::effects(hook, ctx),
         (RelicId::PyramidOfSixes, _) => definitions::pyramid_of_sixes::effects(hook, ctx),
+        (RelicId::TripletMaster, _) => definitions::triplet_master::effects(hook, ctx),
+        (RelicId::FullHouseArchitect, _) => definitions::full_house_architect::effects(hook, ctx),
+        (RelicId::StellarAlignment, _) => definitions::stellar_alignment::effects(hook, ctx),
 
         (
-            RelicId::TripletMaster
-            | RelicId::FullHouseArchitect
-            | RelicId::StellarAlignment
-            | RelicId::Pendulum
+            RelicId::Pendulum
             | RelicId::UnstableObsidian
             | RelicId::DivineYahtzee
             | RelicId::ClayPiggyBank

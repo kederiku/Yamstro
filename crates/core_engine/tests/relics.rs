@@ -308,6 +308,14 @@ struct Decor {
 }
 
 impl Decor {
+    /// Décor sur une figure choisie : la condition de ces reliques porte sur la
+    /// figure **retenue**, pas sur les dés.
+    fn avec_figure(figure: YahtzeeHand) -> Self {
+        let mut decor = Self::new();
+        decor.hand.hand = figure;
+        decor
+    }
+
     fn new() -> Self {
         Self {
             hand: HandMatch {
@@ -357,10 +365,7 @@ impl Decor {
 ///
 /// `ClayPiggyBank` et `GhostDie` y resteront jusqu'au bout : leur neutralité sur
 /// ce hook est **définitive**, elles agissent ailleurs.
-const EFFETS_ENCORE_NEUTRES: [RelicId; 9] = [
-    RelicId::TripletMaster,
-    RelicId::FullHouseArchitect,
-    RelicId::StellarAlignment,
+const EFFETS_ENCORE_NEUTRES: [RelicId; 6] = [
     RelicId::Pendulum,
     RelicId::UnstableObsidian,
     RelicId::DivineYahtzee,
@@ -443,7 +448,7 @@ fn test_effects_for_is_pure() {
 // ---- Les trois reliques `OnScoringDie` (TASK-57) ----
 
 use core_engine::evaluator::HandEvaluator;
-use core_engine::scoring::{ScoreAction, ScoringPipeline, StepSource};
+use core_engine::scoring::{ScoreAction, ScoreEffect, ScoringPipeline, StepSource};
 
 /// Dés de valeurs imposées, identifiants dans l'ordre du tableau.
 fn des(valeurs: &[u8]) -> Vec<Die> {
@@ -725,4 +730,181 @@ fn test_scoring_die_relics_tolerate_none_die() {
             "{def:?}"
         );
     }
+}
+
+// ---- Les trois reliques additives `OnHandScored` (TASK-58) ----
+
+/// Ce qu'une relique produit sur la figure retenue. Appel **direct** : ces
+/// tests parlent d'une condition sur la figure, pas d'un parcours.
+fn sur_la_figure(def: RelicId, figure: YahtzeeHand) -> Vec<ScoreEffect> {
+    let decor = Decor::avec_figure(figure);
+    let ctx = TriggerCtx {
+        die: None,
+        ..decor.ctx(RelicState::None)
+    };
+    effects_for(def, Hook::OnHandScored, &ctx)
+        .into_iter()
+        .collect()
+}
+
+fn actions(effets: &[ScoreEffect]) -> Vec<ScoreAction> {
+    effets.iter().map(|effet| effet.action).collect()
+}
+
+#[test]
+fn test_triplet_master_fires_on_three_and_four_of_a_kind() {
+    for figure in [YahtzeeHand::ThreeOfAKind, YahtzeeHand::FourOfAKind] {
+        let effets = sur_la_figure(RelicId::TripletMaster, figure);
+        assert_eq!(
+            actions(&effets),
+            vec![ScoreAction::AddMult(600)],
+            "{figure:?}"
+        );
+        assert_eq!(
+            effets[0].source,
+            StepSource::Relic {
+                uid: 1,
+                def: RelicId::TripletMaster
+            }
+        );
+    }
+}
+
+#[test]
+fn test_triplet_master_silent_on_full_house() {
+    // Un Full contient un brelan, mais la condition porte sur la figure
+    // **retenue** : recomposer à partir des dés la ferait parler ici.
+    assert!(sur_la_figure(RelicId::TripletMaster, YahtzeeHand::FullHouse).is_empty());
+}
+
+#[test]
+fn test_full_house_architect_emits_two_effects_in_order() {
+    // **L'ordre est normatif** : la passe B replie séquentiellement, un palier
+    // par effet, et l'Étape 4 les anime dans cet ordre.
+    let effets = sur_la_figure(RelicId::FullHouseArchitect, YahtzeeHand::FullHouse);
+    assert_eq!(
+        actions(&effets),
+        vec![ScoreAction::AddChips(40), ScoreAction::AddMult(500)]
+    );
+}
+
+#[test]
+fn test_full_house_architect_silent_elsewhere() {
+    for figure in YahtzeeHand::ALL {
+        if figure == YahtzeeHand::FullHouse {
+            continue;
+        }
+        assert!(
+            sur_la_figure(RelicId::FullHouseArchitect, figure).is_empty(),
+            "{figure:?}"
+        );
+    }
+}
+
+#[test]
+fn test_stellar_alignment_fires_on_both_straights() {
+    for figure in [YahtzeeHand::SmallStraight, YahtzeeHand::LargeStraight] {
+        assert_eq!(
+            actions(&sur_la_figure(RelicId::StellarAlignment, figure)),
+            vec![ScoreAction::AddMult(800)],
+            "{figure:?}"
+        );
+    }
+}
+
+#[test]
+fn test_stellar_alignment_silent_on_other_hands() {
+    for figure in YahtzeeHand::ALL {
+        if matches!(
+            figure,
+            YahtzeeHand::SmallStraight | YahtzeeHand::LargeStraight
+        ) {
+            continue;
+        }
+        assert!(
+            sur_la_figure(RelicId::StellarAlignment, figure).is_empty(),
+            "{figure:?}"
+        );
+    }
+}
+
+#[test]
+fn test_additive_relics_never_multiply() {
+    // La multiplication est réservée aux raretés hautes : deux de ces trois
+    // reliques sont Communes, la troisième Peu commune.
+    for def in [
+        RelicId::TripletMaster,
+        RelicId::FullHouseArchitect,
+        RelicId::StellarAlignment,
+    ] {
+        for figure in YahtzeeHand::ALL {
+            for action in actions(&sur_la_figure(def, figure)) {
+                assert!(
+                    !matches!(action, ScoreAction::MultiplyMult(_)),
+                    "{def:?} multiplie sur {figure:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_additive_relics_silent_on_scoring_die() {
+    // Éprouvées sur la figure qui les déclenche, sans quoi la garde de hook
+    // serait masquée par la condition de figure.
+    let decor = Decor::avec_figure(YahtzeeHand::FullHouse);
+    for (def, figure) in [
+        (RelicId::TripletMaster, YahtzeeHand::ThreeOfAKind),
+        (RelicId::FullHouseArchitect, YahtzeeHand::FullHouse),
+        (RelicId::StellarAlignment, YahtzeeHand::LargeStraight),
+    ] {
+        let sur_mesure = Decor::avec_figure(figure);
+        let ctx = TriggerCtx {
+            die: Some((DieId(1), 3)),
+            ..sur_mesure.ctx(RelicState::None)
+        };
+        // **Qui signe l'effet**, pour chacune des trois. C'est le second
+        // ticket d'affilée où le banc trouve une relique capable d'émettre au
+        // nom d'une autre : la vérification devient systématique, toute relique
+        // qui parle doit prouver sa signature.
+        let produits = effects_for(def, Hook::OnHandScored, &ctx);
+        assert!(!produits.is_empty(), "{def:?} muette sur sa propre figure");
+        for effet in &produits {
+            assert_eq!(
+                effet.source,
+                StepSource::Relic { uid: ctx.uid, def },
+                "{def:?} signe du nom d'une autre"
+            );
+        }
+        for hook in [Hook::OnRoll, Hook::OnScoringDie, Hook::OnRoundEnd] {
+            assert!(
+                effects_for(def, hook, &ctx).is_empty(),
+                "{def:?} sur {hook:?}"
+            );
+        }
+    }
+    let _ = decor;
+}
+
+#[test]
+fn test_additive_relic_fires_once_per_hand_not_per_die() {
+    // **Par le pipeline**, parce que c'est une propriété du parcours : câblée
+    // sur le mauvais hook, cette relique rendrait un effet par dé comptabilisé.
+    // Aucun appel direct ne peut voir la différence.
+    let dice = des(&[4, 4, 4, 1, 2]);
+    let main = figure(&dice, YahtzeeHand::ThreeOfAKind);
+    assert_eq!(main.scoring_dice.len(), 3, "trois dés comptabilisés");
+
+    let rapport = ScoringPipeline::resolve(
+        &main,
+        &dice,
+        &HandLevels::default(),
+        &inventaire_de(RelicId::TripletMaster),
+        &blind_nu(),
+    );
+    assert_eq!(
+        effets_de_relique(&rapport),
+        vec![ScoreAction::AddMult(600)],
+        "un effet par main, jamais un par dé"
+    );
 }
