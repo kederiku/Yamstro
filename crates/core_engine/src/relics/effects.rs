@@ -127,16 +127,11 @@ pub fn effects_for(def: RelicId, hook: Hook, ctx: &TriggerCtx) -> SmallVec<[Scor
         (RelicId::TripletMaster, _) => definitions::triplet_master::effects(hook, ctx),
         (RelicId::FullHouseArchitect, _) => definitions::full_house_architect::effects(hook, ctx),
         (RelicId::StellarAlignment, _) => definitions::stellar_alignment::effects(hook, ctx),
+        (RelicId::Pendulum, _) => definitions::pendulum::effects(hook, ctx),
+        (RelicId::UnstableObsidian, _) => definitions::unstable_obsidian::effects(hook, ctx),
+        (RelicId::DivineYahtzee, _) => definitions::divine_yahtzee::effects(hook, ctx),
 
-        (
-            RelicId::Pendulum
-            | RelicId::UnstableObsidian
-            | RelicId::DivineYahtzee
-            | RelicId::ClayPiggyBank
-            | RelicId::GhostDie
-            | RelicId::DoubleMirror,
-            _,
-        ) => SmallVec::new(),
+        (RelicId::ClayPiggyBank | RelicId::GhostDie | RelicId::DoubleMirror, _) => SmallVec::new(),
 
         // Les trois fixtures sont énumérées de même : le joker ne porte que sur
         // le déclencheur.

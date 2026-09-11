@@ -534,7 +534,13 @@ jobs:
           forbid  "critère 5  multiplication hors des raretés hautes" -n 'MultiplyMult' crates/core_engine/src/relics/definitions/cracked_die.rs crates/core_engine/src/relics/definitions/polished_stone.rs crates/core_engine/src/relics/definitions/pyramid_of_sixes.rs
           # Une relique ne lit que le dé courant : le parcours appartient au
           # pipeline, et itérer le plateau produirait un effet par dé écarté.
-          forbid  "critère 5  relique qui parcourt le plateau" -n 'ctx\.dice|discarded_dice|scoring_dice' crates/core_engine/src/relics/definitions
+          # **Ramenée aux trois modules où elle s'applique**, à TASK-59. Je
+          # l'avais étendue aux douze en écrivant « la règle vaudra pour les
+          # douze » : elle ne vaut pas. *Le Balancier* doit lire les dés
+          # comptabilisés, c'est la définition même de sa condition. Une règle
+          # généralisée d'avance est une garde qui mordra le premier cas
+          # légitime — celui-ci est arrivé un ticket plus tard.
+          forbid  "critère 5  relique par dé qui parcourt le plateau" -n 'ctx\.dice|discarded_dice|scoring_dice' crates/core_engine/src/relics/definitions/cracked_die.rs crates/core_engine/src/relics/definitions/polished_stone.rs crates/core_engine/src/relics/definitions/pyramid_of_sixes.rs
           # Aucun déballage paniquant ni aucun aléa dans les définitions. La
           # règle vaut pour les douze modules, pas seulement pour ces trois : la
           # prose des modules l'énonce **sans écrire ces mots**, comme
@@ -571,6 +577,34 @@ jobs:
           require "critère 5  huit Mult sur une suite"   -n 'ScoreAction::AddMult\(800\)' crates/core_engine/src/relics/definitions/stellar_alignment.rs
           # L'ordre des deux effets du full est normatif : les Chips d'abord.
           require "critère 5  ordre des effets du full"  -nU 'AddChips\(40\),\n    \}\);[^}]*AddMult\(500\)' crates/core_engine/src/relics/definitions/full_house_architect.rs
+
+          # ---- Étape 5 : les trois reliques multiplicatives (TASK-59) ----
+          # La formule Score = Chips x Mult est invariante : aucune action ne la
+          # remplace, et il n'existe pas de multiplication du total.
+          forbid  "critère 5  multiplication du score total" -n 'MultiplyScore|SetFormula' crates/
+          # **Ancré sur des appels**, pas sur le mot : le motif nu attrapait
+          # « ressort », « de sorte » et « n'en sort » — cinq lignes de prose
+          # française et aucun tri. Le tri qui casserait l'ordre d'application
+          # serait dans le pipeline ou dans une relique, d'où les deux chemins.
+          forbid  "critère 5  tri ou regroupement des effets" -n '\.sort\(|\.sort_by|\.sort_unstable|\.chunk_by\(|\.partition\(' crates/core_engine/src/scoring/pipeline.rs crates/core_engine/src/relics
+          # Les trois valeurs multiplicatives, chacune dans son module.
+          require "critère 5  le balancier multiplie par une fois et demie" -n 'ScoreAction::MultiplyMult\(150\)' crates/core_engine/src/relics/definitions/pendulum.rs
+          require "critère 5  l'obsidienne double"       -n 'ScoreAction::MultiplyMult\(200\)' crates/core_engine/src/relics/definitions/unstable_obsidian.rs
+          require "critère 5  le yams triple le Mult"    -n 'ScoreAction::MultiplyMult\(300\)' crates/core_engine/src/relics/definitions/divine_yahtzee.rs
+          # Les trois divergences du balancier viennent du même document et se
+          # réintroduisent ensemble : trois gardes séparées les attrapent quel
+          # que soit le morceau par lequel elles entrent.
+          require "critère 5  le balancier lit les dés comptabilisés" -n 'hand\n        \.scoring_dice' -U crates/core_engine/src/relics/definitions/pendulum.rs
+          forbid  "critère 5  le balancier lit le plateau ou le total" -n 'potential_score|ctx\.dice\s*\.iter\(\)\s*\.map|dice\[' crates/core_engine/src/relics/definitions/pendulum.rs
+          # Ancrée sur un **identifiant**, pas sur le nom en prose : la note du
+          # module doit pouvoir écrire le nom écarté pour être reconnaissable
+          # par qui le retrouvera dans d'anciennes notes — règle arrêtée à
+          # TASK-58 pour la valeur d'origine de l'alignement.
+          forbid  "critère 5  nom écarté du balancier"   -n 'RelicId::Balance|::Balance\b|mod balance|fn balance' crates/
+          # **Dette datée, à lever par TASK-61** : le malus de relance de
+          # l'obsidienne passe par une fonction distincte, que ce ticket n'écrit
+          # pas. Rien ne doit en parler dans son corps d'effets.
+          forbid  "critère 5  relance dans les effets de l'obsidienne, à lever par TASK-61" -n 'reroll|RollModifier' crates/core_engine/src/relics/definitions/unstable_obsidian.rs
 
           exit $status
 

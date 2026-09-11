@@ -308,6 +308,22 @@ struct Decor {
 }
 
 impl Decor {
+    /// Décor à dés imposés : les `comptabilises` premiers dés entrent dans la
+    /// figure, les autres restent sur le plateau. C'est ce qui permet de
+    /// distinguer une lecture des dés comptabilisés d'une lecture du plateau.
+    fn avec_des(valeurs: &[u8], figure: YahtzeeHand, comptabilises: usize) -> Self {
+        let dice = des(valeurs);
+        let mut decor = Self::new();
+        decor.hand = HandMatch {
+            hand: figure,
+            scoring_dice: dice[..comptabilises].iter().map(|de| de.id).collect(),
+            discarded_dice: dice[comptabilises..].iter().map(|de| de.id).collect(),
+            potential_score: 0,
+        };
+        decor.dice = dice;
+        decor
+    }
+
     /// Décor sur une figure choisie : la condition de ces reliques porte sur la
     /// figure **retenue**, pas sur les dés.
     fn avec_figure(figure: YahtzeeHand) -> Self {
@@ -365,10 +381,7 @@ impl Decor {
 ///
 /// `ClayPiggyBank` et `GhostDie` y resteront jusqu'au bout : leur neutralité sur
 /// ce hook est **définitive**, elles agissent ailleurs.
-const EFFETS_ENCORE_NEUTRES: [RelicId; 6] = [
-    RelicId::Pendulum,
-    RelicId::UnstableObsidian,
-    RelicId::DivineYahtzee,
+const EFFETS_ENCORE_NEUTRES: [RelicId; 3] = [
     RelicId::ClayPiggyBank,
     RelicId::GhostDie,
     RelicId::DoubleMirror,
@@ -907,4 +920,207 @@ fn test_additive_relic_fires_once_per_hand_not_per_die() {
         vec![ScoreAction::AddMult(600)],
         "un effet par main, jamais un par dé"
     );
+}
+
+// ---- Les trois reliques multiplicatives (TASK-59) ----
+
+/// Score d'une main donnée avec un inventaire donné.
+fn score_avec(dice: &[Die], main: &HandMatch, relics: &RelicInventory) -> u64 {
+    ScoringPipeline::resolve(main, dice, &HandLevels::default(), relics, &blind_nu()).final_score
+}
+
+fn inventaire_ordonne(defs: &[RelicId]) -> RelicInventory {
+    let mut inventaire = RelicInventory::new(5);
+    for def in defs {
+        inventaire.add_relic(*def).expect("slot libre");
+    }
+    inventaire
+}
+
+#[test]
+fn test_triplet_master_then_pendulum() {
+    // Brelan de 4 : base 10 Chips et 200 centièmes de Mult, plus 4+4+4 = 12
+    // Chips des dés comptabilisés, donc 22 Chips. Somme comptabilisée **paire**
+    // — le plateau, lui, vaut 19, impair. Le Mult passe par 200 + 600 = 800
+    // puis ×1,5 = 1200, et 22 × 12,00 donne 264.
+    let dice = des(&[4, 4, 4, 6, 1]);
+    let main = figure(&dice, YahtzeeHand::ThreeOfAKind);
+    let inventaire = inventaire_ordonne(&[RelicId::TripletMaster, RelicId::Pendulum]);
+
+    let rapport = ScoringPipeline::resolve(
+        &main,
+        &dice,
+        &HandLevels::default(),
+        &inventaire,
+        &blind_nu(),
+    );
+    assert_eq!(rapport.chips, 22);
+    assert_eq!(rapport.mult, 1200);
+    assert_eq!(rapport.final_score, 264);
+}
+
+#[test]
+fn test_relic_reorder_changes_score() {
+    // **Le test de non-régression central de l'étape.** ADR-005 ne dit pas que
+    // deux inventaires différents donnent deux scores : il dit que le
+    // **réordonnancement par le joueur** change le score. Ce geste a un nom
+    // dans le code, et c'est lui qu'on appelle ici — le même inventaire, avant
+    // et après.
+    let dice = des(&[4, 4, 4, 6, 1]);
+    let main = figure(&dice, YahtzeeHand::ThreeOfAKind);
+    let mut inventaire = inventaire_ordonne(&[RelicId::TripletMaster, RelicId::Pendulum]);
+
+    let avant = score_avec(&dice, &main, &inventaire);
+    inventaire.reorder(0, 1);
+    let apres = score_avec(&dice, &main, &inventaire);
+
+    // 200 + 600 = 800 puis x1,5 = 1200 ; contre 200 x1,5 = 300 puis + 600 = 900.
+    assert_eq!(avant, 264);
+    assert_eq!(apres, 198);
+    assert_ne!(
+        avant, apres,
+        "l'ordre de l'inventaire ne change pas le score"
+    );
+}
+
+#[test]
+fn test_divine_yahtzee_is_multiply_mult() {
+    // Le Yams multiplie le **Mult**, jamais le score total : la formule
+    // Score = Chips x Mult ne se remplace pas.
+    let effets = sur_la_figure(RelicId::DivineYahtzee, YahtzeeHand::Yahtzee);
+    assert_eq!(actions(&effets), vec![ScoreAction::MultiplyMult(300)]);
+}
+
+#[test]
+fn test_pendulum_silent_on_odd_sum() {
+    // Miroir du cas de référence : plateau 16 (pair), comptabilisés 9 (impair).
+    // Une lecture du plateau déclencherait à tort.
+    let decor = Decor::avec_des(&[3, 3, 3, 2, 5], YahtzeeHand::ThreeOfAKind, 3);
+    let ctx = TriggerCtx {
+        die: None,
+        ..decor.ctx(RelicState::None)
+    };
+    assert!(effects_for(RelicId::Pendulum, Hook::OnHandScored, &ctx).is_empty());
+}
+
+#[test]
+fn test_pendulum_reads_scoring_dice_not_board() {
+    // Les deux mains sont choisies pour **inverser** le verdict selon qu'on lit
+    // les dés comptabilisés ou le plateau entier.
+    for (valeurs, declenche) in [([4u8, 4, 4, 6, 1], true), ([3, 3, 3, 2, 5], false)] {
+        let decor = Decor::avec_des(&valeurs, YahtzeeHand::ThreeOfAKind, 3);
+        let ctx = TriggerCtx {
+            die: None,
+            ..decor.ctx(RelicState::None)
+        };
+        let effets = effects_for(RelicId::Pendulum, Hook::OnHandScored, &ctx);
+        assert_eq!(!effets.is_empty(), declenche, "{valeurs:?}");
+    }
+}
+
+#[test]
+fn test_pendulum_finds_dice_by_identity_not_index() {
+    // **Le pool retire et ajoute des dés en cours de manche**, donc un
+    // identifiant n'est pas un index. Tous les autres montages du fichier
+    // donnent `DieId(i)` au dé d'index `i` : indexer et chercher par identité
+    // y coïncident, et le banc a montré qu'aucun test ne les séparait.
+    //
+    // Ici les identifiants sont 0, 1 et 5 pour trois dés valant 1, 2 et 3. La
+    // recherche par identité somme 6 — pair, la relique parle. Une indexation
+    // ne trouverait que les deux premiers, sommerait 3 — impair — et la
+    // relique se tairait.
+    let dice: Vec<Die> = [(0u32, 1u8), (1, 2), (5, 3)]
+        .into_iter()
+        .map(|(id, valeur)| {
+            let mut de = Die::new(DieId(id), 6);
+            de.current_value = valeur;
+            de
+        })
+        .collect();
+
+    let mut decor = Decor::new();
+    decor.hand = HandMatch {
+        hand: YahtzeeHand::ThreeOfAKind,
+        scoring_dice: dice.iter().map(|de| de.id).collect(),
+        discarded_dice: Vec::new(),
+        potential_score: 0,
+    };
+    decor.dice = dice;
+
+    let ctx = TriggerCtx {
+        die: None,
+        ..decor.ctx(RelicState::None)
+    };
+    assert_eq!(
+        actions(
+            &effects_for(RelicId::Pendulum, Hook::OnHandScored, &ctx)
+                .into_iter()
+                .collect::<Vec<_>>()
+        ),
+        vec![ScoreAction::MultiplyMult(150)],
+        "la somme est calculée par indexation, pas par identité"
+    );
+}
+
+#[test]
+fn test_unstable_obsidian_is_unconditional() {
+    for figure in YahtzeeHand::ALL {
+        assert_eq!(
+            actions(&sur_la_figure(RelicId::UnstableObsidian, figure)),
+            vec![ScoreAction::MultiplyMult(200)],
+            "{figure:?}"
+        );
+    }
+}
+
+#[test]
+fn test_divine_yahtzee_only_on_yahtzee() {
+    for figure in YahtzeeHand::ALL {
+        if figure == YahtzeeHand::Yahtzee {
+            continue;
+        }
+        assert!(
+            sur_la_figure(RelicId::DivineYahtzee, figure).is_empty(),
+            "{figure:?}"
+        );
+    }
+}
+
+#[test]
+fn test_multiplicative_relics_silent_on_scoring_die() {
+    // Chacune éprouvée sur ce qui la déclenche, et sa signature vérifiée —
+    // la vérification systématique arrêtée à TASK-58.
+    for (def, valeurs) in [
+        (RelicId::Pendulum, [4u8, 4, 4, 6, 1]),
+        (RelicId::UnstableObsidian, [4, 4, 4, 6, 1]),
+        (RelicId::DivineYahtzee, [4, 4, 4, 4, 4]),
+    ] {
+        let voulue = if def == RelicId::DivineYahtzee {
+            YahtzeeHand::Yahtzee
+        } else {
+            YahtzeeHand::ThreeOfAKind
+        };
+        let decor = Decor::avec_des(&valeurs, voulue, 3);
+        let ctx = TriggerCtx {
+            die: Some((DieId(0), 4)),
+            ..decor.ctx(RelicState::None)
+        };
+
+        let produits = effects_for(def, Hook::OnHandScored, &ctx);
+        assert!(!produits.is_empty(), "{def:?} muette sur son propre cas");
+        for effet in &produits {
+            assert_eq!(
+                effet.source,
+                StepSource::Relic { uid: ctx.uid, def },
+                "{def:?}"
+            );
+        }
+
+        for hook in [Hook::OnRoll, Hook::OnScoringDie, Hook::OnRoundEnd] {
+            assert!(
+                effects_for(def, hook, &ctx).is_empty(),
+                "{def:?} sur {hook:?}"
+            );
+        }
+    }
 }
