@@ -304,11 +304,11 @@ mod tests {
     /// Choisit la première figure évaluée et la soumet, depuis la phase de
     /// lancer.
     fn soumettre_une_figure(app: &mut App) {
-        let grille = app.world().resource::<BlindContext>().used_hands;
+        let manche = app.world().resource::<BlindContext>().clone();
         let figure = app.world().resource::<HandContext>().active_evaluations[0].hand;
         {
             let mut main = app.world_mut().resource_mut::<HandContext>();
-            select_hand(&mut main, &grille, figure);
+            select_hand(&mut main, &manche, figure);
         }
         frapper(app, KeyCode::Enter);
         deux_frames(app);

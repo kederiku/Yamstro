@@ -61,7 +61,7 @@ fn submit_hand(
     let Some(cell) = hand.selected_hand else {
         return;
     };
-    if !is_hand_available(&blind.used_hands, cell) {
+    if !is_hand_available(&blind, cell) {
         return;
     }
 
@@ -261,9 +261,9 @@ mod tests {
     /// Passe par `select_hand`, jamais par une écriture directe : c'est le
     /// point d'entrée unique, et les tests le traitent comme le clic le fera.
     fn choisir(app: &mut App, figure: YahtzeeHand) {
-        let grille = app.world().resource::<BlindContext>().used_hands;
+        let manche = app.world().resource::<BlindContext>().clone();
         let mut main = app.world_mut().resource_mut::<HandContext>();
-        select_hand(&mut main, &grille, figure);
+        select_hand(&mut main, &manche, figure);
     }
 
     fn consommer(app: &mut App, figure: YahtzeeHand) {
@@ -275,6 +275,83 @@ mod tests {
 
     fn phase(app: &App) -> RunPhase {
         *app.world().resource::<State<RunPhase>>().get()
+    }
+
+    // ---- TASK-74 : *L'Oubli* refuse, comme la grille consommée refuse ----
+
+    /// Pose sur la manche vivante la contrainte que le catalogue rend.
+    fn poser_le_boss(app: &mut App, id: core_engine::blinds::definitions::BossId) {
+        let mut rng = core_engine::rng::RunRng::from_seed(0);
+        let contrainte = core_engine::blinds::definitions::boss_definition(id, &mut rng.boss, 5);
+        app.world_mut()
+            .resource_mut::<BlindContext>()
+            .blind
+            .modifier = Some(contrainte.modifier);
+    }
+
+    #[test]
+    fn test_oubli_debuffs_two_hands() {
+        use core_engine::blinds::{BlindModifier, definitions::BossId};
+
+        let mut app = app_prete(None);
+        poser_le_boss(&mut app, BossId::Oblivion);
+
+        // Le modificateur porte **deux** figures, ni une ni trois.
+        let Some(BlindModifier::DebuffHands(figures)) = app
+            .world()
+            .resource::<BlindContext>()
+            .blind
+            .modifier
+            .clone()
+        else {
+            panic!("L'Oubli affaiblit des figures");
+        };
+        assert_eq!(
+            figures.as_slice(),
+            [YahtzeeHand::Chance, YahtzeeHand::Yahtzee]
+        );
+
+        for figure in [YahtzeeHand::Chance, YahtzeeHand::Yahtzee] {
+            // La sélection du tour précédent survit à son refus : la remettre
+            // à zéro est le seul moyen d'observer ce que `select_hand` décide
+            // pour **cette** figure.
+            app.world_mut().resource_mut::<HandContext>().selected_hand = None;
+
+            // `select_hand` refuse déjà : c'est le même prédicat.
+            choisir(&mut app, figure);
+            assert_eq!(figure_selectionnee(&app), None, "{figure:?} a été choisie");
+
+            // Et si la sélection venait d'ailleurs, la soumission refuse aussi.
+            app.world_mut().resource_mut::<HandContext>().selected_hand = Some(figure);
+            let grille = app.world().resource::<BlindContext>().used_hands;
+            frapper(&mut app, KeyCode::Enter);
+            // **Deux frames.** `frapper` n'écrit qu'un message ; la première
+            // frame l'exécute, la seconde applique le `NextState`. Sans elles,
+            // l'assertion « toujours dans Roll » ne constate rien du tout.
+            app.update();
+            app.update();
+
+            assert_eq!(phase(&app), RunPhase::Roll, "{figure:?} a fait transiter");
+            assert!(
+                des_marques(&mut app).is_empty(),
+                "{figure:?} a posé un marqueur"
+            );
+            assert_eq!(
+                app.world().resource::<BlindContext>().used_hands,
+                grille,
+                "{figure:?} a consommé la grille"
+            );
+        }
+
+        // Contre-épreuve : une figure non interdite passe, sans quoi le test
+        // passerait sur une soumission cassée pour tout le monde.
+        app.world_mut().resource_mut::<HandContext>().selected_hand = None;
+        choisir(&mut app, YahtzeeHand::FullHouse);
+        assert_eq!(figure_selectionnee(&app), Some(YahtzeeHand::FullHouse));
+        frapper(&mut app, KeyCode::Enter);
+        app.update();
+        app.update();
+        assert_eq!(phase(&app), RunPhase::Scoring);
     }
 
     /// Les `DieId` portant le marqueur de comptabilisation, triés.

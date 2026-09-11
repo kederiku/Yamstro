@@ -281,7 +281,7 @@ fn test_full_inventory_add_returns_none_and_burns_no_uid() {
 
 // ---- Squelette des quatre comportements (TASK-56) ----
 
-use core_engine::blinds::{BlindContext, BlindDefinition};
+use core_engine::blinds::{BlindContext, BlindDefinition, BlindModifier};
 use core_engine::dice::{Die, DieId};
 use core_engine::economy::round_end_gold;
 use core_engine::evaluator::HandMatch;
@@ -2215,4 +2215,130 @@ fn test_additive_conditionals_stay_under_their_cap() {
             budget * facteur
         );
     }
+}
+
+// ---- *La Cage* : neutralisation lue depuis la manche (TASK-74) ----
+
+/// Manche mettant un slot en cage.
+fn manche_en_cage(slot: u8) -> BlindContext {
+    BlindContext {
+        blind: BlindDefinition {
+            modifier: Some(BlindModifier::DisableRelicSlot(slot)),
+            ..BlindDefinition::default()
+        },
+        ..blind_nu()
+    }
+}
+
+/// Combien de paliers une relique donnée a émis. **Ancré sur la relique et non
+/// sur l'uid** : `add_relic` numérote, et le test ne doit pas dépendre de sa
+/// convention.
+fn emis(rapport: &core_engine::scoring::ScoringReport, def: RelicId) -> usize {
+    paliers_de_relique(rapport)
+        .iter()
+        .filter(|(_, d, _)| *d == def)
+        .count()
+}
+
+#[test]
+fn test_cage_neutralises_target_slot() {
+    let (dice, main) = brelan_de_quatre();
+    let inventaire = inventaire_ordonne(&[RelicId::TripletMaster, RelicId::PolishedStone]);
+
+    let libre = ScoringPipeline::resolve(
+        &main,
+        &dice,
+        &HandLevels::default(),
+        &inventaire,
+        &blind_nu(),
+    );
+    let en_cage = ScoringPipeline::resolve(
+        &main,
+        &dice,
+        &HandLevels::default(),
+        &inventaire,
+        &manche_en_cage(0),
+    );
+
+    assert!(
+        emis(&libre, RelicId::TripletMaster) > 0,
+        "le Maître du Brelan n'émettait déjà rien : le montage ne prouve rien"
+    );
+    assert_eq!(
+        emis(&en_cage, RelicId::TripletMaster),
+        0,
+        "le slot en cage a émis"
+    );
+    assert_eq!(
+        emis(&en_cage, RelicId::PolishedStone),
+        emis(&libre, RelicId::PolishedStone),
+        "le voisin a été touché"
+    );
+    assert_ne!(en_cage.final_score, libre.final_score);
+}
+
+#[test]
+fn test_cage_empties_left_effects_of_neighbour() {
+    // *Miroir Double* ré-émet la tranche de son voisin de gauche. Derrière une
+    // relique en cage il n'hérite de rien, exactement comme derrière un slot
+    // `Disabled` : c'est la remise à zéro de `left` qui le donne, et elle n'a
+    // lieu que si la garde précède la construction du contexte.
+    let (dice, main) = brelan_de_quatre();
+    let inventaire = inventaire_ordonne(&[RelicId::TripletMaster, RelicId::DoubleMirror]);
+
+    let en_cage = ScoringPipeline::resolve(
+        &main,
+        &dice,
+        &HandLevels::default(),
+        &inventaire,
+        &manche_en_cage(0),
+    );
+    assert!(
+        paliers_de_relique(&en_cage).is_empty(),
+        "le Miroir a hérité d'une tranche non vide : {:?}",
+        paliers_de_relique(&en_cage)
+    );
+
+    // **Le cas qui discrimine vraiment, et il faut trois slots.** Une cage
+    // posée sur le **premier** slot ne prouve rien : `left` y est déjà vide,
+    // et un parcours qui oublierait de le remettre à zéro passerait le test.
+    // Il faut un slot qui a émis, puis la cage, puis le Miroir.
+    let trois = inventaire_ordonne(&[
+        RelicId::TripletMaster,
+        RelicId::PolishedStone,
+        RelicId::DoubleMirror,
+    ]);
+    let cage_au_milieu = ScoringPipeline::resolve(
+        &main,
+        &dice,
+        &HandLevels::default(),
+        &trois,
+        &manche_en_cage(1),
+    );
+    assert!(
+        emis(&cage_au_milieu, RelicId::TripletMaster) > 0,
+        "le slot 0 n'émettait rien : le montage ne prouve rien"
+    );
+    assert_eq!(
+        emis(&cage_au_milieu, RelicId::DoubleMirror),
+        0,
+        "le Miroir a hérité de la tranche du slot 0 par-dessus la cage"
+    );
+
+    // Et une cage posée sur le Miroir ne touche pas son voisin de gauche.
+    let miroir_en_cage = ScoringPipeline::resolve(
+        &main,
+        &dice,
+        &HandLevels::default(),
+        &inventaire,
+        &manche_en_cage(1),
+    );
+    let sources: Vec<RelicId> = paliers_de_relique(&miroir_en_cage)
+        .iter()
+        .map(|(_, def, _)| *def)
+        .collect();
+    assert!(
+        !sources.is_empty() && sources.iter().all(|def| *def == RelicId::TripletMaster),
+        "une cage sur le slot 1 a touché le slot 0 : {sources:?}"
+    );
 }

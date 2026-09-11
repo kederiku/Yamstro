@@ -100,11 +100,11 @@ fn stake_reroll_malus(stake_level: u8) -> u8 {
 ///
 /// Une relique qui ne participe pas ne contribue rien — même prédicat que le
 /// parcours du score, l'or et l'avancement d'état.
-fn relic_reroll_malus(inventory: &RelicInventory) -> i8 {
+fn relic_reroll_malus(inventory: &RelicInventory, blind: &BlindDefinition) -> i8 {
     agreger_deltas(
         inventory
             .iter_slots()
-            .filter(|(_, instance)| instance.participe())
+            .filter(|(slot, instance)| instance.participe(*slot, blind))
             .map(|(_, instance)| {
                 roll_modifier_for(instance.def, &[], ROLL_INDEX_HORS_LANCER).reroll_delta
             }),
@@ -171,7 +171,7 @@ pub fn resolve_rerolls(
         &session.config,                                                  // 1. base(cup)
         as_negative_stake_delta(stake_reroll_malus(session.stake_level)), // 2. stake
         blind_cap(blind),                                                 // 3. blind_modifier
-        relic_reroll_malus(inventory),                                    // 4. relic_modifier
+        relic_reroll_malus(inventory, blind),                             // 4. relic_modifier
     )
 }
 
@@ -399,15 +399,19 @@ fn setup_round(
 /// **Aucun aléatoire n'est consommé ici** : forcer une valeur est déterministe,
 /// et un tirage décalerait le flux de dés, faisant diverger deux runs de même
 /// graine (ADR-003).
-pub fn apply_forced_values(inventory: Option<Res<RelicInventory>>, mut dice: Query<&mut Die>) {
-    let Some(inventory) = inventory else {
+pub fn apply_forced_values(
+    inventory: Option<Res<RelicInventory>>,
+    blind: Option<Res<BlindContext>>,
+    mut dice: Query<&mut Die>,
+) {
+    let (Some(inventory), Some(blind)) = (inventory, blind) else {
         return;
     };
 
     let tombes: Vec<Die> = dice.iter().cloned().collect();
     let forcees: Vec<(DieId, u8)> = inventory
         .iter_slots()
-        .filter(|(_, instance)| instance.participe())
+        .filter(|(slot, instance)| instance.participe(*slot, &blind.blind))
         .flat_map(|(_, instance)| {
             roll_modifier_for(instance.def, &tombes, PREMIER_LANCER).force_values
         })
@@ -885,7 +889,7 @@ mod tests {
                         &partie.config,
                         as_negative_stake_delta(stake_reroll_malus(stake_level)),
                         cap,
-                        relic_reroll_malus(&stock),
+                        relic_reroll_malus(&stock, &blind(cap)),
                     );
 
                     assert_eq!(
@@ -1077,7 +1081,7 @@ mod tests_relances_et_valeurs_forcees {
     use core_engine::relics::{RelicId, RelicState};
 
     use crate::systems::fixtures::{
-        app_a_la_graine, des_tries, entrer_dans_roll, inventaire, session,
+        app_a_la_graine, des_tries, entrer_dans_roll, inventaire, session, valeurs_des,
     };
 
     fn blind_nue() -> BlindDefinition {
@@ -1164,8 +1168,90 @@ mod tests_relances_et_valeurs_forcees {
 
         // Et la relique réelle traverse bien l'inventaire.
         assert_eq!(
-            relic_reroll_malus(&stock(CupId::Standard, &[RelicId::UnstableObsidian])),
+            relic_reroll_malus(
+                &stock(CupId::Standard, &[RelicId::UnstableObsidian]),
+                &BlindDefinition::default(),
+            ),
             -1
+        );
+    }
+
+    // ---- TASK-74 : la cage vaut pour tous les hooks ----
+
+    /// Définition mettant un slot en cage.
+    fn manche_en_cage(slot: u8) -> BlindDefinition {
+        BlindDefinition {
+            modifier: Some(BlindModifier::DisableRelicSlot(slot)),
+            ..BlindDefinition::default()
+        }
+    }
+
+    #[test]
+    fn test_caged_relic_loses_all_hooks() {
+        // **Le point du ticket.** Sans cette règle, une *Obsidienne Instable*
+        // en cage perdrait son `MultiplyMult(200)` tout en gardant son
+        // `reroll_delta: -1` : le joueur subirait la contrepartie sans le
+        // bonus, sur un boss dont le contrat est de neutraliser la relique.
+        let partie = session(CupId::Standard, 0);
+        let stock = stock(CupId::Standard, &[RelicId::UnstableObsidian]);
+
+        assert_eq!(
+            relic_reroll_malus(&stock, &BlindDefinition::default()),
+            -1,
+            "l'Obsidienne n'imposait déjà rien : le montage ne prouve rien"
+        );
+        assert_eq!(
+            resolve_rerolls(&partie, &BlindDefinition::default(), &stock),
+            1,
+            "deux relances moins celle de l'Obsidienne"
+        );
+
+        // En cage, le malus disparaît avec le bonus.
+        assert_eq!(relic_reroll_malus(&stock, &manche_en_cage(0)), 0);
+        assert_eq!(resolve_rerolls(&partie, &manche_en_cage(0), &stock), 2);
+
+        // Et une cage sur un autre slot ne la touche pas.
+        assert_eq!(resolve_rerolls(&partie, &manche_en_cage(1), &stock), 1);
+    }
+
+    #[test]
+    fn test_caged_ghost_die_does_not_force() {
+        // **Le cinquième parcours, que le ticket ne nommait pas.**
+        // `apply_forced_values` consultait la neutralisation sans connaître la
+        // manche : un *Dé Fantôme* en cage forçait encore son six.
+        let mut app = app_a_la_graine(CupId::Standard, GRAINE_SANS_UN);
+        app.world_mut()
+            .resource_mut::<RelicInventory>()
+            .add_relic(RelicId::GhostDie)
+            .expect("slot libre");
+        entrer_dans_roll(&mut app);
+        app.update();
+
+        let force: Vec<u8> = valeurs_des(&mut app);
+        assert!(
+            force.contains(&6),
+            "le Dé Fantôme ne forçait déjà rien : le montage ne prouve rien"
+        );
+
+        // La même graine, la même relique, mais le slot en cage.
+        let mut en_cage = app_a_la_graine(CupId::Standard, GRAINE_SANS_UN);
+        en_cage
+            .world_mut()
+            .resource_mut::<RelicInventory>()
+            .add_relic(RelicId::GhostDie)
+            .expect("slot libre");
+        en_cage
+            .world_mut()
+            .resource_mut::<BlindContext>()
+            .blind
+            .modifier = Some(BlindModifier::DisableRelicSlot(0));
+        entrer_dans_roll(&mut en_cage);
+        en_cage.update();
+
+        assert_ne!(
+            valeurs_des(&mut en_cage),
+            force,
+            "le Dé Fantôme en cage a quand même forcé sa valeur"
         );
     }
 

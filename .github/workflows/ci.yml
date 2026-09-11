@@ -73,9 +73,17 @@ jobs:
           # test. `setup.rs` est dans ce cas.
           forbid_prod() {
             label=$1; motif=$2; shift 2
+            exclure=''
+            if [ "${1:-}" = '--exclure' ]; then exclure=$2; shift 2; fi
             trouve=''
             for chemin in "$@"; do
               for f in $(find "$chemin" -name '*.rs' 2>/dev/null || echo "$chemin"); do
+                case "$f" in */tests/*) continue ;; esac
+                saute=0
+                for suffixe in $(printf '%s' "$exclure" | tr '|' ' '); do
+                  case "$f" in *$suffixe) saute=1 ;; esac
+                done
+                [ "$saute" = 1 ] && continue
                 bloc=$(sed -n '1,/^#\[cfg(test)\]/p' "$f")
                 hit=$(printf '%s' "$bloc" | rg -n "$motif" 2>&1) && rc=0 || rc=$?
                 case $rc in
@@ -173,7 +181,8 @@ jobs:
           # champ public de core_engine. Et la garde « DicePool » vise une
           # instanciation ; nue, elle attrape les commentaires qui expliquent
           # justement qu'on n'en crée pas.
-          forbid  "critère 4  positions fixes de dés"    -U '(?s)(0\.\.5|\[Entity; 5\]|\[Die; 5\]|\b(die_slots?|dice_slots?)\b|slots?\s*\[).*#\[cfg\(test\)\]' "$SETUP"
+          forbid_prod "critère 4  positions fixes de dés" \
+                  '(0\.\.5|\[Entity; 5\]|\[Die; 5\]|\b(die_slots?|dice_slots?)\b|slots?\s*\[)' "$SETUP"
           forbid  "critère 4  littéraux de main"         -n 'rerolls_left\s*=\s*[0-9]|dice_count\s*=\s*[0-9]' "$SETUP"
           # Production seule, même motif : le test de *L'Étau* passe par le
           # catalogue, donc par `boss_definition`, qui prend le flux des boss
@@ -226,7 +235,8 @@ jobs:
           # comptée, tandis qu'une ligne de test l'était.
           forbid  "critère 4  commit unique de l'Étape 4" -n 'used_hands\s*\.\s*mark|\.current_score\s*[-+]?=|\.hands_remaining\s*[-+]?=|advance_state\(' "$SETUP/submission.rs"
           forbid  "critère 4  aucun dé retiré à la soumission" -n '\.despawn\(|remove::<Die>|Without<Locked>' "$SETUP/submission.rs"
-          forbid  "critère 4  écriture de la figure choisie" -n 'selected_hand\s*=[^=]' crates/game_state/src -g '!**/input.rs' -g '!**/setup.rs'
+          forbid_prod "critère 4  écriture de la figure choisie" \
+                  'selected_hand\s*=[^=]' --exclure '/input.rs|/setup.rs' crates/game_state/src
 
           # ---- Étape 3 : rapport de score (TASK-37) ----
           # Deux propriétés du § 2.2 de TASK-37 sont **inobservables** par un
@@ -741,7 +751,8 @@ jobs:
           # Restreinte au code de **production** : un montage de test a le
           # droit d'éteindre une relique pour éprouver ce qui en découle.
           # L'ancrage sur la position relative au marqueur est celui de TASK-64.
-          forbid  "critère 5  état de relique écrit ailleurs qu'ici" -U '(?s)\.state = .*#\[cfg\(test\)\]' crates/game_state/src crates/ui_and_juice/src -g '!**/relics/mod.rs'
+          forbid_prod "critère 5  état de relique écrit ailleurs qu'ici" \
+                  '\.state = ' --exclure '/relics/mod.rs' crates/game_state/src crates/ui_and_juice/src
           # Le corps du commit de TASK-50 reste hors d'atteinte.
           forbid  "critère 5  avancement d'état dans la file de l'Étape 4" -n 'advance_state|round_end_gold' crates/ui_and_juice/src
           # L'or entre par un seul point, et en saturation.
@@ -802,7 +813,7 @@ jobs:
           # test : le motif s'ancre sur la position relative au marqueur, seule
           # façon d'exprimer « hors des tests » avec cet outil.
           forbid  "critère 5  unwrap dans les cartes"       -n 'unwrap\(\)' "$CARTES"
-          forbid  "critère 5  expect en production dans les cartes" -U '(?s)\.expect\(.*#\[cfg\(test\)\]' "$CARTES"
+          forbid_prod "critère 5  expect en production dans les cartes" '\.expect\(' "$CARTES"
           # Ancrée sur la **condition**, jamais sur le nom de méthode :
           # `Option::and` et `Option::or_else` sont légitimes et employés.
           # Seul `SystemCondition::and` est déprécié en 0.19.1, au profit de
@@ -830,7 +841,7 @@ jobs:
           forbid  "critère 5  DragState rendu composant"   -n 'derive\([^)]*Component' "$DRAG"
           forbid  "critère 5  donnée de jeu dans l'état de glissement" -n '(spawn|insert)\(.*Relic(Instance|Id)\b|held: *Option<Entity>|held: *Option<u32>' "$DRAG"
           forbid  "critère 5  unwrap dans le glissement"   -n 'unwrap\(\)' "$DRAG"
-          forbid  "critère 5  expect en production dans le glissement" -U '(?s)\.expect\(.*#\[cfg\(test\)\]' "$DRAG"
+          forbid_prod "critère 5  expect en production dans le glissement" '\.expect\(' "$DRAG"
           # L'action existe hors du système de souris : sans cela l'Étape 11,
           # qui doit rendre la partie jouable sans souris, la réécrirait.
           require "critère 5  prise exposée comme action"  -n 'pub fn begin_hold\(state: &mut DragState, slot: u8\)' "$DRAG"
@@ -860,7 +871,7 @@ jobs:
           SETUP=crates/game_state/src/systems/setup.rs
           # Le bouchon a disparu, et le delta est signé de bout en bout.
           forbid  "critère 5  bouchon de relance resté en place" -nU 'fn relic_reroll_malus[^\n]*\n\s*let _ = inventory;' "$SETUP"
-          require "critère 5  agrégat de relance signé" -n 'fn relic_reroll_malus\(inventory: &RelicInventory\) -> i8' "$SETUP"
+          require "critère 5  agrégat de relance signé" -n 'fn relic_reroll_malus\(inventory: &RelicInventory, blind: &BlindDefinition\) -> i8' "$SETUP"
           forbid  "critère 5  agrégat de relance en u8" -n 'fn relic_reroll_malus[^)]*\) -> u8|as_negative_delta' "$SETUP"
           # Le bouchon des stakes, lui, reste : ce sont les Étapes 10.
           require "critère 5  bouchon des stakes intact" -n 'fn stake_reroll_malus\(stake_level: u8\) -> u8' "$SETUP"
@@ -868,7 +879,7 @@ jobs:
           # parcours filtré : `scan_relics` doit visiter les slots stériles pour
           # remettre `left_effects` à zéro, et un itérateur qui les sauterait
           # restaurerait la règle écartée à TASK-60.
-          require "critère 5  prédicat unique de neutralisation" -n 'pub fn participe\(&self\) -> bool' crates/core_engine/src/relics/mod.rs
+          require "critère 5  prédicat unique de neutralisation" -n 'pub fn participe\(&self, slot: u8, blind: &crate::blinds::BlindDefinition\) -> bool' crates/core_engine/src/relics/mod.rs
           # Exclut le prédicat lui-même : c'est le site de décision, pas un
           # doublon. Tout autre fichier qui compare l'état à `Disabled` en
           # ouvre un second.
@@ -987,8 +998,8 @@ jobs:
           # Ancrée sur l'**acte**, et sur la production seule : le test qui
           # prouve que les trois autres flux n'ont pas bougé doit pouvoir les
           # nommer. Le motif exige que l'occurrence précède `#[cfg(test)]`.
-          forbid  "critère 6  le boss tire sur un autre flux" -U -n \
-                  '(?s)(rng\.dice|rng\.shop|rng\.relic_effects).*#\[cfg\(test\)\]' "$SRC/blinds"
+          forbid_prod "critère 6  le boss tire sur un autre flux" \
+                  '(rng\.dice|rng\.shop|rng\.relic_effects)' "$SRC/blinds"
           forbid  "critère 6  aléa hors flux de session" -n 'thread_rng|rand::rng\(\)|from_entropy' "$SRC/blinds"
           # Ancrée sur l'acte — une borne littérale — et non sur le chiffre
           # cinq, que la fixture des tests et la note du module doivent pouvoir
@@ -1082,6 +1093,53 @@ jobs:
           require "critère 6  plancher de mult dans la base" -n 'mult = mult.max\(100\);' "$LEVELS"
           forbid  "critère 6  plancher de mult ailleurs" -n \
                   '(mult|base_mult)[a-z_]* *=[^;=]*\.max\(100\)' crates/ -g '!**/scoring/levels.rs'
+
+
+          # ---- Étape 6 : L'Oubli et La Cage (TASK-74) ----
+          RELIQUES=$SRC/relics/mod.rs
+          # **Site de décision unique de la neutralisation.** Cinq parcours le
+          # consultent : le score, l'or, l'avancement d'état, les valeurs
+          # forcées et la chaîne de relances. Écrire la condition ailleurs la
+          # ferait diverger, et une relique neutralisée garderait sa
+          # contrepartie sans son bonus.
+          require "critère 6  le prédicat de neutralisation prend la manche" -n \
+                  'pub fn participe\(&self, slot: u8, blind: &crate::blinds::BlindDefinition\)' "$RELIQUES"
+          forbid_prod "critère 6  seconde décision sur l'état désactivé" \
+                  '(!=|==)\s*RelicState::Disabled|RelicState::Disabled\s*(!=|==)' \
+                  --exclure '/relics/mod.rs' crates/
+          forbid_prod "critère 6  seconde lecture du slot en cage" \
+                  'disabled_relic_slot\(\)' --exclure '/blinds/mod.rs|/relics/mod.rs' crates/
+          # La cage se lit, elle ne s'écrit pas : poser `Disabled` sur le slot
+          # détruirait un `Counter(3)` que rien ne restaurerait.
+          forbid_prod "critère 6  la cage écrite dans l'état" \
+                  'state = RelicState::Disabled|state: RelicState::Disabled' crates/
+          # L'accesseur vit sur la définition, où le modificateur réside, et
+          # `resolve_rerolls` ne tient qu'une définition.
+          require "critère 6  l'accesseur de cage est unique" -n \
+                  '^    pub fn disabled_relic_slot\(&self\) -> Option<u8> \{$' "$BLINDS"
+          # La garde précède la construction du contexte, et remet `left` à
+          # zéro : sans cela le voisin de droite hérite d'une tranche non vide
+          # et *Miroir Double* traverse la cage.
+          require "critère 6  le slot neutralisé casse la chaîne" -U -n \
+                  'if !inst\.participe\(slot, &proto\.blind\.blind\) \{\n            left = 0\.\.0;\n            continue;' "$SRC/scoring/pipeline.rs"
+          # Un seul prédicat de figure : le refus de la soumission et le
+          # grisage doivent rester le même énoncé.
+          require "critère 6  prédicat de figure unique" -n \
+                  '^pub fn is_hand_available\(blind: &BlindContext, hand: YahtzeeHand\)' "$EVAL"
+          forbid  "critère 6  seconde définition du prédicat de figure" -n \
+                  'fn is_hand_available' crates/ -g '!**/systems/evaluation.rs'
+          forbid_prod "critère 6  seconde liste de figures interdites" \
+                  'Vec<YahtzeeHand>|HashSet<YahtzeeHand>|debuffed|forbidden_hands' --exclure '/systems/evaluation.rs' crates/
+          # Le type est au pluriel : le singulier ne pouvait pas exprimer ce
+          # boss, qui interdit deux figures (C22).
+          # Ancrée sur une **déclaration ou une construction**, non sur le nom :
+          # deux commentaires doivent pouvoir écrire que le singulier est
+          # proscrit, ce qui est précisément la raison de la règle.
+          forbid  "critère 6  modificateur de figure au singulier" -n \
+                  'BlindModifier::DebuffHand\(|^\s{4}DebuffHand\(' crates/
+          # Le pipeline n'atteint jamais le champ : il passe par les accesseurs.
+          forbid_prod "critère 6  le pipeline lit le modificateur à nu" \
+                  'blind\.modifier|\.blind\.modifier' "$SRC/scoring"
 
           exit $status
 

@@ -116,6 +116,26 @@ pub struct BlindDefinition {
     pub modifier: Option<BlindModifier>,
 }
 
+impl BlindDefinition {
+    /// Le slot mis en cage par *La Cage*, `None` sous toute autre manche.
+    ///
+    /// **Lecture seule, et site unique.** `has_modifier` ne convient pas : la
+    /// variante porte une charge utile qu'il faut lire, pas comparer. Passer
+    /// par un accesseur garde la règle de TASK-22 — le pipeline n'atteint
+    /// jamais le champ directement — et donne un seul endroit à corriger si la
+    /// forme du modificateur évolue.
+    ///
+    /// Il vit sur la **définition** et non sur le contexte : c'est là que le
+    /// modificateur réside, et `resolve_rerolls` ne tient qu'une définition.
+    /// Les formes de l'Étape 9 y résideront aussi.
+    pub fn disabled_relic_slot(&self) -> Option<u8> {
+        match self.modifier {
+            Some(BlindModifier::DisableRelicSlot(slot)) => Some(slot),
+            _ => None,
+        }
+    }
+}
+
 /// État de la manche en cours.
 ///
 /// **C'est un arbitrage, pas une évidence.** Ce type est un livrable de
@@ -150,6 +170,11 @@ impl BlindContext {
     /// champ n'ayant jamais été atteint directement.
     pub fn has_modifier(&self, m: BlindModifier) -> bool {
         self.blind.modifier == Some(m)
+    }
+
+    /// Le slot mis en cage, délégué à la définition.
+    pub fn disabled_relic_slot(&self) -> Option<u8> {
+        self.blind.disabled_relic_slot()
     }
 
     /// Manche inerte pour les montages de test **internes à cette crate**.

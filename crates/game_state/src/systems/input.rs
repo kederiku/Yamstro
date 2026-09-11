@@ -29,9 +29,10 @@
 //! filtres ne font pas double emploi, ils se couvrent.
 
 use bevy::prelude::*;
+use core_engine::blinds::BlindContext;
 use core_engine::dice::{Die, DieId};
 
-use core_engine::hands::{HandGrid, YahtzeeHand};
+use core_engine::hands::YahtzeeHand;
 
 use crate::components::{DieView, Locked};
 use crate::plugin::{GameSet, InputSet};
@@ -106,8 +107,8 @@ pub(crate) fn toggle_lock(commands: &mut Commands, entity: Entity, die: &mut Die
 /// Publique, comme `resolve_rerolls` (TASK-32) : aucun système ne l'appelle
 /// avant que le clic existe, et une fonction privée sans appelant est du code
 /// mort refusé sous `-D warnings`.
-pub fn select_hand(hand: &mut HandContext, used: &HandGrid, cell: YahtzeeHand) {
-    if is_hand_available(used, cell) {
+pub fn select_hand(hand: &mut HandContext, blind: &BlindContext, cell: YahtzeeHand) {
+    if is_hand_available(blind, cell) {
         hand.selected_hand = Some(cell);
     }
 }

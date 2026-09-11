@@ -28,7 +28,7 @@ use crate::scoring::TriggerCtx;
 pub fn round_end_gold(inventory: &RelicInventory, base: &TriggerCtx<'_>) -> u32 {
     inventory
         .iter_slots()
-        .filter(|(_, inst)| inst.participe())
+        .filter(|(slot, inst)| inst.participe(*slot, &base.blind.blind))
         .fold(0u32, |total, (slot, inst)| {
             let ctx = TriggerCtx {
                 uid: inst.uid,

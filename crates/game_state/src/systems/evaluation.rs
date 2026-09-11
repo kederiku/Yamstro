@@ -54,20 +54,37 @@ use bevy::prelude::*;
 use core_engine::blinds::{BlindContext, BlindModifier};
 use core_engine::dice::Die;
 use core_engine::evaluator::{HandEvaluator, HandMatch, rescore_with_levels};
-use core_engine::hands::{HandGrid, YahtzeeHand};
+use core_engine::hands::YahtzeeHand;
 
 use crate::components::{Hidden, Locked};
 use crate::plugin::GameSet;
 use crate::resources::{HandContext, RunSession};
 use crate::states::RunPhase;
 
-/// Vrai tant que la figure n'a pas été consommée dans la blind.
+/// Vrai tant que la figure est jouable : ni consommée, ni interdite par le boss.
 ///
-/// **Prédicat unique.** `used_hands` est le seul bitset des figures
-/// consommées ; une seconde liste divergerait au premier oubli et ferait mentir
-/// la grille.
-pub fn is_hand_available(used: &HandGrid, hand: YahtzeeHand) -> bool {
-    !used.contains(hand)
+/// **Prédicat unique, et c'est tout ce qui est normatif ici.** La signature
+/// n'est pas du corpus, contrairement à `HandEvaluator::evaluate` ; ce qui l'est
+/// est qu'il n'en existe **qu'un**. Le refus de `submit_hand` et le grisage de
+/// l'affichage doivent rester le même énoncé : deux listes divergeraient au
+/// premier oubli, et la case grisée cesserait d'être celle que l'on refuse.
+///
+/// Il prend donc la manche entière et non le seul bitset : `used_hands` et
+/// `modifier` vivent dans la même ressource, et *L'Oubli* n'ajoute ainsi aucun
+/// second état.
+pub fn is_hand_available(blind: &BlindContext, hand: YahtzeeHand) -> bool {
+    !blind.used_hands.contains(hand) && !debuffed_hands(blind).contains(&hand)
+}
+
+/// Les figures que *L'Oubli* interdit, vide sous toute autre manche.
+///
+/// **Le type est au pluriel.** Un `DebuffHand(YahtzeeHand)` singulier ne
+/// pourrait pas exprimer ce boss, qui en interdit deux (C22).
+fn debuffed_hands(blind: &BlindContext) -> &[YahtzeeHand] {
+    match &blind.blind.modifier {
+        Some(BlindModifier::DebuffHands(figures)) => figures,
+        _ => &[],
+    }
 }
 
 /// La face que *Le Borgne* éteint, `None` sous toute autre manche.
@@ -128,11 +145,11 @@ pub fn evaluable_dice(dice: &[Die], blind: &BlindContext) -> Vec<Die> {
 /// Dérivée à chaque appel, jamais mémorisée. Rend `None` quand la main ne
 /// produit aucune figure disponible — ce qui, avec quatre mains pour treize
 /// cases, ne peut pas arriver en jeu.
-pub fn best_available_hand(evals: &[HandMatch], used: &HandGrid) -> Option<YahtzeeHand> {
+pub fn best_available_hand(evals: &[HandMatch], blind: &BlindContext) -> Option<YahtzeeHand> {
     evals
         .iter()
         .map(|found| found.hand)
-        .find(|hand| is_hand_available(used, *hand))
+        .find(|hand| is_hand_available(blind, *hand))
 }
 
 /// Les dés masqués. La borne `With<Die>` évite qu'un `Hidden` posé sur une
@@ -248,6 +265,7 @@ mod tests {
     use core_engine::cups::CupId;
     use core_engine::dice::DieId;
     use core_engine::evaluator::rescore_with_levels;
+    use core_engine::hands::HandGrid;
     use core_engine::hands::HandLevels;
 
     use crate::components::Scoring;
@@ -317,6 +335,14 @@ mod tests {
     // ---- TASK-72 : *Le Borgne* ----
 
     use core_engine::blinds::{BlindContext, BlindDefinition, BlindModifier};
+
+    /// Manche inerte portant une grille déjà consommée.
+    fn manche_grille(consommees: &HandGrid) -> BlindContext {
+        BlindContext {
+            used_hands: *consommees,
+            ..manche(None)
+        }
+    }
 
     /// Manche inerte, ou porteuse d'un boss. Le constructeur de test de
     /// `core_engine` est `#[cfg(test)]`, donc invisible d'ici : le contexte se
@@ -512,6 +538,81 @@ mod tests {
         }
     }
 
+    // ---- TASK-74 : *L'Oubli* ----
+
+    /// Manche portant la contrainte du boss, telle que le catalogue la rend.
+    fn manche_de_l_oubli() -> BlindContext {
+        use core_engine::blinds::definitions::{BossId, boss_definition};
+        let mut rng = core_engine::rng::RunRng::from_seed(0);
+        manche(Some(
+            boss_definition(BossId::Oblivion, &mut rng.boss, 5).modifier,
+        ))
+    }
+
+    #[test]
+    fn test_oubli_greys_both_hands_in_ui() {
+        let boss = manche_de_l_oubli();
+
+        // Les deux figures, et elles seules.
+        for figure in [YahtzeeHand::Chance, YahtzeeHand::Yahtzee] {
+            assert!(
+                !is_hand_available(&boss, figure),
+                "{figure:?} reste jouable"
+            );
+        }
+        for figure in [
+            YahtzeeHand::FullHouse,
+            YahtzeeHand::Threes,
+            YahtzeeHand::Aces,
+        ] {
+            assert!(
+                is_hand_available(&boss, figure),
+                "{figure:?} a été interdite"
+            );
+        }
+
+        // La surbrillance ne les propose jamais, mais elles restent évaluées :
+        // les retirer d'`active_evaluations` serait un second état.
+        let des = main_de(&[3, 3, 3, 3, 3]);
+        let trouvees = figures(&des, &HandLevels::default());
+        assert!(
+            trouvees.iter().any(|t| t.hand == YahtzeeHand::Yahtzee),
+            "le Yams n'est pas dans la liste"
+        );
+        assert_ne!(
+            best_available_hand(&trouvees, &boss),
+            Some(YahtzeeHand::Yahtzee)
+        );
+        assert_ne!(
+            best_available_hand(&trouvees, &boss),
+            Some(YahtzeeHand::Chance)
+        );
+        assert!(
+            best_available_hand(&trouvees, &boss).is_some(),
+            "grille bloquée"
+        );
+    }
+
+    #[test]
+    fn test_debuff_and_used_grid_are_one_predicate() {
+        // Les deux causes de refus passent par le même énoncé. Sans cela, le
+        // grisage et le refus de `submit_hand` cesseraient d'être le même
+        // jugement, et la case grisée ne serait plus celle qu'on refuse.
+        let mut consommee = HandGrid::default();
+        consommee.mark(YahtzeeHand::Threes);
+        let boss = BlindContext {
+            used_hands: consommee,
+            ..manche_de_l_oubli()
+        };
+
+        assert!(!is_hand_available(&boss, YahtzeeHand::Threes), "consommée");
+        assert!(!is_hand_available(&boss, YahtzeeHand::Chance), "interdite");
+        assert!(
+            is_hand_available(&boss, YahtzeeHand::FullHouse),
+            "ni l'un ni l'autre"
+        );
+    }
+
     #[test]
     fn test_aces_cell_is_unreachable_under_borgne() {
         let des = main_de(&[1, 1, 3, 3, 3]);
@@ -654,13 +755,13 @@ mod tests {
 
         let mut consommees = HandGrid::default();
         assert_eq!(
-            best_available_hand(&trouvees, &consommees),
+            best_available_hand(&trouvees, &manche_grille(&consommees)),
             Some(YahtzeeHand::FullHouse),
             "sans rien de consommé, le Full est la tête de liste"
         );
 
         consommees.mark(YahtzeeHand::FullHouse);
-        let surbrillance = best_available_hand(&trouvees, &consommees);
+        let surbrillance = best_available_hand(&trouvees, &manche_grille(&consommees));
 
         assert_ne!(surbrillance, Some(YahtzeeHand::FullHouse));
         assert!(surbrillance.is_some(), "plus aucune figure disponible");
@@ -679,7 +780,7 @@ mod tests {
 
         let au_niveau_un = figures(&des, &HandLevels::default());
         assert_eq!(
-            best_available_hand(&au_niveau_un, &HandGrid::default()),
+            best_available_hand(&au_niveau_un, &manche(None)),
             Some(YahtzeeHand::LargeStraight)
         );
         assert_eq!(au_niveau_un[0].potential_score, 240);
@@ -691,7 +792,7 @@ mod tests {
 
         let au_niveau_trois = figures(&des, &niveaux);
         assert_eq!(
-            best_available_hand(&au_niveau_trois, &HandGrid::default()),
+            best_available_hand(&au_niveau_trois, &manche(None)),
             Some(YahtzeeHand::FullHouse)
         );
         assert_eq!(au_niveau_trois[0].potential_score, 432);
@@ -863,14 +964,23 @@ mod tests {
         // divergeraient au premier oubli.
         let mut consommees = HandGrid::default();
         for figure in YahtzeeHand::ALL {
-            assert!(is_hand_available(&consommees, figure), "{figure:?}");
+            assert!(
+                is_hand_available(&manche_grille(&consommees), figure),
+                "{figure:?}"
+            );
         }
 
         consommees.mark(YahtzeeHand::Chance);
-        assert!(!is_hand_available(&consommees, YahtzeeHand::Chance));
+        assert!(!is_hand_available(
+            &manche_grille(&consommees),
+            YahtzeeHand::Chance
+        ));
         for figure in YahtzeeHand::ALL {
             if figure != YahtzeeHand::Chance {
-                assert!(is_hand_available(&consommees, figure), "{figure:?}");
+                assert!(
+                    is_hand_available(&manche_grille(&consommees), figure),
+                    "{figure:?}"
+                );
             }
         }
     }
