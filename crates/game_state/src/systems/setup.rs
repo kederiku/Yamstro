@@ -67,6 +67,7 @@ use core_engine::cups::definitions::cup;
 use core_engine::dice::{Die, DieId};
 use core_engine::hands::HandGrid;
 use core_engine::relics::RelicInventory;
+use core_engine::relics::effects::roll_modifier_for;
 
 use crate::components::{DieView, Locked, Scoring};
 use crate::resources::{HandContext, RunSession};
@@ -99,17 +100,65 @@ fn stake_reroll_malus(stake_level: u8) -> u8 {
     if stake_level == 4 { 1 } else { 0 }
 }
 
-/// Étape 5 — Reliques. Rend 0 tant que le catalogue est vide.
-/// À REMPLACER par la lecture des reliques équipées, jamais à contourner.
-fn relic_reroll_malus(inventory: &RelicInventory) -> u8 {
-    let _ = inventory;
-    0
+/// Somme des deltas de relance des reliques équipées, dans l'ordre des slots.
+///
+/// **Signé de bout en bout, et c'est le point.** Le bouchon de TASK-32 rendait
+/// un `u8` — un malus toujours positif — qu'une fonction d'appoint niait
+/// ensuite. Aucune relique de l'Étape 5 n'a de delta positif, mais
+/// `effective_rerolls` en déclare un légitime en toutes lettres, et
+/// `test_relic_delta_may_exceed_blind_cap` le verrouille : un `u8` avalerait
+/// le premier que l'Étape 9 apportera, sans erreur.
+///
+/// L'agrégation passe par un `i16` puis sature : deux *Obsidiennes* donnent
+/// `-2`, et rien n'interdit à l'Étape 9 d'en aligner davantage.
+///
+/// Une relique qui ne participe pas ne contribue rien — même prédicat que le
+/// parcours du score, l'or et l'avancement d'état.
+fn relic_reroll_malus(inventory: &RelicInventory) -> i8 {
+    agreger_deltas(
+        inventory
+            .iter_slots()
+            .filter(|(_, instance)| instance.participe())
+            .map(|(_, instance)| {
+                roll_modifier_for(instance.def, &[], ROLL_INDEX_HORS_LANCER).reroll_delta
+            }),
+    )
 }
 
-/// Traduit un malus, toujours positif, en delta signé pour `effective_rerolls`.
-/// Un malus qui ne tient pas dans un `i8` sature à `i8::MIN` : au-delà de 127
-/// relances retirées, la chaîne rend zéro dans tous les cas.
-fn as_negative_delta(malus: u8) -> i8 {
+/// Somme saturante de deltas signés.
+///
+/// **Extraite pour être éprouvable.** Aucune relique de l'Étape 5 n'a de delta
+/// positif : à travers l'inventaire, un agrégat qui forcerait le signe rendrait
+/// exactement les mêmes valeurs qu'un agrégat correct, et survivrait à tous les
+/// tests. Mesuré. Cette fonction reçoit les deltas directement, donc un test
+/// peut lui en donner un positif — le premier que l'Étape 9 apportera.
+///
+/// L'accumulateur est un `i16` : cinq *Obsidiennes* donnent `-5`, et rien
+/// n'interdit à l'Étape 9 d'en aligner assez pour sortir d'un `i8`.
+fn agreger_deltas(deltas: impl Iterator<Item = i8>) -> i8 {
+    let somme = deltas.fold(0i16, |total, delta| total.saturating_add(i16::from(delta)));
+    i8::try_from(somme).unwrap_or(if somme.is_negative() {
+        i8::MIN
+    } else {
+        i8::MAX
+    })
+}
+
+/// Rang de lancer employé pour la seule consultation du delta de relance.
+///
+/// **Le delta se calcule avant le lancer**, quand aucun dé n'est encore tombé :
+/// aucune relique ne peut le conditionner à une face, et *Dé Fantôme* ne
+/// contribue de toute façon rien à ce canal. La valeur est celle qui rend sa
+/// garde **fausse**, pour qu'un jour où l'on confondrait les deux consultations
+/// la relique reste muette plutôt que de forcer un dé qui n'existe pas.
+const ROLL_INDEX_HORS_LANCER: u8 = u8::MAX;
+
+/// Traduit le malus de stake, toujours positif, en delta signé.
+///
+/// **Conservée pour le seul maillon qui en a encore besoin.** Les Stakes sont
+/// l'Étape 10 et leur bouchon rend un `u8` ; les reliques, elles, rendent
+/// désormais un delta signé et n'ont plus à passer par ici.
+fn as_negative_stake_delta(malus: u8) -> i8 {
     i8::try_from(malus).map_or(i8::MIN, i8::wrapping_neg)
 }
 
@@ -133,10 +182,10 @@ pub fn resolve_rerolls(
     inventory: &RelicInventory,
 ) -> u8 {
     effective_rerolls(
-        &session.config,                                            // 1. base(cup)
-        as_negative_delta(stake_reroll_malus(session.stake_level)), // 2. stake
-        blind_cap(blind),                                           // 3. blind_modifier
-        as_negative_delta(relic_reroll_malus(inventory)),           // 4. relic_modifier
+        &session.config,                                                  // 1. base(cup)
+        as_negative_stake_delta(stake_reroll_malus(session.stake_level)), // 2. stake
+        blind_cap(blind),                                                 // 3. blind_modifier
+        relic_reroll_malus(inventory),                                    // 4. relic_modifier
     )
 }
 
@@ -390,6 +439,62 @@ fn setup_round(
     commands.insert_resource(NextDieId(next));
 }
 
+/// Applique les valeurs forcées par les reliques, **après** le lancer.
+///
+/// # Pourquoi un second système
+///
+/// Les dés manquants naissent par `Commands`, donc ils n'existent pas encore
+/// dans la requête de `setup_round` : à la **première manche d'une run**, tous
+/// les dés sont neufs et aucun n'y serait visible. Un système ordonné après
+/// voit le monde une fois les commandes appliquées, `auto_insert_apply_deferred`
+/// posant le point de synchronisation à l'arête d'ordonnancement.
+///
+/// C'est aussi la seconde des **deux** consultations de `roll_modifier_for` :
+/// le delta de relance se calcule avant le lancer, quand aucun dé n'est tombé,
+/// et les valeurs forcées après. Une seule consultation ne peut pas servir les
+/// deux.
+///
+/// **Aucun aléatoire n'est consommé ici** : forcer une valeur est déterministe,
+/// et un tirage décalerait le flux de dés, faisant diverger deux runs de même
+/// graine (ADR-003).
+pub fn apply_forced_values(inventory: Option<Res<RelicInventory>>, mut dice: Query<&mut Die>) {
+    let Some(inventory) = inventory else {
+        return;
+    };
+
+    let tombes: Vec<Die> = dice.iter().cloned().collect();
+    let forcees: Vec<(DieId, u8)> = inventory
+        .iter_slots()
+        .filter(|(_, instance)| instance.participe())
+        .flat_map(|(_, instance)| {
+            roll_modifier_for(instance.def, &tombes, PREMIER_LANCER).force_values
+        })
+        .collect();
+    if forcees.is_empty() {
+        return;
+    }
+
+    let mut a_ecrire: Vec<Mut<Die>> = dice.iter_mut().collect();
+    appliquer_valeurs_forcees(&mut a_ecrire, &forcees);
+}
+
+/// Rang du premier lancer d'une manche. **Zéro**, et c'est la convention que
+/// *Dé Fantôme* lit : partir de un la rendrait silencieusement inerte.
+const PREMIER_LANCER: u8 = 0;
+
+/// Écrit les valeurs forcées sur les dés visés, **par identité**.
+///
+/// Un identifiant absent est ignoré sans panique : une relique peut viser un dé
+/// que *La Meule* vient de retirer. L'ordre des slots est celui de la liste, si
+/// bien qu'une relique de droite écrase une relique de gauche sur le même dé.
+fn appliquer_valeurs_forcees(dice: &mut [Mut<'_, Die>], forcees: &[(DieId, u8)]) {
+    for (cible, valeur) in forcees {
+        if let Some(die) = dice.iter_mut().find(|die| die.id == *cible) {
+            die.current_value = *valeur;
+        }
+    }
+}
+
 /// Branche les systèmes de mise en place. Pour la manche, l'ordre **et** la
 /// garde ; pour la main, un seul système.
 pub(crate) fn register(app: &mut App) {
@@ -402,7 +507,10 @@ pub(crate) fn register(app: &mut App) {
             .chain(),
     );
 
-    app.add_systems(OnEnter(RunPhase::Roll), setup_round);
+    app.add_systems(
+        OnEnter(RunPhase::Roll),
+        (setup_round, apply_forced_values).chain(),
+    );
 }
 
 #[cfg(test)]
@@ -775,9 +883,9 @@ mod tests {
 
                     let attendu = effective_rerolls(
                         &partie.config,
-                        as_negative_delta(stake_reroll_malus(stake_level)),
+                        as_negative_stake_delta(stake_reroll_malus(stake_level)),
                         cap,
-                        as_negative_delta(relic_reroll_malus(&stock)),
+                        relic_reroll_malus(&stock),
                     );
 
                     assert_eq!(
@@ -956,5 +1064,236 @@ mod tests {
                 .contains(YahtzeeHand::Yahtzee),
             "une manche a été montée pour une run déjà gagnée"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests_relances_et_valeurs_forcees {
+    use super::*;
+    use core_engine::cups::CupId;
+    use core_engine::relics::{RelicId, RelicState};
+
+    use crate::systems::fixtures::{
+        app_a_la_graine, des_tries, entrer_dans_roll, inventaire, session,
+    };
+
+    fn blind_nue() -> BlindDefinition {
+        BlindDefinition::default()
+    }
+
+    fn blind_plafonnee(cap: u8) -> BlindDefinition {
+        BlindDefinition {
+            modifier: Some(BlindModifier::MaxRerolls(cap)),
+            ..BlindDefinition::default()
+        }
+    }
+
+    fn stock(id: CupId, defs: &[RelicId]) -> RelicInventory {
+        let partie = session(id, 0);
+        let mut stock = inventaire(&partie.config);
+        for def in defs {
+            stock.add_relic(*def).expect("slot libre");
+        }
+        stock
+    }
+
+    #[test]
+    fn test_obsidian_reduces_rerolls_in_chain() {
+        let partie = session(CupId::Standard, 0);
+        assert_eq!(
+            partie.config.base_rerolls, 2,
+            "le gobelet standard part de deux"
+        );
+
+        let avec = stock(CupId::Standard, &[RelicId::UnstableObsidian]);
+        assert_eq!(resolve_rerolls(&partie, &blind_nue(), &avec), 1);
+    }
+
+    #[test]
+    fn test_obsidian_underflow_still_saturates() {
+        // Gobelet Abandonné, une Obsidienne, et L'Étau par-dessus : zéro, jamais
+        // 255. La saturation est celle d'`apply_delta`, inchangée.
+        let partie = session(CupId::Abandoned, 0);
+        let avec = stock(CupId::Abandoned, &[RelicId::UnstableObsidian]);
+
+        assert_eq!(resolve_rerolls(&partie, &blind_plafonnee(1), &avec), 0);
+    }
+
+    #[test]
+    fn test_two_obsidians_stack() {
+        let partie = session(CupId::Standard, 0);
+        let deux = stock(
+            CupId::Standard,
+            &[RelicId::UnstableObsidian, RelicId::UnstableObsidian],
+        );
+
+        assert_eq!(resolve_rerolls(&partie, &blind_nue(), &deux), 0);
+    }
+
+    #[test]
+    fn test_disabled_relic_contributes_nothing() {
+        // Une relique éteinte perd ses effets **et** son malus : c'est tout
+        // l'objet du prédicat partagé. Sans lui, le joueur subirait la
+        // contrepartie sans le bonus.
+        let partie = session(CupId::Standard, 0);
+        let mut eteinte = stock(CupId::Standard, &[RelicId::UnstableObsidian]);
+        eteinte.slots[0].as_mut().expect("relique au slot 0").state = RelicState::Disabled;
+
+        assert_eq!(resolve_rerolls(&partie, &blind_nue(), &eteinte), 2);
+    }
+
+    #[test]
+    fn test_positive_relic_delta_survives_the_aggregate() {
+        // **Aucune relique de l'Étape 5 n'a de delta positif**, et c'est
+        // précisément pourquoi ce test existe : un agrégat qui passerait par un
+        // `u8` avalerait le premier que l'Étape 9 apportera, sans erreur.
+        // L'agrégat est éprouvé directement, la chaîne étant déjà couverte.
+        // À travers l'inventaire, un agrégat qui forcerait le signe rendrait
+        // les mêmes valeurs qu'un agrégat correct : aucune relique n'a de delta
+        // positif. C'est donc l'arithmétique qu'on éprouve, seule à pouvoir en
+        // recevoir un.
+        assert_eq!(agreger_deltas([1i8, 2].into_iter()), 3);
+        assert_eq!(agreger_deltas([-1i8, -1].into_iter()), -2);
+        assert_eq!(agreger_deltas([3i8, -1].into_iter()), 2);
+        assert_eq!(agreger_deltas(std::iter::empty()), 0);
+        assert_eq!(agreger_deltas(std::iter::repeat_n(-1i8, 300)), i8::MIN);
+        assert_eq!(agreger_deltas(std::iter::repeat_n(1i8, 300)), i8::MAX);
+
+        // Et la relique réelle traverse bien l'inventaire.
+        assert_eq!(
+            relic_reroll_malus(&stock(CupId::Standard, &[RelicId::UnstableObsidian])),
+            -1
+        );
+    }
+
+    /// Graine dont le premier jet standard ne contient aucun 1.
+    const GRAINE_SANS_UN: u64 = 6;
+
+    #[test]
+    fn test_ghost_die_forces_value_after_first_roll() {
+        // Le test ne choisit pas les faces : `setup_round` les tire du flux
+        // graine. Ce qui se garde ici est le **câblage** — la logique de la
+        // relique a ses cinq tests à TASK-61.
+        let valeurs = |graine: u64, avec_relique: bool| {
+            let mut app = app_a_la_graine(CupId::Standard, graine);
+            if avec_relique {
+                app.world_mut()
+                    .resource_mut::<RelicInventory>()
+                    .add_relic(RelicId::GhostDie)
+                    .expect("slot libre");
+            }
+            entrer_dans_roll(&mut app);
+            des_tries(&mut app)
+                .into_iter()
+                .map(|(_, de, _)| de.current_value)
+                .collect::<Vec<u8>>()
+        };
+
+        // **La graine est choisie pour que le jet ne contienne aucun 1.** Sans
+        // cela le test prend la branche muette de la relique et ne mesure rien
+        // — mesuré : la graine 7 sort `[3, 3, 4, 4, 1]`. L'assertion sur le jet
+        // nu verrouille ce choix : si le flux change, le test rougit au lieu de
+        // devenir vide.
+        let nu = valeurs(GRAINE_SANS_UN, false);
+        assert!(!nu.contains(&1), "graine devenue inutilisable : {nu:?}");
+
+        let force = valeurs(GRAINE_SANS_UN, true);
+        let plus_faible = nu.iter().copied().min().expect("au moins un dé");
+        let rang = nu
+            .iter()
+            .position(|valeur| *valeur == plus_faible)
+            .expect("le minimum est dans la liste");
+
+        assert_eq!(force[rang], 6, "le dé le plus faible n'a pas été relevé");
+        for (index, (avant, apres)) in nu.iter().zip(force.iter()).enumerate() {
+            if index != rang {
+                assert_eq!(avant, apres, "le dé {index} a bougé sans raison");
+            }
+        }
+    }
+
+    #[test]
+    fn test_force_values_address_by_identity_not_by_position() {
+        // **Le seul montage qui sépare les deux.** `setup_round` spawne les dés
+        // avec `DieId(k)` à l'indice `k` : identité et position y coïncident,
+        // et un `get_mut(id)` survit à tous les autres tests. Ici les
+        // identifiants sont désordonnés, et aucun ne vaut son rang.
+        let mut monde = World::new();
+        for (id, valeur) in [(2u32, 3u8), (0, 4), (1, 5)] {
+            let mut de = Die::new(DieId(id), 6);
+            de.current_value = valeur;
+            monde.spawn(de);
+        }
+
+        {
+            let mut requete = monde.query::<&mut Die>();
+            let mut des: Vec<Mut<Die>> = requete.iter_mut(&mut monde).collect();
+            appliquer_valeurs_forcees(&mut des, &[(DieId(0), 6)]);
+        }
+
+        let mut requete = monde.query::<&Die>();
+        let mut vus: Vec<(u32, u8)> = requete
+            .iter(&monde)
+            .map(|de| (de.id.0, de.current_value))
+            .collect();
+        vus.sort_unstable();
+
+        assert_eq!(
+            vus,
+            vec![(0, 6), (1, 5), (2, 3)],
+            "adressé par rang : c'est le dé d'identifiant 2 qui aurait bougé"
+        );
+    }
+
+    #[test]
+    fn test_force_values_ignores_unknown_die_id() {
+        // Un identifiant absent est ignoré sans panique. Le montage passe par
+        // l'application directe, le seul moyen de viser un dé qui n'existe pas.
+        let mut app = app_a_la_graine(CupId::Standard, 3);
+        entrer_dans_roll(&mut app);
+        let avant: Vec<u8> = des_tries(&mut app)
+            .into_iter()
+            .map(|(_, de, _)| de.current_value)
+            .collect();
+
+        let mut requete = app.world_mut().query::<&mut Die>();
+        let mut des: Vec<Mut<Die>> = requete.iter_mut(app.world_mut()).collect();
+        appliquer_valeurs_forcees(&mut des, &[(DieId(9_999), 6)]);
+        drop(des);
+
+        let apres: Vec<u8> = des_tries(&mut app)
+            .into_iter()
+            .map(|(_, de, _)| de.current_value)
+            .collect();
+        assert_eq!(apres, avant);
+    }
+
+    #[test]
+    fn test_force_values_consumes_no_rng() {
+        // Le flux de dés doit être au même point avec et sans la relique :
+        // `force_values` est déterministe, et un tirage ici ferait diverger
+        // deux runs de même graine.
+        let etat = |avec_relique: bool| {
+            let mut app = app_a_la_graine(CupId::Standard, 11);
+            if avec_relique {
+                app.world_mut()
+                    .resource_mut::<RelicInventory>()
+                    .add_relic(RelicId::GhostDie)
+                    .expect("slot libre");
+            }
+            entrer_dans_roll(&mut app);
+            // L'état du flux se lit en le faisant produire : quatre dés
+            // d'appoint roulés depuis le point où `setup_round` l'a laissé.
+            let mut session = app.world_mut().resource_mut::<RunSession>();
+            (0..4)
+                .map(|_| {
+                    let mut temoin = Die::new(DieId(0), 6);
+                    temoin.roll(&mut session.rng.dice, false);
+                    temoin.current_value
+                })
+                .collect::<Vec<u8>>()
+        };
+
+        assert_eq!(etat(false), etat(true));
     }
 }

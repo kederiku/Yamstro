@@ -46,9 +46,7 @@ pub(crate) fn session(id: CupId, stake_level: u8) -> RunSession {
 
 /// Inventaire vide, dimensionné par la configuration et jamais par un littéral.
 pub(crate) fn inventaire(config: &RunConfig) -> RelicInventory {
-    RelicInventory {
-        slots: vec![None; usize::from(config.relic_capacity)],
-    }
+    RelicInventory::new(config.relic_capacity)
 }
 
 /// Gobelet ad hoc, pour les tailles de main que le catalogue ne porte pas.

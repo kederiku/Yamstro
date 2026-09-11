@@ -10,11 +10,27 @@
 //! dérogation : elle exigerait une dépendance de développement de la crate sur
 //! elle-même, rendrait les fixtures compilables hors `cfg(test)`, et créerait
 //! un piège durable avec `--all-features`.
+//!
+//! # Nidification du parcours, normative
+//!
+//! `OnScoringDie` : pour chaque dé comptabilisé **dans l'ordre**, puis pour
+//! chaque slot **de gauche à droite**. `OnHandScored` : **un seul passage** sur
+//! les slots, de gauche à droite.
+//!
+//! **Aucun tri par type d'action** (ADR-005). Regrouper les additions avant les
+//! multiplications changerait le score : deux reliques dans un ordre rendent
+//! 264, dans l'autre 198.
+//!
+//! **Un slot vide ou désactivé ne produit rien et transmet une tranche vide** à
+//! son voisin de droite. C'est ce qui rend les boss de désactivation
+//! déterministes **sans branche particulière** : le voisin ne teste pas si sa
+//! gauche est désactivée, il lit une tranche vide.
 
 use smallvec::SmallVec;
 
-use crate::relics::RelicId;
-use crate::scoring::{Hook, ScoreEffect, TriggerCtx};
+use crate::dice::Die;
+use crate::relics::{RelicId, RelicState, definitions};
+use crate::scoring::{Hook, RollModifier, ScoreEffect, TriggerCtx};
 
 // Ces deux types ne sont nommés que par les bras de fixture, tous sous
 // `#[cfg(test)]`. L'Étape 5 retirera ce `cfg` en même temps qu'elle versera les
@@ -95,11 +111,144 @@ pub fn effects_for(def: RelicId, hook: Hook, ctx: &TriggerCtx) -> SmallVec<[Scor
             effects
         }
 
-        // Les trois `def` sont énumérés explicitement : une quatrième variante
-        // de `RelicId` ne serait couverte par rien et le compilateur le dirait.
-        // Le joker ne porte que sur le déclencheur.
+        // **Les douze reliques de production n'ont pas encore de comportement,
+        // et cela s'écrit ici, nommément.** Rendre un `SmallVec` vide n'est pas
+        // un comportement, c'est son absence : TASK-56 remplacera ces noms un à
+        // un. Ce qui compte est qu'ils soient **énumérés** : un joker `_ =>`
+        // ferait compiler une treizième relique oubliée, et à soixante
+        // reliques le compilateur est le seul contrôle qui tienne encore.
+        // C'est l'argument que le corpus emploie pour interdire le `_ =>` dans
+        // `rarity_of` ; il vaut ici mot pour mot.
+        // Délégation : les valeurs de score vivent dans le module de la
+        // relique, jamais ici. Le `match` reste une table lisible sur douze
+        // bras, et le hook est filtré par la relique elle-même.
+        (RelicId::CrackedDie, _) => definitions::cracked_die::effects(hook, ctx),
+        (RelicId::PolishedStone, _) => definitions::polished_stone::effects(hook, ctx),
+        (RelicId::PyramidOfSixes, _) => definitions::pyramid_of_sixes::effects(hook, ctx),
+        (RelicId::TripletMaster, _) => definitions::triplet_master::effects(hook, ctx),
+        (RelicId::FullHouseArchitect, _) => definitions::full_house_architect::effects(hook, ctx),
+        (RelicId::StellarAlignment, _) => definitions::stellar_alignment::effects(hook, ctx),
+        (RelicId::Pendulum, _) => definitions::pendulum::effects(hook, ctx),
+        (RelicId::UnstableObsidian, _) => definitions::unstable_obsidian::effects(hook, ctx),
+        (RelicId::DivineYahtzee, _) => definitions::divine_yahtzee::effects(hook, ctx),
+
+        (RelicId::DoubleMirror, _) => definitions::double_mirror::effects(hook, ctx),
+
+        (RelicId::ClayPiggyBank | RelicId::GhostDie, _) => SmallVec::new(),
+
+        // Les trois fixtures sont énumérées de même : le joker ne porte que sur
+        // le déclencheur.
         #[cfg(test)]
         (RelicId::SixFire | RelicId::MagicPair | RelicId::BrokenGlass, _) => SmallVec::new(),
+    }
+}
+
+/// Ce qu'une relique change au lancer. **Deux la changent, dix non.**
+///
+/// `hook` n'entre pas dans la signature : le hook est `OnRoll` par
+/// construction. Il n'existe donc pas de « neutralité sur les autres hooks » à
+/// éprouver ici — la question ne se pose qu'à `effects_for`, qui reçoit le
+/// hook.
+///
+/// # Pourquoi pas un `TriggerCtx`
+///
+/// **Il n'en existe aucun au moment du lancer.** `TriggerCtx` exige un
+/// `&HandMatch`, et le montage de manche réinitialise le contexte de main :
+/// à la première manche d'une run, aucune figure n'a jamais été évaluée. Le
+/// fabriquer en sentinelle rejouerait le piège que `ScoringStepQueue::default`
+/// documente.
+///
+/// La signature porte donc exactement ce que les deux reliques concernées
+/// lisent : les dés et le rang du lancer. Elle était épinglée par une garde de
+/// CI écrite quand la fonction n'avait **aucun appelant** ; le premier appelant
+/// réel l'a contredite.
+///
+/// La valeur neutre est le `Default` dérivé, jamais un littéral réécrit à la
+/// main.
+pub fn roll_modifier_for(def: RelicId, dice: &[Die], roll_index: u8) -> RollModifier {
+    match def {
+        RelicId::UnstableObsidian => definitions::unstable_obsidian::roll_modifier(),
+        RelicId::GhostDie => definitions::ghost_die::roll_modifier(dice, roll_index),
+
+        // Définitif : ces dix ne toucheront jamais au lancer. Plus rien n'est
+        // étiqueté dans cette fonction, les deux reliques concernées étant
+        // livrées ; le groupe reste énuméré pour que l'ajout d'une treizième
+        // variante fasse échouer la compilation ici aussi.
+        RelicId::CrackedDie
+        | RelicId::PolishedStone
+        | RelicId::TripletMaster
+        | RelicId::FullHouseArchitect
+        | RelicId::StellarAlignment
+        | RelicId::PyramidOfSixes
+        | RelicId::Pendulum
+        | RelicId::DivineYahtzee
+        | RelicId::ClayPiggyBank
+        | RelicId::DoubleMirror => RollModifier::default(),
+
+        // Définitif : aucune fixture ne gagnera de comportement au lancer.
+        #[cfg(test)]
+        RelicId::SixFire | RelicId::MagicPair | RelicId::BrokenGlass => RollModifier::default(),
+    }
+}
+
+/// L'or qu'une relique rapporte. **Squelette : toutes à zéro.**
+pub fn gold_for(def: RelicId, ctx: &TriggerCtx) -> u32 {
+    match def {
+        RelicId::ClayPiggyBank => definitions::clay_piggy_bank::gold(ctx),
+
+        // Définitif : ces reliques ne rapportent pas d'or.
+        RelicId::CrackedDie
+        | RelicId::PolishedStone
+        | RelicId::TripletMaster
+        | RelicId::FullHouseArchitect
+        | RelicId::StellarAlignment
+        | RelicId::PyramidOfSixes
+        | RelicId::Pendulum
+        | RelicId::UnstableObsidian
+        | RelicId::DivineYahtzee
+        | RelicId::GhostDie
+        | RelicId::DoubleMirror => 0,
+
+        // **Or indépendant de l'état, et c'est tout son objet.** Toute relique
+        // de production lit son propre `RelicState` pour calculer son or, si
+        // bien qu'éteinte elle rend zéro d'elle-même : le filtre sur `Disabled`
+        // de `round_end_gold` et le bras de la relique concourent alors au même
+        // silence, et le filtre n'est gardé par rien. Cette fixture les sépare.
+        #[cfg(test)]
+        RelicId::BrokenGlass => 3,
+        #[cfg(test)]
+        RelicId::SixFire | RelicId::MagicPair => 0,
+    }
+}
+
+/// Fait avancer l'état d'une relique. **Squelette : identité partout.**
+///
+/// **Seul écrivain de `RelicState`** (ADR-010) : `effects_for` reste pure et ne
+/// fait avancer aucun état. L'état est pris **par valeur** et le nouvel état
+/// rendu ; cette fonction n'écrit pas dans l'inventaire, l'appelant s'en charge.
+///
+/// Elle n'est appelée **ni depuis le commit du score**, dont le corps est
+/// normatif et reste minimal, ni depuis le pipeline : l'Étape 5 lui donnera deux
+/// systèmes propres, ordonnés autour du commit sans le modifier (TASK-62).
+pub fn advance_state(def: RelicId, hook: Hook, ctx: &TriggerCtx, state: RelicState) -> RelicState {
+    match def {
+        RelicId::ClayPiggyBank => definitions::clay_piggy_bank::advance(hook, ctx, state),
+
+        // Définitif : ces reliques sont sans mémoire.
+        RelicId::CrackedDie
+        | RelicId::PolishedStone
+        | RelicId::TripletMaster
+        | RelicId::FullHouseArchitect
+        | RelicId::StellarAlignment
+        | RelicId::PyramidOfSixes
+        | RelicId::Pendulum
+        | RelicId::UnstableObsidian
+        | RelicId::DivineYahtzee
+        | RelicId::GhostDie
+        | RelicId::DoubleMirror => state,
+
+        #[cfg(test)]
+        RelicId::SixFire | RelicId::MagicPair | RelicId::BrokenGlass => state,
     }
 }
 
@@ -112,7 +261,8 @@ mod tests {
     use crate::dice::{Die, DieId};
     use crate::evaluator::HandMatch;
     use crate::hands::{HandLevels, YahtzeeHand};
-    use crate::relics::{CATALOG, RelicId, RelicState};
+    use crate::relics::definitions::rarity_of;
+    use crate::relics::{CATALOG, RelicId, RelicRarity, RelicState};
     use crate::scoring::{Hook, ScoreAction, ScoreEffect, StepSource, TriggerCtx};
 
     const UID: u32 = 7;
@@ -156,6 +306,8 @@ mod tests {
                 base_chips: 30,
                 base_mult: 400,
                 left_effects: &self.left_effects,
+                roll_index: 0,
+                rerolls_left: 0,
             }
         }
     }
@@ -168,11 +320,12 @@ mod tests {
     fn test_fixtures_absent_from_catalog() {
         // Étape 6 : étendre au tirage de boutique.
         //
-        // `CATALOG` vaut `&[]` à cette étape : l'assertion est trivialement
-        // vraie aujourd'hui. Elle est écrite en boucle `contains` et non en
-        // `assert!(CATALOG.is_empty())` pour rester valide quand l'Étape 5 y
-        // versera douze entrées. L'invariant ne repose pas sur ce test mais
-        // sur le fait que le pool de boutique **dérive** de `CATALOG`.
+        // `CATALOG` porte douze entrées depuis TASK-53 : l'assertion est
+        // devenue **substantielle**, là où elle était trivialement vraie sur un
+        // catalogue vide. Elle est restée une boucle `contains` plutôt qu'un
+        // `assert!(CATALOG.is_empty())` précisément pour survivre à ce
+        // remplissage. L'invariant ne repose pas sur ce test mais sur le fait
+        // que le pool de boutique **dérive** de `CATALOG`.
         for fixture in [RelicId::SixFire, RelicId::MagicPair, RelicId::BrokenGlass] {
             assert!(!CATALOG.contains(&fixture));
         }
@@ -278,20 +431,13 @@ mod tests {
             assert!(effects_for(def, hook, &ctx).is_empty(), "{def:?} {hook:?}");
         }
 
-        // Vide à cette étape, `CATALOG` étant `&[]` : cette boucle ne fait
-        // aucune itération et n'affirme donc rien aujourd'hui. Elle devient
-        // substantielle à l'Étape 5, quand les douze reliques de production y
-        // entreront. Les trois couples ci-dessus, eux, mordent réellement.
-        for def in CATALOG {
-            for hook in [
-                Hook::OnRoll,
-                Hook::OnScoringDie,
-                Hook::OnHandScored,
-                Hook::OnRoundEnd,
-            ] {
-                assert!(effects_for(*def, hook, &ctx).is_empty());
-            }
-        }
+        // **La boucle sur le catalogue a été retirée à TASK-57.** Elle
+        // affirmait que toute relique du catalogue est muette sur tout hook,
+        // ce qui était vrai du squelette et cesse de l'être à la première
+        // relique implémentée. La propriété résiduelle — les reliques encore
+        // neutres le restent — est portée par `test_skeleton_effects_are_empty`
+        // dans `tests/relics.rs`, avec **une seule** liste à maintenir. Ce test
+        // retrouve donc son sujet : les trois fixtures et leurs hooks.
     }
 
     #[test]
@@ -314,5 +460,46 @@ mod tests {
 
         assert_eq!(premier, second);
         assert_eq!(ctx.state, RelicState::Counter(2));
+    }
+
+    /// **L'invariant de budget ne voit pas les fixtures, et c'est ici qu'il
+    /// faut le compléter.**
+    ///
+    /// `test_rarity_budget_invariant` vit dans `tests/relics.rs`, une cible
+    /// d'intégration liée à la crate compilée **sans `cfg(test)`** : les trois
+    /// fixtures n'y existent pas et n'entrent jamais dans sa matrice. Sans ce
+    /// test-ci, le commentaire de `rarity_of` — « une Commune qui multiplie
+    /// ferait échouer l'invariant de budget » — décrirait une garde qui
+    /// n'existe nulle part.
+    #[test]
+    fn test_fixture_rarities_obey_the_multiply_rule() {
+        assert_eq!(rarity_of(RelicId::BrokenGlass), RelicRarity::Rare);
+
+        for def in [RelicId::SixFire, RelicId::MagicPair, RelicId::BrokenGlass] {
+            for figure in YahtzeeHand::ALL {
+                let fixture = Fixture::new(figure);
+                for hook in [
+                    Hook::OnRoll,
+                    Hook::OnScoringDie,
+                    Hook::OnHandScored,
+                    Hook::OnRoundEnd,
+                ] {
+                    for valeur in 1u8..=8 {
+                        let ctx = fixture.ctx(Some((DieId(0), valeur)));
+                        let multiplie = effects_for(def, hook, &ctx)
+                            .iter()
+                            .any(|effet| matches!(effet.action, ScoreAction::MultiplyMult(_)));
+                        assert!(
+                            !multiplie
+                                || matches!(
+                                    rarity_of(def),
+                                    RelicRarity::Rare | RelicRarity::Legendary
+                                ),
+                            "{def:?} multiplie sans être Rare ni Légendaire ({figure:?}, {hook:?})"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

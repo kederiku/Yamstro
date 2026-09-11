@@ -1,28 +1,58 @@
 //! Reliques : RelicId, RelicInstance, RelicState, RelicInventory, CATALOG.
 
-#[cfg(feature = "bevy")]
-use bevy_ecs::reflect::ReflectComponent;
-
+pub mod definitions;
 pub mod effects;
+pub mod inventory;
+
+pub use definitions::rarity_of;
+pub use inventory::RelicInventory;
 
 /// Identité d'une relique. Enum **unit-only** : aucune variante ne porte de
 /// donnée, ce qui le garde `Copy` et donc stockable dans un `StepSource` lui
 /// aussi `Copy`. Les paramètres d'une relique vivent dans `effects_for`
 /// (TASK-21), jamais dans son identité.
 ///
-/// Hors build de test, cet enum est **inhabité** : les douze reliques de
-/// production arrivent à l'Étape 5, et les trois variantes ci-dessous ne sont
-/// que des fixtures. Elles ne franchissent pas la frontière de crate, donc
-/// aucun test de `tests/` ne peut les nommer.
+/// Les douze premières sont les reliques **de production**, dans l'ordre du
+/// catalogue ; les trois dernières sont des **fixtures** `#[cfg(test)]`, qui ne
+/// franchissent pas la frontière de crate — aucun test de `tests/` ne peut les
+/// nommer, et elles n'entrent jamais dans `CATALOG`.
 #[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RelicId {
+    CrackedDie,
+    PolishedStone,
+    TripletMaster,
+    FullHouseArchitect,
+    StellarAlignment,
+    PyramidOfSixes,
+    Pendulum,
+    UnstableObsidian,
+    DivineYahtzee,
+    ClayPiggyBank,
+    GhostDie,
+    DoubleMirror,
     #[cfg(test)]
     SixFire,
     #[cfg(test)]
     MagicPair,
     #[cfg(test)]
     BrokenGlass,
+}
+
+/// Palier de rareté d'une relique.
+///
+/// **`Legendary` est déclarée sans porteur.** Le palier arrive à l'Étape 9 ;
+/// la déclarer maintenant évite qu'une sauvegarde de l'Étape 10 ou un
+/// modificateur de blind qui l'énumère aient à rouvrir ce type. Le glossaire
+/// annonce un `BlindModifier::DisableRarity(RelicRarity)` qui **n'existe pas
+/// encore** dans le code : c'est une référence en avant, pas une dépendance.
+#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RelicRarity {
+    Common,
+    Uncommon,
+    Rare,
+    Legendary,
 }
 
 /// État mutable d'une relique en cours de run. `None` est une variante de cet
@@ -47,63 +77,51 @@ pub struct RelicInstance {
     pub state: RelicState,
 }
 
-/// Unique source de vérité de l'inventaire. L'ordre des slots **est** l'ordre
-/// d'application des effets (ADR-005) : il n'est jamais retrié, par quoi que ce
-/// soit. `slots` est dimensionné par l'appelant depuis
-/// `RunConfig.relic_capacity` (ADR-007), jamais depuis un littéral.
-#[cfg_attr(
-    feature = "bevy",
-    derive(bevy_ecs::resource::Resource, bevy_reflect::Reflect),
-    reflect(Component)
-)]
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RelicInventory {
-    pub slots: Vec<Option<RelicInstance>>,
-}
-
-impl RelicInventory {
-    /// Slots occupés, de gauche à droite, numéro de slot compris. Les `None`
-    /// sont sautés ; rien d'autre ne l'est, et rien n'est trié.
+impl RelicInstance {
+    /// Cette relique participe-t-elle ?
     ///
-    /// **Invariant :** `slots.len() <= 256`, faute de quoi le numéro de slot ne
-    /// tient pas dans un `u8` et deux slots distincts se présenteraient sous le
-    /// même numéro. `RunConfig.relic_capacity` étant un `u8`, la configuration
-    /// ne peut pas l'enfreindre ; un `Vec` construit à la main ou relu d'une
-    /// sauvegarde le peut, d'où l'assertion.
-    pub fn iter_slots(&self) -> impl Iterator<Item = (u8, &RelicInstance)> + '_ {
-        debug_assert!(
-            self.slots.len() <= usize::from(u8::MAX) + 1,
-            "inventaire de {} slots : le numéro de slot déborde le u8",
-            self.slots.len()
-        );
-        self.slots
-            .iter()
-            .enumerate()
-            .filter_map(|(index, slot)| slot.as_ref().map(|relic| (index as u8, relic)))
-    }
-
-    /// Nombre de reliques possédées, c'est-à-dire de slots occupés. C'est la
-    /// forme qu'attend la boutique : `relics.len() < config.relic_capacity`.
-    pub fn len(&self) -> usize {
-        self.slots.iter().flatten().count()
-    }
-
-    /// Vrai quand aucune relique n'est possédée, même si des slots existent.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Nombre de slots, occupés ou non. À ne pas confondre avec `len()` :
-    /// les intervertir inverse la condition d'achat.
-    pub fn capacity(&self) -> usize {
-        self.slots.len()
+    /// **Site de décision unique de la neutralisation.** Une relique qui ne
+    /// participe pas ne produit aucun effet, ne rapporte aucun or, n'avance pas
+    /// son état et n'impose pas son malus de relance. Écrire cette condition à
+    /// quatre endroits la ferait diverger : l'Étape 6 ajoute *La Cage*
+    /// (`DisableRelicSlot`) et l'Étape 9 deux autres formes, et il suffirait
+    /// d'en oublier une pour qu'une relique neutralisée perde ses effets **tout
+    /// en gardant sa contrepartie** — le joueur paierait le prix sans le bonus.
+    /// Chaque forme à venir s'ajoute **ici**, et nulle part ailleurs.
+    ///
+    /// **C'est un prédicat, jamais un parcours filtré.** `scan_relics` doit
+    /// visiter *tous* les slots, y compris les stériles : c'est sa remise à
+    /// zéro de `left_effects` sur un slot qui ne participe pas qui casse la
+    /// chaîne du *Miroir Double*, et un itérateur qui les sauterait
+    /// restaurerait en silence la règle écartée à TASK-60.
+    #[must_use]
+    pub fn participe(&self) -> bool {
+        self.state != RelicState::Disabled
     }
 }
 
-/// Pool de tirage de la boutique (Étape 6). Vide à cette étape : les trois
-/// fixtures n'y figurent pas, et les douze reliques de production arrivent à
-/// l'Étape 5.
-pub const CATALOG: &[RelicId] = &[];
+/// Catalogue des reliques **tirables**. Les trois fixtures `#[cfg(test)]` n'y
+/// figurent jamais : elles ne deviennent pas tirables (C16), et la crate ne
+/// compile même pas si l'une d'elles y entre, la bibliothèque devant aussi se
+/// construire sans `cfg(test)` pour la cible d'intégration.
+///
+/// **La composition n'est pas la loi de tirage.** Quatre Communes, quatre Peu
+/// communes et quatre Rares décrivent les archétypes couverts ; les taux de la
+/// boutique sont un livrable de l'Étape 6, qui lira `rarity_of` sur ces entrées.
+pub const CATALOG: &[RelicId] = &[
+    RelicId::CrackedDie,
+    RelicId::PolishedStone,
+    RelicId::TripletMaster,
+    RelicId::FullHouseArchitect,
+    RelicId::StellarAlignment,
+    RelicId::PyramidOfSixes,
+    RelicId::Pendulum,
+    RelicId::UnstableObsidian,
+    RelicId::DivineYahtzee,
+    RelicId::ClayPiggyBank,
+    RelicId::GhostDie,
+    RelicId::DoubleMirror,
+];
 
 #[cfg(test)]
 mod tests {
@@ -120,53 +138,28 @@ mod tests {
         // Au-delà de 256 slots, deux slots distincts se présenteraient sous le
         // même numéro. L'assertion est le seul garde-fou de cet invariant, et
         // sans ce test rien ne vérifie qu'elle est encore là.
-        let inventory = RelicInventory {
-            slots: vec![None; 257],
-        };
+        let mut inventory = RelicInventory::new(0);
+        inventory.slots = vec![None; 257];
 
         let _ = inventory.iter_slots().count();
     }
 
     #[test]
     fn test_iter_slots_is_ordered_and_skips_empty() {
-        let inventory = RelicInventory {
-            slots: vec![
-                Some(inst(1, RelicId::SixFire, RelicState::None)),
-                None,
-                Some(inst(2, RelicId::MagicPair, RelicState::Counter(3))),
-                None,
-                Some(inst(3, RelicId::BrokenGlass, RelicState::Disabled)),
-            ],
-        };
+        let mut inventory = RelicInventory::new(0);
+        inventory.slots = vec![
+            Some(inst(1, RelicId::SixFire, RelicState::None)),
+            None,
+            Some(inst(2, RelicId::MagicPair, RelicState::Counter(3))),
+            None,
+            Some(inst(3, RelicId::BrokenGlass, RelicState::Disabled)),
+        ];
 
         let slots: Vec<u8> = inventory.iter_slots().map(|(slot, _)| slot).collect();
         assert_eq!(slots, vec![0, 2, 4]);
         assert_eq!(inventory.len(), 3);
         assert_eq!(inventory.capacity(), 5);
         assert!(!inventory.is_empty());
-    }
-
-    #[test]
-    fn test_relic_inventory_serde_roundtrip() {
-        // Les quatre variantes de `RelicState`, plus un slot vide : c'est ce
-        // test qui interdit le retour d'un objet-trait, qui ne se sérialise pas.
-        let inventory = RelicInventory {
-            slots: vec![
-                Some(inst(1, RelicId::SixFire, RelicState::None)),
-                Some(inst(2, RelicId::MagicPair, RelicState::Counter(7))),
-                None,
-                Some(inst(
-                    3,
-                    RelicId::BrokenGlass,
-                    RelicState::Perishable { rounds_left: 2 },
-                )),
-                Some(inst(4, RelicId::SixFire, RelicState::Disabled)),
-            ],
-        };
-
-        let json = serde_json::to_string(&inventory).expect("sérialisation");
-        let back: RelicInventory = serde_json::from_str(&json).expect("désérialisation");
-        assert_eq!(inventory, back);
     }
 
     #[test]
@@ -195,9 +188,8 @@ mod tests {
         assert_ne!(back_first, back_second);
         assert_eq!(back_first.def, back_second.def);
 
-        let inventory = RelicInventory {
-            slots: vec![Some(first), None, Some(second)],
-        };
+        let mut inventory = RelicInventory::new(0);
+        inventory.slots = vec![Some(first), None, Some(second)];
         let uids: Vec<u32> = inventory.iter_slots().map(|(_, relic)| relic.uid).collect();
         assert_eq!(uids, vec![1, 2]);
     }

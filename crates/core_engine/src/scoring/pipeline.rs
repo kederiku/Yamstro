@@ -116,7 +116,7 @@ fn scan_relics<O: FnMut(Hook, &TriggerCtx<'_>)>(
         // le boss qui éteint une relique s'appuie exclusivement là-dessus. Les
         // autres états passent tels quels, et c'est `effects_for` qui décide ;
         // le pipeline ne fait avancer aucun état.
-        if inst.state == RelicState::Disabled {
+        if !inst.participe() {
             left = 0..0;
             continue;
         }
@@ -143,6 +143,35 @@ fn scan_relics<O: FnMut(Hook, &TriggerCtx<'_>)>(
         left = start..effects.len();
     }
 }
+
+/// Valeurs d'attente des deux champs de lancer, **sans propriétaire**.
+///
+/// **Cesser de les dater.** Elles ont porté TASK-61, puis TASK-66, puis
+/// TASK-67, sans être levées une seule fois : chaque ticket les a trouvées hors
+/// de son périmètre, et les a repoussées d'un numéro. Un quatrième numéro ne
+/// changerait rien.
+///
+/// La raison est structurelle. Ces constantes alimentent le prototype de la
+/// passe de **score**, et `ScoringPipeline::resolve` n'a aucun paramètre de
+/// lancer. Les lever voudrait dire en ajouter deux à sa signature, pour un
+/// besoin qui **n'existe pas** : la seule relique qui lit `roll_index` le lit
+/// dans `roll_modifier_for`, qui ne traverse jamais le pipeline.
+///
+/// **La condition qui leur donnera un propriétaire** : une relique dont
+/// `effects_for` — et non `roll_modifier_for` — lirait `roll_index` ou
+/// `rerolls_left`. Ce jour-là, et pas avant, la signature de `resolve` s'élargit
+/// et ces deux constantes disparaissent. C'est cette condition qu'il faut
+/// surveiller, pas un numéro de ticket.
+///
+/// **Le choix des valeurs inverse le mode de défaillance.** Un `roll_index` à
+/// zéro rendrait **vraie** la garde entière de *Dé Fantôme* — `roll_index == 0`
+/// — et ferait déclencher la relique à chaque main : une erreur de score
+/// silencieuse. À `u8::MAX`, la garde est fausse, et un câblage oublié donne une
+/// relique qui ne part jamais. `rerolls_left` vaut zéro pour la raison
+/// symétrique : *Tirelire en Terre* accumule cette valeur, et zéro n'accumule
+/// rien.
+const ROLL_INDEX_NON_CABLE: u8 = u8::MAX;
+const REROLLS_LEFT_NON_CABLE: u8 = 0;
 
 /// Passe A complète telle qu'elle existe à ce stade : la base de la figure,
 /// puis les dés comptabilisés et le déclencheur `OnScoringDie`.
@@ -196,6 +225,8 @@ fn pass_a_with<O: FnMut(Hook, &TriggerCtx<'_>)>(
         base_chips,
         base_mult,
         left_effects: &[],
+        roll_index: ROLL_INDEX_NON_CABLE,
+        rerolls_left: REROLLS_LEFT_NON_CABLE,
     };
 
     for die_id in &hand.scoring_dice {
@@ -406,19 +437,19 @@ mod tests {
     }
 
     fn inventaire(slots: &[Option<RelicId>]) -> RelicInventory {
-        RelicInventory {
-            slots: slots
-                .iter()
-                .enumerate()
-                .map(|(index, def)| {
-                    def.map(|def| RelicInstance {
-                        uid: index as u32 + 1,
-                        def,
-                        state: RelicState::None,
-                    })
+        let mut inventaire = RelicInventory::new(0);
+        inventaire.slots = slots
+            .iter()
+            .enumerate()
+            .map(|(index, def)| {
+                def.map(|def| RelicInstance {
+                    uid: index as u32 + 1,
+                    def,
+                    state: RelicState::None,
                 })
-                .collect(),
-        }
+            })
+            .collect();
+        inventaire
     }
 
     /// Effets de dé et de relique seulement : les deux effets de base de
@@ -835,7 +866,8 @@ mod tests {
         let (dice, hand) = main_pleine();
 
         for slots in [vec![], vec![None, None]] {
-            let relics = RelicInventory { slots };
+            let mut relics = RelicInventory::new(0);
+            relics.slots = slots;
 
             let effects = pass_a(&hand, &dice, &HandLevels::default(), &blind_nu(), &relics);
 
@@ -1050,10 +1082,16 @@ mod tests {
     }
 
     #[test]
-    fn test_relic_reorder_changes_score() {
-        // Test central de l'étape : réordonner l'inventaire change le score.
+    fn test_fixture_order_changes_score() {
+        // Test central de l'Étape 2 : réordonner l'inventaire change le score.
         // C'est la preuve mécanique d'ADR-005, et le seul garde-fou contre un
         // regroupement des effets par type d'action.
+        //
+        // **Renommé à l'audit d'Étape 5.** Il portait le nom imposé du § 3 de
+        // TASK-59, qui désigne le test d'intégration sur les reliques de
+        // production — celui-ci travaille sur les fixtures. Deux homonymes dans
+        // deux cibles : `cargo test <nom>` n'en désignait aucun, et l'un des
+        // deux pouvait pourrir sans que personne le voie.
         let (dice, hand) = main_pleine();
         let levels = HandLevels::default();
         let blind = blind_nu();

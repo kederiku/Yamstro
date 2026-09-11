@@ -2,6 +2,7 @@
 
 pub mod components;
 pub mod plugin;
+pub mod relics;
 pub mod resources;
 pub mod states;
 pub mod systems;

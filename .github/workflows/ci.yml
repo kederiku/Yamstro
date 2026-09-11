@@ -139,7 +139,7 @@ jobs:
           # champ public de core_engine. Et la garde « DicePool » vise une
           # instanciation ; nue, elle attrape les commentaires qui expliquent
           # justement qu'on n'en crée pas.
-          forbid  "critère 4  positions fixes de dés"    -n '0\.\.5|\[Entity; 5\]|\[Die; 5\]|\b(die_slots?|dice_slots?)\b|slots?\s*\[' "$SETUP"
+          forbid  "critère 4  positions fixes de dés"    -U '(?s)(0\.\.5|\[Entity; 5\]|\[Die; 5\]|\b(die_slots?|dice_slots?)\b|slots?\s*\[).*#\[cfg\(test\)\]' "$SETUP"
           forbid  "critère 4  littéraux de main"         -n 'rerolls_left\s*=\s*[0-9]|dice_count\s*=\s*[0-9]' "$SETUP"
           forbid  "critère 4  flux hors des dés"         -n 'rng\.(shop|boss|relic_effects)|thread_rng|from_entropy' "$SETUP"
           forbid  "critère 4  pool de dés en parallèle"  -n 'DicePool::new|DicePool\s*\{|:\s*DicePool\b|<DicePool>' crates/game_state/src
@@ -239,12 +239,19 @@ jobs:
           # prévu : TASK-42 avait posé l'exclusion sur un chemin exact
           # précisément pour que la migration ne puisse pas laisser deux
           # écrivains derrière elle, un par crate.
-          forbid  "critère 4  unique écrivain de Transform" -n '&mut Transform' crates/ -g '!crates/ui_and_juice/src/animation.rs'
+          # **Ré-ancrée sur l'acte à TASK-64** : un paramètre de système, donc
+          # une requête. Le motif nu mordait la note qui explique pourquoi une
+          # carte de relique, étant un nœud UI, ne porte pas de `Transform` et
+          # échappe donc au ressort. Vingt-septième fois dans ce projet.
+          forbid  "critère 4  unique écrivain de Transform" -n 'Query<[^>]*&mut Transform' crates/ -g '!crates/ui_and_juice/src/animation.rs'
           require "critère 4  l'animation écrit le Transform" -n 'Query<\(Entity, &mut Transform, &mut PunchScale\)>' crates/ui_and_juice/src/animation.rs
           # Une migration est un déplacement, pas une duplication : deux
           # `PunchScale` homonymes dans deux crates compilent parfaitement et
           # donnent deux systèmes écrivant des `Transform`.
-          forbid  "critère 4  PunchScale resté dans game_state" -n 'PunchScale' crates/game_state
+          # **Ré-ancrée sur l'acte à TASK-64**, même raison : la note d'une
+          # carte doit pouvoir nommer le ressort dont elle explique qu'il ne
+          # l'atteint pas. Vingt-huitième fois.
+          forbid  "critère 4  PunchScale resté dans game_state" -n 'PunchScale::|&mut PunchScale|<PunchScale>|use [^;]*PunchScale|struct PunchScale' crates/game_state
           forbid  "critère 4  overlay transformé en état" -n 'AppState::Settings|RunPhase::Settings|SettingsState' crates/game_state/src
 
           # ---- Étape 3 : budget WebAssembly (TASK-40) ----
@@ -264,7 +271,11 @@ jobs:
           # `//!` qui explique que ces combinateurs n'existent plus. Vingt-
           # deuxième et vingt-troisième fois dans ce projet.
           forbid  "critère 4  dépendance de tweening ou audio" -n '^\s*[a-z0-9_-]*(tween|kira|rodio|audio|vorbis|symphonia|seedling)[a-z0-9_-]*\s*=|"(bevy_audio|vorbis)"' --glob '**/Cargo.toml' crates/
-          forbid  "critère 4  dépendance inverse vers le juice" -n 'ui_and_juice' crates/game_state crates/core_engine
+          # Ancrée sur l'**acte** — la ligne de manifeste, l'import, le chemin —
+          # et non sur le nom : la note qui explique pourquoi ce site d'appel
+          # n'ordonne rien côté juice doit pouvoir le nommer. Vingt-quatrième
+          # fois dans ce projet, et la première où c'est ma propre prose.
+          forbid  "critère 4  dépendance inverse vers le juice" -n '^\s*ui_and_juice\s*=|use ui_and_juice|ui_and_juice::' crates/game_state crates/core_engine
 
           # ---- Étape 4 : compteurs interpolés (TASK-44) ----
           # La dérogation `f64` est **bornée à l'affichage** (ADR-003) : le
@@ -441,6 +452,392 @@ jobs:
           forbid  "critère 4  plafond confié à un Timer" -n 'Timer.*flash|flash.*Timer|ClearColor\(|insert_resource::<ClearColor' crates/ui_and_juice/src
           # Les deux réglages restent deux, et restent indépendants.
           require "critère 4  réglages toujours à deux champs" -nU 'pub flash_intensity: f32,\n    /// Intensité de la secousse de caméra\.\n    pub shake_intensity: f32,\n\}' crates/ui_and_juice/src/settings.rs
+
+          # ---- Étape 5 : catalogue des reliques (TASK-53) ----
+          # **Les définitions sont exhaustives, par construction.** Un bras
+          # attrape-tout ferait compiler une relique oubliée, et à soixante
+          # reliques le compilateur est le seul contrôle qui tienne encore.
+          # Ancré en début de ligne : `, _) =>` sur le déclencheur est légitime.
+          forbid  "critère 5  bras attrape-tout dans les définitions" -n '^\s*_ =>' crates/core_engine/src/relics/definitions crates/core_engine/src/cups/definitions
+          forbid  "critère 5  rareté rendue optionnelle"  -n 'Option<RelicRarity>|unwrap_or\w*\(RelicRarity' crates/
+          require "critère 5  les douze raretés déclarées" -nU 'RelicId::CrackedDie\n        \| RelicId::PolishedStone\n        \| RelicId::TripletMaster\n        \| RelicId::ClayPiggyBank => RelicRarity::Common' crates/core_engine/src/relics/definitions/mod.rs
+          require "critère 5  catalogue à douze entrées" -nU 'RelicId::CrackedDie,[^]]*RelicId::DoubleMirror,\n\];' crates/core_engine/src/relics/mod.rs
+          # Les fixtures ne sont jamais tirables : elles n'entrent pas au
+          # catalogue, et leurs variantes restent sous cfg(test).
+          forbid  "critère 5  fixture entrée au catalogue" -nU 'pub const CATALOG[^]]*(SixFire|MagicPair|BrokenGlass)' crates/core_engine/src/relics/mod.rs
+          # La composition du catalogue n'est pas la loi de tirage : aucune
+          # pondération ici. **Ré-ancrée sur l'acte à TASK-63** — un champ, une
+          # constante, une fonction — et non sur les mots : le tableau de budget
+          # doit pouvoir écrire qu'une relique se déclenche avec telle
+          # probabilité, c'est même ce qui justifie ses valeurs. Ancrée sur les
+          # mots, elle interdisait la justification en même temps que la
+          # pondération. Vingt-sixième fois dans ce projet.
+          forbid  "critère 5  pondération de tirage dans le moteur" -n '\b(weight|weighted|chance|probabilit\w*|poids|drop_rate)\w*\s*[:=]|fn \w*(weight|weighted|drop_rate)|const \w*(WEIGHT|CHANCE|PROBA|DROP_RATE)' crates/core_engine/src/relics
+          # Les douze reliques sont énumérées dans effects_for tant qu'elles
+          # n'ont pas de comportement : TASK-56 remplacera ces noms un à un.
+          # **Retirée à TASK-57**, et c'est ma faute de l'avoir posée ainsi :
+          # ancrée sur la forme du bras groupé, elle cassait dès qu'une relique
+          # quittait le groupe pour une délégation — donc à chacun des six
+          # tickets d'implémentation. Une garde que le ticket suivant doit
+          # éditer n'est pas une garde. La propriété qu'elle approchait —
+          # l'exhaustivité sur les douze — est tenue par le **compilateur**, ce
+          # que TASK-56 a mesuré : une treizième relique produit cinq E0004.
+
+          # ---- Étape 5 : inventaire complet (TASK-54) ----
+          # La capacité vient du gobelet, jamais d'un littéral : une seule
+          # fabrique dimensionne les slots, et personne d'autre.
+          forbid  "critère 5  capacité en dur"           -n 'max_capacity|MAX_RELICS' crates/
+          forbid  "critère 5  slots dimensionnés hors de la fabrique" -n 'vec!\[None;' crates/ -g '!crates/core_engine/src/relics/**'
+          require "critère 5  fabrique unique de l'inventaire" -n 'pub fn new\(capacity: u8\) -> Self' crates/core_engine/src/relics/inventory.rs
+          forbid  "critère 5  inventaire par défaut"     -n 'impl Default for RelicInventory|derive\([^)]*Default[^)]*\)\]\npub struct RelicInventory' -U crates/core_engine/src/relics/inventory.rs
+          # Le compteur est monotone : une seule écriture, et c'est l'incrément.
+          # La contre-épreuve positive vaut mieux qu'une liste d'interdits, qui
+          # ne couvrirait que les formes qu'on a imaginées.
+          require "critère 5  compteur monotone"         -n 'self\.next_uid = self\.next_uid\.saturating_add\(1\);' crates/core_engine/src/relics/inventory.rs
+          forbid  "critère 5  compteur remis à zéro"     -n 'next_uid\s*-=|next_uid\.saturating_sub|next_uid\s*=\s*0\s*;' crates/
+          # L'ordre des slots est l'ordre d'application : jamais trié, jamais
+          # échangé, et le réordonnancement a une seule sémantique.
+          forbid  "critère 5  slots triés ou échangés"   -n 'slots\.swap\(|slots\.sort|fn swap_slots' crates/
+          # L'objet-trait est déjà couvert par la garde de TASK-17 sur toute la
+          # crate ; il ne reste que la table associative, qui ne survivrait pas
+          # davantage à un aller-retour serde.
+          forbid  "critère 5  table associative dans les reliques" -n 'HashMap|BTreeMap' crates/core_engine/src/relics
+
+          # ---- Étape 5 : contexte de déclenchement (TASK-55) ----
+          # La vue est en lecture seule, et c'est sa raison d'être : un emprunt
+          # exclusif rouvrirait le mur de borrow-checker de *Miroir Double*.
+          # L'en-tête du fichier énonce la règle **sans écrire le motif** : une
+          # garde large se contourne par le sens, jamais par une exception.
+          # Le motif couvre `&'a mut` : la commande du corpus, `rg '&mut'`, le
+          # manquait — et c'est précisément la forme qu'un emprunt exclusif
+          # prendrait dans une structure paramétrée par une durée de vie.
+          forbid  "critère 5  emprunt exclusif dans le contexte" -n "&\\s*('[a-z_]+\\s+)?mut\\b|Cell|RefCell|UnsafeCell|Mutex|HashMap|HashSet|f64|f32" crates/core_engine/src/scoring/trigger.rs
+          require "critère 5  les treize champs du contexte" -nU 'pub left_effects: &.a \[ScoreEffect\],[^}]*pub roll_index: u8,[^}]*pub rerolls_left: u8,\n\}' crates/core_engine/src/scoring/trigger.rs
+          # Les deux types du retour de `OnRoll` sont normatifs : un delta non
+          # signé supprimerait la capacité d'exprimer un retrait de relance, et
+          # un index de position serait faux dès qu'un dé quitte la manche.
+          require "critère 5  delta de relance signé" -n 'pub reroll_delta: i8,' crates/core_engine/src/scoring/trigger.rs
+          require "critère 5  dés forcés adressés par identité" -n 'pub force_values: Vec<\(DieId, u8\)>,' crates/core_engine/src/scoring/trigger.rs
+          forbid  "critère 5  dés forcés adressés par position" -n 'force_values: \[|force_values: Vec<\(usize|reroll_delta: u8' crates/
+          # Ancré sur les deux types, pas sur le fichier : `Hook` porte
+          # légitimement serde, et la commande du corpus l'ignorait.
+          forbid  "critère 5  contexte ou modificateur sérialisés" -nU 'serde::(Serialize|Deserialize)[^\n]*\n(#\[[^\n]*\n)*pub struct (TriggerCtx|RollModifier)' crates/core_engine/src/scoring/trigger.rs
+          # **Dette sans propriétaire, et c'est la bonne étiquette.** Elle a
+          # porté TASK-61, TASK-66 puis TASK-67, sans être levée une seule fois :
+          # chacun l'a trouvée hors de son périmètre. Elle n'a pas besoin d'un
+          # quatrième numéro, elle a besoin de sa condition de levée — une
+          # relique dont `effects_for`, et non `roll_modifier_for`, lirait le
+          # rang du lancer. Voir la note de `pipeline.rs`.
+          require "critère 5  valeurs d'attente du lancer, sans propriétaire" -n 'const ROLL_INDEX_NON_CABLE: u8 = u8::MAX;' crates/core_engine/src/scoring/pipeline.rs
+
+          # ---- Étape 5 : squelette des comportements (TASK-56) ----
+          # **Aucun bras attrape-tout au niveau de la relique.** Ancré sur
+          # l'indentation de huit espaces que rustfmt garantit pour un bras de
+          # `match def` : le `_ =>` d'un `match hook` interne, plus indenté,
+          # reste légitime et ne doit pas être interdit.
+          forbid  "critère 5  bras attrape-tout sur la relique" -n '^\s{8}_ =>' crates/core_engine/src/relics/effects.rs
+          # Les quatre signatures sont normatives, noms de paramètres compris.
+          require "critère 5  signature d'effects_for"   -n 'pub fn effects_for\(def: RelicId, hook: Hook, ctx: &TriggerCtx\) -> SmallVec<\[ScoreEffect; 2\]>' crates/core_engine/src/relics/effects.rs
+          # **Signature resserrée à TASK-67.** L'ancienne exigeait un
+          # `&TriggerCtx`, donc un `&HandMatch`, qui n'existe pas au montage de
+          # manche : le contexte de main y est réinitialisé, et à la première
+          # manche d'une run aucune figure n'a jamais été évaluée. Elle avait
+          # été épinglée quand la fonction n'avait aucun appelant ; le premier
+          # appelant réel l'a contredite.
+          require "critère 5  signature de roll_modifier_for" -n 'pub fn roll_modifier_for\(def: RelicId, dice: &\[Die\], roll_index: u8\) -> RollModifier' crates/core_engine/src/relics/effects.rs
+          require "critère 5  signature de gold_for"     -n 'pub fn gold_for\(def: RelicId, ctx: &TriggerCtx\) -> u32' crates/core_engine/src/relics/effects.rs
+          require "critère 5  signature d'advance_state" -n 'pub fn advance_state\(def: RelicId, hook: Hook, ctx: &TriggerCtx, state: RelicState\) -> RelicState' crates/core_engine/src/relics/effects.rs
+          # L'idiome du dépôt pour un paramètre délibérément inutilisé est la
+          # liaison `let _`, pas un attribut de fonction : plus étroite, et elle
+          # cesse de compiler dès que le paramètre sert.
+          forbid  "critère 5  variables inutilisées silencées par attribut" -n 'allow\(unused' crates/
+          require "critère 5  les douze modules de définitions" -nU 'pub mod clay_piggy_bank;[^;]*;[^;]*;[^;]*;[^;]*;[^;]*;[^;]*;[^;]*;[^;]*;[^;]*;[^;]*;\npub mod unstable_obsidian;' crates/core_engine/src/relics/definitions/mod.rs
+
+          # ---- Étape 5 : les trois reliques par dé (TASK-57) ----
+          # `MultiplyMult` est réservé aux raretés Rare et Légendaire : deux de
+          # ces trois reliques sont Communes, la troisième Peu commune.
+          forbid  "critère 5  multiplication hors des raretés hautes" -n 'MultiplyMult' crates/core_engine/src/relics/definitions/cracked_die.rs crates/core_engine/src/relics/definitions/polished_stone.rs crates/core_engine/src/relics/definitions/pyramid_of_sixes.rs
+          # Une relique ne lit que le dé courant : le parcours appartient au
+          # pipeline, et itérer le plateau produirait un effet par dé écarté.
+          # **Ramenée aux trois modules où elle s'applique**, à TASK-59. Je
+          # l'avais étendue aux douze en écrivant « la règle vaudra pour les
+          # douze » : elle ne vaut pas. *Le Balancier* doit lire les dés
+          # comptabilisés, c'est la définition même de sa condition. Une règle
+          # généralisée d'avance est une garde qui mordra le premier cas
+          # légitime — celui-ci est arrivé un ticket plus tard.
+          forbid  "critère 5  relique par dé qui parcourt le plateau" -n 'ctx\.dice|discarded_dice|scoring_dice' crates/core_engine/src/relics/definitions/cracked_die.rs crates/core_engine/src/relics/definitions/polished_stone.rs crates/core_engine/src/relics/definitions/pyramid_of_sixes.rs
+          # Aucun déballage paniquant ni aucun aléa dans les définitions. La
+          # règle vaut pour les douze modules, pas seulement pour ces trois : la
+          # prose des modules l'énonce **sans écrire ces mots**, comme
+          # l'en-tête de `trigger.rs` depuis TASK-20.
+          forbid  "critère 5  déballage paniquant dans une définition" -n 'unwrap|expect|panic!|unreachable!|todo!' crates/core_engine/src/relics/definitions
+          forbid  "critère 5  aléa dans une définition"  -n '\brng\b|\bRng\b|random|thread_rng' crates/core_engine/src/relics/definitions
+          # Chaque valeur normative est épinglée **dans son module** : la
+          # déplacer d'un fichier à l'autre casse, ce qui attrape la confusion
+          # entre la relique des six et la fixture homonyme.
+          require "critère 5  un Mult par dé impair"     -n 'ScoreAction::AddMult\(100\)' crates/core_engine/src/relics/definitions/cracked_die.rs
+          require "critère 5  dix Chips par dé pair"     -n 'ScoreAction::AddChips\(10\)' crates/core_engine/src/relics/definitions/polished_stone.rs
+          require "critère 5  quinze Chips par six"      -n 'ScoreAction::AddChips\(15\)' crates/core_engine/src/relics/definitions/pyramid_of_sixes.rs
+          # La face six, jamais « la face maximale » : un dé à huit faces
+          # montrant huit ne déclenche pas la pyramide.
+          forbid  "critère 5  pyramide sur la face maximale" -n '\bsides\b|max_face|value == de\.sides' crates/core_engine/src/relics/definitions/pyramid_of_sixes.rs
+
+          # ---- Étape 5 : les trois reliques additives par main (TASK-58) ----
+          # **Ancrée sur l'émission, pas sur le nom.** La note de
+          # `stellar_alignment.rs` doit pouvoir écrire la valeur d'origine en
+          # toutes lettres : son travail est d'être reconnaissable par qui
+          # retrouvera « ×1,75 » dans d'anciennes notes, et une note qui ne peut
+          # pas nommer ce qu'elle interdit ne sera pas rapprochée de la valeur
+          # qu'elle empêche de restaurer. On ancre donc sur l'acte.
+          forbid  "critère 5  multiplication par une relique additive" -n 'ScoreAction::MultiplyMult\(' crates/core_engine/src/relics/definitions/triplet_master.rs crates/core_engine/src/relics/definitions/full_house_architect.rs crates/core_engine/src/relics/definitions/stellar_alignment.rs
+          require "critère 5  note de vigilance sur l'alignement" -n 'MultiplyMult\(175\)' crates/core_engine/src/relics/definitions/stellar_alignment.rs
+          # Ces trois reliques se déclenchent sur la figure retenue, jamais sur
+          # le dé courant ni sur un recomptage des faces.
+          forbid  "critère 5  relique de main qui lit le dé" -n 'ctx\.die' crates/core_engine/src/relics/definitions/triplet_master.rs crates/core_engine/src/relics/definitions/full_house_architect.rs crates/core_engine/src/relics/definitions/stellar_alignment.rs
+          require "critère 5  condition sur la figure retenue" -n 'ctx\.hand\.hand' crates/core_engine/src/relics/definitions/triplet_master.rs
+          # Les quatre valeurs normatives, chacune dans son module.
+          require "critère 5  six Mult sur un brelan"    -n 'ScoreAction::AddMult\(600\)' crates/core_engine/src/relics/definitions/triplet_master.rs
+          require "critère 5  quarante Chips sur un full" -n 'ScoreAction::AddChips\(40\)' crates/core_engine/src/relics/definitions/full_house_architect.rs
+          require "critère 5  cinq Mult sur un full"     -n 'ScoreAction::AddMult\(500\)' crates/core_engine/src/relics/definitions/full_house_architect.rs
+          require "critère 5  huit Mult sur une suite"   -n 'ScoreAction::AddMult\(800\)' crates/core_engine/src/relics/definitions/stellar_alignment.rs
+          # L'ordre des deux effets du full est normatif : les Chips d'abord.
+          require "critère 5  ordre des effets du full"  -nU 'AddChips\(40\),\n    \}\);[^}]*AddMult\(500\)' crates/core_engine/src/relics/definitions/full_house_architect.rs
+
+          # ---- Étape 5 : les trois reliques multiplicatives (TASK-59) ----
+          # La formule Score = Chips x Mult est invariante : aucune action ne la
+          # remplace, et il n'existe pas de multiplication du total.
+          forbid  "critère 5  multiplication du score total" -n 'MultiplyScore|SetFormula' crates/
+          # **Ancré sur des appels**, pas sur le mot : le motif nu attrapait
+          # « ressort », « de sorte » et « n'en sort » — cinq lignes de prose
+          # française et aucun tri. Le tri qui casserait l'ordre d'application
+          # serait dans le pipeline ou dans une relique, d'où les deux chemins.
+          forbid  "critère 5  tri ou regroupement des effets" -n '\.sort\(|\.sort_by|\.sort_unstable|\.chunk_by\(|\.partition\(' crates/core_engine/src/scoring/pipeline.rs crates/core_engine/src/relics
+          # Les trois valeurs multiplicatives, chacune dans son module.
+          require "critère 5  le balancier multiplie par une fois et demie" -n 'ScoreAction::MultiplyMult\(150\)' crates/core_engine/src/relics/definitions/pendulum.rs
+          require "critère 5  l'obsidienne double"       -n 'ScoreAction::MultiplyMult\(200\)' crates/core_engine/src/relics/definitions/unstable_obsidian.rs
+          require "critère 5  le yams triple le Mult"    -n 'ScoreAction::MultiplyMult\(300\)' crates/core_engine/src/relics/definitions/divine_yahtzee.rs
+          # Les trois divergences du balancier viennent du même document et se
+          # réintroduisent ensemble : trois gardes séparées les attrapent quel
+          # que soit le morceau par lequel elles entrent.
+          require "critère 5  le balancier lit les dés comptabilisés" -n 'hand\n        \.scoring_dice' -U crates/core_engine/src/relics/definitions/pendulum.rs
+          forbid  "critère 5  le balancier lit le plateau ou le total" -n 'potential_score|ctx\.dice\s*\.iter\(\)\s*\.map|dice\[' crates/core_engine/src/relics/definitions/pendulum.rs
+          # Ancrée sur un **identifiant**, pas sur le nom en prose : la note du
+          # module doit pouvoir écrire le nom écarté pour être reconnaissable
+          # par qui le retrouvera dans d'anciennes notes — règle arrêtée à
+          # TASK-58 pour la valeur d'origine de l'alignement.
+          forbid  "critère 5  nom écarté du balancier"   -n 'RelicId::Balance|::Balance\b|mod balance|fn balance' crates/
+
+          MIROIR=$SRC/relics/definitions/double_mirror.rs
+          # *Miroir Double*. Toutes ancrées sur l'**acte**, jamais sur le nom :
+          # la note du module doit pouvoir écrire `split_at_mut` et
+          # `ScoreContext` pour être trouvée par qui les cherchera. Un motif sur
+          # le nom nu interdirait précisément la phrase qui explique qu'on ne
+          # s'en sert pas.
+          forbid  "critère 5  découpe mutable du slice de reliques" -n '\.split_at_mut\(' "$SRC"
+          forbid  "critère 5  emprunt exclusif dans le miroir" -n '\.iter_mut\(' "$MIROIR"
+          forbid  "critère 5  le miroir réordonne la tranche" -n '\.sort\w*\(|\.dedup\w*\(|\.rev\(\)' "$MIROIR"
+          # Le module ne peut nommer ces deux types qu'en les important : la
+          # signature d'`effects_for` ne lui donne qu'un `&TriggerCtx`, qui n'en
+          # porte aucun champ. Garder le chemin suffit donc, et couvre du même
+          # coup le `.clone()` d'inventaire du § 5 du ticket : on ne clone pas
+          # un type qu'on ne peut pas nommer.
+          forbid  "critère 5  le miroir atteint l'inventaire ou le contexte" -n 'use [^;]*\b(RelicInventory|RelicInstance|ScoreContext)\b|crate::\w+::(RelicInventory|RelicInstance|ScoreContext)' "$MIROIR"
+          # Le § 2.3 est normatif et c'est la régression la plus probable du
+          # ticket : recopier l'effet entier est le geste naturel, le score
+          # reste juste, et seul le journal ment. Deux gardes, l'une sur le
+          # geste, l'autre sur sa contre-épreuve.
+          forbid  "critère 5  le miroir conserve la source d'origine" -n 'source: effect\.source|left_effects[^;]*\.(copied|cloned)\(' "$MIROIR"
+          require "critère 5  le miroir ré-émet sous son propre uid" -n 'uid: ctx\.uid' "$MIROIR"
+          require "critère 5  le miroir ré-émet sous sa propre source" -n 'def: RelicId::DoubleMirror' "$MIROIR"
+
+
+          # ---- Étape 5 : les deux reliques du lancer (TASK-61) ----
+          OBSI=$SRC/relics/definitions/unstable_obsidian.rs
+          FANTOME=$SRC/relics/definitions/ghost_die.rs
+          forbid  "critère 5  aléa dans les reliques du lancer" -n '\brng\b|\bRng\b|random|thread_rng|gen_range' "$OBSI" "$FANTOME"
+          # Ancrée sur l'accès, pas sur le mot : la note du module doit pouvoir
+          # écrire « position » et « indice » pour expliquer qu'on n'y touche
+          # pas. Le retour par position se reconnaît à l'indexation et aux
+          # itérateurs qui rendent un rang.
+          forbid  "critère 5  dé forcé désigné par sa position" -n '\bdice\[|\.dice\.get\(|\.position\(|\benumerate\(\)' "$FANTOME"
+          # Le Dé Fantôme lit le plateau, seule exception au « par dé, sur les
+          # dés comptabilisés » — motivée par le déclencheur, pas par la
+          # relique. Ancrée sur le champ, que la note nomme en prose.
+          forbid  "critère 5  le dé fantôme lit les dés comptabilisés" -n 'ctx\.hand\b' "$FANTOME"
+          require "critère 5  le dé fantôme lit le plateau"  -n 'ctx\.dice' "$FANTOME"
+          require "critère 5  zéro est le premier lancer"    -n 'roll_index != 0' "$FANTOME"
+          require "critère 5  départage sur la valeur puis l'identifiant" -n 'min_by_key\(\|de\| \(de\.current_value, de\.id\)\)' "$FANTOME"
+          # La cible est la valeur six, littéralement : ni la face maximale du
+          # dé, ni son nombre de faces. Sur un D8 le dé forcé passe à six.
+          forbid  "critère 5  cible calculée depuis le nombre de faces" -n '\bsides\b|max_face' "$FANTOME"
+          require "critère 5  une relance retirée par l'obsidienne" -n 'reroll_delta: -1' "$OBSI"
+          # Le delta reste signé jusqu'à `apply_delta` : le convertir côté
+          # relique perdrait le signe que l'appelant doit saturer.
+          forbid  "critère 5  delta de relance non signé" -n 'reroll_delta: u8|as u8|unsigned_abs' "$OBSI" "$FANTOME"
+          forbid  "critère 5  mutation depuis un hook de lancer" -n '&mut |RefCell|Cell<' "$OBSI" "$FANTOME"
+          # Le neutre est le `Default` dérivé, jamais un littéral réécrit.
+          forbid  "critère 5  neutre du lancer réécrit à la main" -n 'RollModifier \{\s*reroll_delta: 0' "$OBSI" "$FANTOME" "$SRC/relics/effects.rs"
+          # Le squelette a servi : `roll_modifier_for` lit désormais son
+          # contexte, et la liaison d'attente n'a plus lieu d'être.
+          forbid  "critère 5  liaison d'attente restée dans roll_modifier_for" -nU 'pub fn roll_modifier_for[^\n]*\n\s*let _ = ctx;' "$SRC/relics/effects.rs"
+
+
+          # ---- Étape 5 : or et avancement d'état (TASK-62) ----
+          TIRELIRE=$SRC/relics/definitions/clay_piggy_bank.rs
+          # Le score reste Chips x Mult : l'or a sa propre fonction pour ne pas
+          # contaminer l'effet, le palier et le dépileur de l'Étape 4.
+          require "critère 5  trois actions de score, pas quatre" -nU 'pub enum ScoreAction \{\n    AddChips\(u64\),\n    AddMult\(i64\),\n    MultiplyMult\(u32\),\n\}' "$SRC"
+          forbid  "critère 5  action de score pour l'or"  -n 'AddGold|MultiplyScore|ScoreAction::Gold' crates/
+          # Ancrée sur l'élargissement, pas sur le mot : le compteur est un u32
+          # et les relances un u8.
+          forbid  "critère 5  élargissement tronquant de la tirelire" -n ' as u32| as u8| as i64| as u64' "$TIRELIRE"
+          forbid  "critère 5  aléa ou flottant dans l'or" -n '\brng\b|\bRng\b|random|HashMap|\bf32\b|\bf64\b' "$TIRELIRE" "$SRC/economy"
+          require "critère 5  plafond de la tirelire à cinq" -n 'const GOLD_CAP: u32 = 5;' "$TIRELIRE"
+          # La remise à zéro garde la variante : `None` ferait diverger
+          # l'aller-retour serde d'une blind à l'autre.
+          forbid  "critère 5  tirelire remise à None"      -n 'Hook::OnRoundEnd => RelicState::None' "$TIRELIRE"
+          # `advance_state` est le seul producteur de la valeur écrite, et le
+          # pipeline ne l'appelle jamais : sa garde est déjà posée au critère 7.
+          require "critère 5  l'état n'est écrit que par advance_state" -n 'inst\.state = advance_state\(' crates/game_state/src/relics/mod.rs
+          # Restreinte au code de **production** : un montage de test a le
+          # droit d'éteindre une relique pour éprouver ce qui en découle.
+          # L'ancrage sur la position relative au marqueur est celui de TASK-64.
+          forbid  "critère 5  état de relique écrit ailleurs qu'ici" -U '(?s)\.state = .*#\[cfg\(test\)\]' crates/game_state/src crates/ui_and_juice/src -g '!**/relics/mod.rs'
+          # Le corps du commit de TASK-50 reste hors d'atteinte.
+          forbid  "critère 5  avancement d'état dans la file de l'Étape 4" -n 'advance_state|round_end_gold' crates/ui_and_juice/src
+          # L'or entre par un seul point, et en saturation.
+          require "critère 5  seul point d'écriture de l'or" -n 'session\.gold = session\.gold\.saturating_add' crates/game_state/src/relics/mod.rs
+          forbid  "critère 5  or écrit ailleurs"            -n '\.gold\s*(=|\+=|-=)' crates/game_state/src crates/ui_and_juice/src -g '!**/relics/mod.rs' -g '!**/resources.rs' -g '!**/fixtures.rs'
+          # Les deux sites, qui sont la décision centrale du ticket.
+          require "critère 5  avancement à la sortie du scoring" -n 'OnExit\(RunPhase::Scoring\), advance_relic_states_on_hand' crates/game_state/src/relics/mod.rs
+          require "critère 5  or encaissé à la fin de la blind" -n 'OnEnter\(RunPhase::Shop\), collect_relic_gold_on_blind_end' crates/game_state/src/relics/mod.rs
+
+
+          # ---- Étape 5 : invariant de budget de puissance (TASK-63) ----
+          DEFS=$SRC/relics/definitions
+          TESTS=crates/core_engine/tests/relics.rs
+          # Ancrée sur l'**acte** — la ligne qui *construit* l'action — et non
+          # sur le nom : deux notes du dépôt doivent nommer `MultiplyMult` pour
+          # servir, celle de l'alignement stellaire (qu'une garde exige) et
+          # celle qui explique la rareté de la fixture *Verre Brisé*.
+          forbid  "critère 5  multiplication hors des trois Rares" -n 'action: ScoreAction::MultiplyMult\(' "$DEFS" -g '!pendulum.rs' -g '!unstable_obsidian.rs' -g '!divine_yahtzee.rs'
+          forbid  "critère 5  flottant dans les tests de reliques" -n '\bf64\b|\bf32\b|abs\(\) <' "$TESTS"
+          # Le tableau de budget, par sa **structure** : douze lignes numérotées
+          # et l'en-tête de ses colonnes. Compter les pourcents laisserait passer
+          # n'importe quelle prose.
+          require "critère 5  en-tête du tableau de budget" -n '^//! \| # \| Relique \| Rareté \| Action émise \| Budget consommé \|' "$DEFS/mod.rs"
+          for ligne in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            require "critère 5  ligne $ligne du tableau de budget" -n "^//! \\| $ligne \\| " "$DEFS/mod.rs"
+          done
+          require "critère 5  les 133 % assumés de l'obsidienne" -n '133 %' "$DEFS/mod.rs"
+          require "critère 5  la valeur du dé fantôme reste à mesurer" -n 'à mesurer au harnais de l.Étape 6 bis' "$DEFS/mod.rs"
+          # L'invariant lui-même : le catalogue épinglé, et les six axes de la
+          # matrice. Le sixième — la parité de la somme des dés — est celui que
+          # le ticket avait omis ; mesuré, sans lui une Commune qui ne
+          # multiplierait que sur somme impaire survit à toute la matrice.
+          require "critère 5  le catalogue reste à douze"   -nU 'assert_eq!\(\n        CATALOG.len\(\),\n        12,' "$TESTS"
+          require "critère 5  axe de parité de la somme des dés" -n 'for \(valeurs, somme_paire\) in \[\(\[2u8, 2, 2, 2, 2\], true\), \(\[1, 2, 2, 2, 2\], false\)\]' "$TESTS"
+          require "critère 5  axe des treize figures"       -n 'for figure in YahtzeeHand::ALL' "$TESTS"
+          require "critère 5  axe des huit valeurs de dé"   -n 'for valeur_de_de in 1u8..=8' "$TESTS"
+          require "critère 5  axe des quatre déclencheurs"  -n 'for hook in HOOKS' "$TESTS"
+          require "critère 5  axe des cinq états"           -n 'for etat in ETATS_BUDGET' "$TESTS"
+          # Aucune exception ne doit être ouverte dans l'invariant : une liste
+          # blanche le vide de son sens et rend l'Étape 9 inéquilibrable.
+          forbid  "critère 5  exception nominative dans l'invariant" -nU 'fn test_rarity_budget_invariant[^}]*def != RelicId::' "$TESTS"
+
+
+          # ---- Étape 5 : cartes de relique (TASK-64) ----
+          CARTES=crates/game_state/src/relics/slots.rs
+          # C37, ancré sur l'**acte** : un champ qui *stocke* des entités comme
+          # inventaire. Le motif nu remonte sept lignes aujourd'hui — cinq
+          # helpers de test rendant un `Vec<Entity>`, et deux **noms de tests**
+          # contenant `relic_slots`, dont un écrit à TASK-09.
+          forbid  "critère 5  inventaire stocké en entités" -n '\brelic_slots\s*[:=]|slots\s*:\s*Vec<Entity>|inventory\s*:\s*Vec<Entity>' crates/
+          # Aucune donnée de jeu recopiée dans une carte. La règle est déjà
+          # tenue par le compilateur — aucun des trois types ne dérive
+          # `Component` — mais rien n'empêche un type local de les recopier.
+          forbid  "critère 5  donnée de jeu dans une carte" -n '(spawn|insert)\(.*Relic(Instance|State|Id)\b' "$CARTES"
+          forbid  "critère 5  repli d'accès sur les cartes" -n 'ParamSet|Without<DieView>|Without<RelicSlotUI>' "$CARTES"
+          forbid  "critère 5  littéral de capacité dans les cartes" -n 'MAX_RELICS|max_capacity|capacity\s*=\s*[0-9]' "$CARTES"
+          # `unwrap` nulle part, et `expect` nulle part **avant** le module de
+          # test : le motif s'ancre sur la position relative au marqueur, seule
+          # façon d'exprimer « hors des tests » avec cet outil.
+          forbid  "critère 5  unwrap dans les cartes"       -n 'unwrap\(\)' "$CARTES"
+          forbid  "critère 5  expect en production dans les cartes" -U '(?s)\.expect\(.*#\[cfg\(test\)\]' "$CARTES"
+          # Ancrée sur la **condition**, jamais sur le nom de méthode :
+          # `Option::and` et `Option::or_else` sont légitimes et employés.
+          # Seul `SystemCondition::and` est déprécié en 0.19.1, au profit de
+          # `and_then` et `and_eager`.
+          forbid  "critère 5  combinateur de condition déprécié" -n 'run_if\(.*\.and\(' crates/game_state/src crates/ui_and_juice/src
+          forbid  "critère 5  API retirée en 0.19"          -n 'on_replace|RenderGraph|ViewNode|\brun_in\(' crates/
+          # Le placement écrit `Node`, jamais `Transform` : les deux types sont
+          # disjoints, donc l'unique écrivain de `Transform` reste celui de
+          # l'Étape 4. La carte n'a d'ailleurs pas de `Transform` du tout.
+          require "critère 5  le placement écrit le nœud"   -n 'Query<\(&RelicSlotUI, &mut Node\)>' "$CARTES"
+          require "critère 5  la carte naît nœud UI et rien de plus" -n 'commands.spawn\(\(RelicSlotUI\(slot\), Node::default\(\)\)\);' "$CARTES"
+          require "critère 5  résolution par identifiant"   -n 'pub fn slot_of_uid\(inventory: &RelicInventory, uid: u32\) -> Option<u8>' "$CARTES"
+          require "critère 5  systèmes de cartes conditionnés" -n 'in_state\(AppState::InRun\).and_then\(resource_exists::<RelicInventory>\)' "$CARTES"
+
+
+          # ---- Étape 5 : glisser-déposer des reliques (TASK-65) ----
+          DRAG=crates/game_state/src/relics/drag_drop.rs
+          # Ancré sur l'**acte** : un échange **sur les slots de l'inventaire**.
+          # Le motif nu remonte `report.rs`, où la permutation de deux paliers de
+          # score est une fixture de test parfaitement légitime.
+          forbid  "critère 5  échange au lieu d'un décalage" -n 'swap_slots|slots\.swap\(|\.slots\.swap' crates/
+          # Le fichier appelle `reorder` et ne refait pas le décalage.
+          forbid  "critère 5  ordonnancement réimplémenté" -n 'slots\[|\.slots\.remove|\.slots\.insert|\.slots\.sort' "$DRAG"
+          require "critère 5  le geste délègue à reorder"  -n 'inventory.reorder\(from, slot\);' "$DRAG"
+          forbid  "critère 5  DragState rendu composant"   -n 'derive\([^)]*Component' "$DRAG"
+          forbid  "critère 5  donnée de jeu dans l'état de glissement" -n '(spawn|insert)\(.*Relic(Instance|Id)\b|held: *Option<Entity>|held: *Option<u32>' "$DRAG"
+          forbid  "critère 5  unwrap dans le glissement"   -n 'unwrap\(\)' "$DRAG"
+          forbid  "critère 5  expect en production dans le glissement" -U '(?s)\.expect\(.*#\[cfg\(test\)\]' "$DRAG"
+          # L'action existe hors du système de souris : sans cela l'Étape 11,
+          # qui doit rendre la partie jouable sans souris, la réécrirait.
+          require "critère 5  prise exposée comme action"  -n 'pub fn begin_hold\(state: &mut DragState, slot: u8\)' "$DRAG"
+          require "critère 5  dépose exposée comme action" -n 'pub fn drop_on\(state: &mut DragState, inventory: &mut RelicInventory, slot: u8\)' "$DRAG"
+          require "critère 5  glissement conditionné"      -n 'in_state\(AppState::InRun\).and_then\(resource_exists::<RelicInventory>\)' "$DRAG"
+
+
+          # ---- Étape 5 : les six invariants que l'audit a trouvés non gardés (TASK-66) ----
+          # Ancrés sur l'**acte** quand le nom doit rester prononçable : huit des
+          # vingt-deux commandes du § 2 de TASK-66 mordent la prose qui explique
+          # la règle, ou la déclaration légitime. Celles-ci ne le font pas.
+          forbid  "critère 5  sérialisation par objet-trait" -n '#\[typetag|typetag::|^\s*typetag\s*=' crates/ --glob '**/Cargo.toml' --glob '**/*.rs'
+          forbid  "critère 5  état de relique en table de chaînes" -n 'state_data\s*[:=]' crates/
+          # Le mot nu, mais avec ses frontières : elles excluent déjà
+          # `RelicInventory`, `ConsumableInventory` et `RelicSlotUI`, aucune
+          # frontière n'existant entre `t` et `U`.
+          forbid  "critère 7  ressource Inventory nue"    -n '\bInventory\b' crates/
+          forbid  "critère 7  registre ou composant porteur de relique" -n '\bRelicRegistry\b|\bRelicComponent\b|\bRelicSlot\b' crates/
+          # L'attribut, pas son nom : les notes de reversion l'écrivent en prose.
+          forbid  "critère 1  lint éteint par complaisance" -n '#\[allow\(unused_variables\)\]|#\[allow\(dead_code\)\]' crates/
+          # Hors du fichier de verrouillage : `bevy_scene` y figure comme
+          # dépendance transitive de Bevy, ce qui n'est pas notre code.
+          forbid  "critère 3  scène Bevy ou texte cosmic" -n 'cosmic-text|cosmic_text|bevy_scene|WgpuSettingsPriority::Compatibility' crates/ --glob '!Cargo.lock'
+
+
+          # ---- Étape 5 : recâblage du malus de relance (TASK-67) ----
+          SETUP=crates/game_state/src/systems/setup.rs
+          # Le bouchon a disparu, et le delta est signé de bout en bout.
+          forbid  "critère 5  bouchon de relance resté en place" -nU 'fn relic_reroll_malus[^\n]*\n\s*let _ = inventory;' "$SETUP"
+          require "critère 5  agrégat de relance signé" -n 'fn relic_reroll_malus\(inventory: &RelicInventory\) -> i8' "$SETUP"
+          forbid  "critère 5  agrégat de relance en u8" -n 'fn relic_reroll_malus[^)]*\) -> u8|as_negative_delta' "$SETUP"
+          # Le bouchon des stakes, lui, reste : ce sont les Étapes 10.
+          require "critère 5  bouchon des stakes intact" -n 'fn stake_reroll_malus\(stake_level: u8\) -> u8' "$SETUP"
+          # Site de décision unique de la neutralisation. Un prédicat, jamais un
+          # parcours filtré : `scan_relics` doit visiter les slots stériles pour
+          # remettre `left_effects` à zéro, et un itérateur qui les sauterait
+          # restaurerait la règle écartée à TASK-60.
+          require "critère 5  prédicat unique de neutralisation" -n 'pub fn participe\(&self\) -> bool' crates/core_engine/src/relics/mod.rs
+          # Exclut le prédicat lui-même : c'est le site de décision, pas un
+          # doublon. Tout autre fichier qui compare l'état à `Disabled` en
+          # ouvre un second.
+          forbid  "critère 5  neutralisation décidée ailleurs" -n 'state (!=|==) RelicState::Disabled' crates/core_engine/src crates/game_state/src -g '!**/relics/mod.rs'
+          # Les valeurs forcées : par identité, après le lancer, sans aléa.
+          require "critère 5  valeurs forcées adressées par identité" -n 'find\(\|die\| die.id == \*cible\)' "$SETUP"
+          forbid  "critère 5  valeurs forcées adressées par position" -n 'forcees\[|dice\[' "$SETUP"
+          forbid  "critère 5  aléa tiré à l'application des valeurs forcées" -nU 'fn apply_forced_values[^}]*rng' "$SETUP"
 
           exit $status
 
