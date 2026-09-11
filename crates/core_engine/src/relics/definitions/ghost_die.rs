@@ -27,19 +27,20 @@
 //! 0` précède le balayage. Un filtre serait une branche qu'aucun test ne peut
 //! atteindre, donc dont on ne saurait jamais si elle est juste.
 
-use crate::scoring::{RollModifier, TriggerCtx};
+use crate::dice::Die;
+use crate::scoring::RollModifier;
 
-pub(crate) fn roll_modifier(ctx: &TriggerCtx) -> RollModifier {
-    if ctx.roll_index != 0 {
+pub(crate) fn roll_modifier(dice: &[Die], roll_index: u8) -> RollModifier {
+    if roll_index != 0 {
         return RollModifier::default();
     }
-    if ctx.dice.iter().any(|de| de.current_value == 1) {
+    if dice.iter().any(|de| de.current_value == 1) {
         return RollModifier::default();
     }
 
     // Par identité, jamais par position : *La Meule* retire un dé en cours de
     // manche, et tout indice capturé avant serait faux après.
-    let Some(cible) = ctx.dice.iter().min_by_key(|de| (de.current_value, de.id)) else {
+    let Some(cible) = dice.iter().min_by_key(|de| (de.current_value, de.id)) else {
         return RollModifier::default();
     };
 

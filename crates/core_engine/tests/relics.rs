@@ -432,14 +432,13 @@ fn test_skeleton_roll_modifier_is_neutral() {
     // resté vert sur une implémentation à l'envers. Sa couverture réelle vient
     // de ses cinq tests propres, plus bas.
     let decor = Decor::new();
-    let ctx = decor.ctx(RelicState::None);
     assert_eq!(
         LANCER_NEUTRE.len() + 2,
         CATALOG.len(),
         "seules l'Obsidienne et le Dé Fantôme touchent au lancer"
     );
     for def in LANCER_NEUTRE {
-        let modificateur = roll_modifier_for(def, &ctx);
+        let modificateur = roll_modifier_for(def, &decor.dice, 0);
         assert_eq!(modificateur.reroll_delta, 0, "{def:?}");
         assert!(modificateur.force_values.is_empty(), "{def:?}");
     }
@@ -1541,14 +1540,6 @@ fn des_identifies(paires: &[(u32, u8)]) -> Vec<Die> {
         .collect()
 }
 
-/// Contexte de lancer : le décor par défaut, ses dés remplacés, à un rang donné.
-fn au_lancer(decor: &Decor, roll_index: u8) -> TriggerCtx<'_> {
-    TriggerCtx {
-        roll_index,
-        ..decor.ctx(RelicState::None)
-    }
-}
-
 fn decor_de_lancer(dice: Vec<Die>) -> Decor {
     let mut decor = Decor::new();
     decor.dice = dice;
@@ -1565,7 +1556,7 @@ fn test_unstable_obsidian_reroll_delta() {
     // est en `saturating_sub` depuis l'Étape 1, donc aucun `0 - 1` n'existe
     // dans la chaîne. Le mode de compilation ne change rien ici.
     let decor = decor_de_lancer(des(&[2, 3, 4, 5, 6]));
-    let delta = roll_modifier_for(RelicId::UnstableObsidian, &au_lancer(&decor, 0)).reroll_delta;
+    let delta = roll_modifier_for(RelicId::UnstableObsidian, &decor.dice, 0).reroll_delta;
     assert_eq!(delta, -1);
 
     let config = RunConfig::from_cup(&cup(CupId::Abandoned));
@@ -1580,7 +1571,7 @@ fn test_obsidian_force_values_empty() {
         let decor = decor_de_lancer(des(&valeurs));
         for roll_index in [0, 1, 7] {
             let modificateur =
-                roll_modifier_for(RelicId::UnstableObsidian, &au_lancer(&decor, roll_index));
+                roll_modifier_for(RelicId::UnstableObsidian, &decor.dice, roll_index);
             assert_eq!(
                 modificateur.reroll_delta, -1,
                 "{valeurs:?} au lancer {roll_index}"
@@ -1593,7 +1584,7 @@ fn test_obsidian_force_values_empty() {
 #[test]
 fn test_ghost_die_forces_six() {
     let decor = decor_de_lancer(des(&[2, 3, 4, 5, 6]));
-    let modificateur = roll_modifier_for(RelicId::GhostDie, &au_lancer(&decor, 0));
+    let modificateur = roll_modifier_for(RelicId::GhostDie, &decor.dice, 0);
 
     assert_eq!(modificateur.force_values, vec![(DieId(0), 6)]);
 }
@@ -1604,7 +1595,7 @@ fn test_ghost_die_forces_by_identity_not_by_position() {
     // de tête porte `DieId(7)`. Un `dice[0]`, un `min` sur les indices ou un
     // `position()` rendus tels quels donneraient une autre paire.
     let decor = decor_de_lancer(des_identifies(&[(7, 5), (2, 6), (9, 4), (3, 2)]));
-    let modificateur = roll_modifier_for(RelicId::GhostDie, &au_lancer(&decor, 0));
+    let modificateur = roll_modifier_for(RelicId::GhostDie, &decor.dice, 0);
 
     assert_eq!(modificateur.force_values, vec![(DieId(3), 6)]);
 }
@@ -1612,7 +1603,7 @@ fn test_ghost_die_forces_by_identity_not_by_position() {
 #[test]
 fn test_ghost_die_silent_when_one_present() {
     let decor = decor_de_lancer(des(&[1, 3, 4, 5, 6]));
-    let modificateur = roll_modifier_for(RelicId::GhostDie, &au_lancer(&decor, 0));
+    let modificateur = roll_modifier_for(RelicId::GhostDie, &decor.dice, 0);
 
     assert!(modificateur.force_values.is_empty());
 }
@@ -1623,7 +1614,7 @@ fn test_ghost_die_silent_after_first_roll() {
     // relique silencieuse pour toujours.
     let decor = decor_de_lancer(des(&[2, 3, 4, 5, 6]));
     for roll_index in [1, 2] {
-        let modificateur = roll_modifier_for(RelicId::GhostDie, &au_lancer(&decor, roll_index));
+        let modificateur = roll_modifier_for(RelicId::GhostDie, &decor.dice, roll_index);
         assert!(modificateur.force_values.is_empty(), "lancer {roll_index}");
     }
 }
@@ -1635,7 +1626,7 @@ fn test_ghost_die_tie_breaks_on_lowest_die_id() {
     // `DieId(5)`, est en position 1 : rang et identifiant ne coïncident pas
     // davantage ici.
     let decor = decor_de_lancer(des_identifies(&[(8, 2), (5, 2), (4, 4), (6, 5), (9, 6)]));
-    let modificateur = roll_modifier_for(RelicId::GhostDie, &au_lancer(&decor, 0));
+    let modificateur = roll_modifier_for(RelicId::GhostDie, &decor.dice, 0);
 
     assert_eq!(modificateur.force_values, vec![(DieId(5), 6)]);
 }
@@ -1649,7 +1640,7 @@ fn test_ghost_die_forces_six_literally_not_the_max_face() {
         de.sides = 8;
     }
     let decor = decor_de_lancer(dice);
-    let modificateur = roll_modifier_for(RelicId::GhostDie, &au_lancer(&decor, 0));
+    let modificateur = roll_modifier_for(RelicId::GhostDie, &decor.dice, 0);
 
     assert_eq!(modificateur.force_values, vec![(DieId(0), 6)]);
 }
@@ -1662,7 +1653,7 @@ fn test_ghost_die_has_no_reroll_delta() {
         (vec![2, 3, 4, 5, 6], 1),
     ] {
         let decor = decor_de_lancer(des(&valeurs));
-        let modificateur = roll_modifier_for(RelicId::GhostDie, &au_lancer(&decor, roll_index));
+        let modificateur = roll_modifier_for(RelicId::GhostDie, &decor.dice, roll_index);
         assert_eq!(
             modificateur.reroll_delta, 0,
             "{valeurs:?} au lancer {roll_index}"

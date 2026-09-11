@@ -116,7 +116,7 @@ fn scan_relics<O: FnMut(Hook, &TriggerCtx<'_>)>(
         // le boss qui éteint une relique s'appuie exclusivement là-dessus. Les
         // autres états passent tels quels, et c'est `effects_for` qui décide ;
         // le pipeline ne fait avancer aucun état.
-        if inst.state == RelicState::Disabled {
+        if !inst.participe() {
             left = 0..0;
             continue;
         }
@@ -144,29 +144,32 @@ fn scan_relics<O: FnMut(Hook, &TriggerCtx<'_>)>(
     }
 }
 
-/// Valeurs d'attente des deux champs de lancer. **À câbler par TASK-67**, qui
-/// retirera ces deux constantes et la garde de CI qui les épingle.
+/// Valeurs d'attente des deux champs de lancer, **sans propriétaire**.
 ///
-/// **Re-daté deux fois : à TASK-61, qui ne pouvait pas le lever, puis à
-/// l'audit d'Étape 5.** TASK-66 n'y touche pas non plus, et le recâblage de
-/// `relic_reroll_malus` est TASK-67 : deux numéros pour un seul travail sont
-/// ce qui a produit cette confusion. Ce ticket a implémenté
-/// les deux reliques du lancer, mais son périmètre s'arrête à `core_engine` :
-/// le point d'appel est `relic_reroll_malus`, dans `game_state`. Une dette
-/// datée d'un numéro qui ne la lèvera pas est pire qu'une dette non datée, elle
-/// se donne pour réglée.
+/// **Cesser de les dater.** Elles ont porté TASK-61, puis TASK-66, puis
+/// TASK-67, sans être levées une seule fois : chaque ticket les a trouvées hors
+/// de son périmètre, et les a repoussées d'un numéro. Un quatrième numéro ne
+/// changerait rien.
 ///
-/// Le pipeline ne connaît ni le rang du lancer ni les relances restantes : ni
-/// l'un ni l'autre n'entre dans sa signature, et le rang n'est compté nulle part
-/// dans le projet à cette étape.
+/// La raison est structurelle. Ces constantes alimentent le prototype de la
+/// passe de **score**, et `ScoringPipeline::resolve` n'a aucun paramètre de
+/// lancer. Les lever voudrait dire en ajouter deux à sa signature, pour un
+/// besoin qui **n'existe pas** : la seule relique qui lit `roll_index` le lit
+/// dans `roll_modifier_for`, qui ne traverse jamais le pipeline.
+///
+/// **La condition qui leur donnera un propriétaire** : une relique dont
+/// `effects_for` — et non `roll_modifier_for` — lirait `roll_index` ou
+/// `rerolls_left`. Ce jour-là, et pas avant, la signature de `resolve` s'élargit
+/// et ces deux constantes disparaissent. C'est cette condition qu'il faut
+/// surveiller, pas un numéro de ticket.
 ///
 /// **Le choix des valeurs inverse le mode de défaillance.** Un `roll_index` à
 /// zéro rendrait **vraie** la garde entière de *Dé Fantôme* — `roll_index == 0`
 /// — et ferait déclencher la relique à chaque main : une erreur de score
 /// silencieuse. À `u8::MAX`, la garde est fausse, et un câblage oublié donne une
-/// relique qui ne part jamais, ce que verra le ticket de câblage. `rerolls_left`
-/// vaut zéro pour la raison symétrique : *Tirelire en Terre* accumule cette
-/// valeur, et zéro n'accumule rien.
+/// relique qui ne part jamais. `rerolls_left` vaut zéro pour la raison
+/// symétrique : *Tirelire en Terre* accumule cette valeur, et zéro n'accumule
+/// rien.
 const ROLL_INDEX_NON_CABLE: u8 = u8::MAX;
 const REROLLS_LEFT_NON_CABLE: u8 = 0;
 

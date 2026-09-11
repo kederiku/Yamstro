@@ -5,8 +5,8 @@
 //! reliques a besoin, et elle est posée à sa place définitive plutôt que
 //! rangée provisoirement dans le module des reliques.
 
+use crate::relics::RelicInventory;
 use crate::relics::effects::gold_for;
-use crate::relics::{RelicInventory, RelicState};
 use crate::scoring::TriggerCtx;
 
 /// Somme des `gold_for` sur les slots occupés et non `Disabled`, de gauche à
@@ -24,7 +24,7 @@ use crate::scoring::TriggerCtx;
 pub fn round_end_gold(inventory: &RelicInventory, base: &TriggerCtx<'_>) -> u32 {
     inventory
         .iter_slots()
-        .filter(|(_, inst)| inst.state != RelicState::Disabled)
+        .filter(|(_, inst)| inst.participe())
         .fold(0u32, |total, (slot, inst)| {
             let ctx = TriggerCtx {
                 uid: inst.uid,
@@ -43,7 +43,7 @@ mod tests {
     use crate::dice::{Die, DieId};
     use crate::evaluator::HandMatch;
     use crate::hands::{HandGrid, HandLevels, YahtzeeHand};
-    use crate::relics::RelicId;
+    use crate::relics::{RelicId, RelicState};
     use crate::scoring::TriggerCtx;
 
     /// Le filtre sur `Disabled` ne se teste **qu'avec une relique dont l'or ne

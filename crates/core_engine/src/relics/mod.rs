@@ -77,6 +77,29 @@ pub struct RelicInstance {
     pub state: RelicState,
 }
 
+impl RelicInstance {
+    /// Cette relique participe-t-elle ?
+    ///
+    /// **Site de décision unique de la neutralisation.** Une relique qui ne
+    /// participe pas ne produit aucun effet, ne rapporte aucun or, n'avance pas
+    /// son état et n'impose pas son malus de relance. Écrire cette condition à
+    /// quatre endroits la ferait diverger : l'Étape 6 ajoute *La Cage*
+    /// (`DisableRelicSlot`) et l'Étape 9 deux autres formes, et il suffirait
+    /// d'en oublier une pour qu'une relique neutralisée perde ses effets **tout
+    /// en gardant sa contrepartie** — le joueur paierait le prix sans le bonus.
+    /// Chaque forme à venir s'ajoute **ici**, et nulle part ailleurs.
+    ///
+    /// **C'est un prédicat, jamais un parcours filtré.** `scan_relics` doit
+    /// visiter *tous* les slots, y compris les stériles : c'est sa remise à
+    /// zéro de `left_effects` sur un slot qui ne participe pas qui casse la
+    /// chaîne du *Miroir Double*, et un itérateur qui les sauterait
+    /// restaurerait en silence la règle écartée à TASK-60.
+    #[must_use]
+    pub fn participe(&self) -> bool {
+        self.state != RelicState::Disabled
+    }
+}
+
 /// Catalogue des reliques **tirables**. Les trois fixtures `#[cfg(test)]` n'y
 /// figurent jamais : elles ne deviennent pas tirables (C16), et la crate ne
 /// compile même pas si l'une d'elles y entre, la bibliothèque devant aussi se

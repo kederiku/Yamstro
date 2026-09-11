@@ -139,7 +139,7 @@ jobs:
           # champ public de core_engine. Et la garde « DicePool » vise une
           # instanciation ; nue, elle attrape les commentaires qui expliquent
           # justement qu'on n'en crée pas.
-          forbid  "critère 4  positions fixes de dés"    -n '0\.\.5|\[Entity; 5\]|\[Die; 5\]|\b(die_slots?|dice_slots?)\b|slots?\s*\[' "$SETUP"
+          forbid  "critère 4  positions fixes de dés"    -U '(?s)(0\.\.5|\[Entity; 5\]|\[Die; 5\]|\b(die_slots?|dice_slots?)\b|slots?\s*\[).*#\[cfg\(test\)\]' "$SETUP"
           forbid  "critère 4  littéraux de main"         -n 'rerolls_left\s*=\s*[0-9]|dice_count\s*=\s*[0-9]' "$SETUP"
           forbid  "critère 4  flux hors des dés"         -n 'rng\.(shop|boss|relic_effects)|thread_rng|from_entropy' "$SETUP"
           forbid  "critère 4  pool de dés en parallèle"  -n 'DicePool::new|DicePool\s*\{|:\s*DicePool\b|<DicePool>' crates/game_state/src
@@ -522,12 +522,13 @@ jobs:
           # Ancré sur les deux types, pas sur le fichier : `Hook` porte
           # légitimement serde, et la commande du corpus l'ignorait.
           forbid  "critère 5  contexte ou modificateur sérialisés" -nU 'serde::(Serialize|Deserialize)[^\n]*\n(#\[[^\n]*\n)*pub struct (TriggerCtx|RollModifier)' crates/core_engine/src/scoring/trigger.rs
-          # **Dette datée, à lever par TASK-67** — re-datée à TASK-61, dont le
-          # périmètre s'arrête à `core_engine` alors que le point d'appel vit
-          # dans `game_state`. Cette garde nomme le ticket qui doit la retirer,
-          # ce qui distingue une dette inscrite d'une dette oubliée ; encore
-          # faut-il que le numéro soit celui qui la lèvera vraiment.
-          require "critère 5  valeurs d'attente du lancer, à câbler par TASK-67" -n 'const ROLL_INDEX_NON_CABLE: u8 = u8::MAX;' crates/core_engine/src/scoring/pipeline.rs
+          # **Dette sans propriétaire, et c'est la bonne étiquette.** Elle a
+          # porté TASK-61, TASK-66 puis TASK-67, sans être levée une seule fois :
+          # chacun l'a trouvée hors de son périmètre. Elle n'a pas besoin d'un
+          # quatrième numéro, elle a besoin de sa condition de levée — une
+          # relique dont `effects_for`, et non `roll_modifier_for`, lirait le
+          # rang du lancer. Voir la note de `pipeline.rs`.
+          require "critère 5  valeurs d'attente du lancer, sans propriétaire" -n 'const ROLL_INDEX_NON_CABLE: u8 = u8::MAX;' crates/core_engine/src/scoring/pipeline.rs
 
           # ---- Étape 5 : squelette des comportements (TASK-56) ----
           # **Aucun bras attrape-tout au niveau de la relique.** Ancré sur
@@ -537,7 +538,13 @@ jobs:
           forbid  "critère 5  bras attrape-tout sur la relique" -n '^\s{8}_ =>' crates/core_engine/src/relics/effects.rs
           # Les quatre signatures sont normatives, noms de paramètres compris.
           require "critère 5  signature d'effects_for"   -n 'pub fn effects_for\(def: RelicId, hook: Hook, ctx: &TriggerCtx\) -> SmallVec<\[ScoreEffect; 2\]>' crates/core_engine/src/relics/effects.rs
-          require "critère 5  signature de roll_modifier_for" -n 'pub fn roll_modifier_for\(def: RelicId, ctx: &TriggerCtx\) -> RollModifier' crates/core_engine/src/relics/effects.rs
+          # **Signature resserrée à TASK-67.** L'ancienne exigeait un
+          # `&TriggerCtx`, donc un `&HandMatch`, qui n'existe pas au montage de
+          # manche : le contexte de main y est réinitialisé, et à la première
+          # manche d'une run aucune figure n'a jamais été évaluée. Elle avait
+          # été épinglée quand la fonction n'avait aucun appelant ; le premier
+          # appelant réel l'a contredite.
+          require "critère 5  signature de roll_modifier_for" -n 'pub fn roll_modifier_for\(def: RelicId, dice: &\[Die\], roll_index: u8\) -> RollModifier' crates/core_engine/src/relics/effects.rs
           require "critère 5  signature de gold_for"     -n 'pub fn gold_for\(def: RelicId, ctx: &TriggerCtx\) -> u32' crates/core_engine/src/relics/effects.rs
           require "critère 5  signature d'advance_state" -n 'pub fn advance_state\(def: RelicId, hook: Hook, ctx: &TriggerCtx, state: RelicState\) -> RelicState' crates/core_engine/src/relics/effects.rs
           # L'idiome du dépôt pour un paramètre délibérément inutilisé est la
@@ -658,7 +665,7 @@ jobs:
           # relique. Ancrée sur le champ, que la note nomme en prose.
           forbid  "critère 5  le dé fantôme lit les dés comptabilisés" -n 'ctx\.hand\b' "$FANTOME"
           require "critère 5  le dé fantôme lit le plateau"  -n 'ctx\.dice' "$FANTOME"
-          require "critère 5  zéro est le premier lancer"    -n 'ctx\.roll_index != 0' "$FANTOME"
+          require "critère 5  zéro est le premier lancer"    -n 'roll_index != 0' "$FANTOME"
           require "critère 5  départage sur la valeur puis l'identifiant" -n 'min_by_key\(\|de\| \(de\.current_value, de\.id\)\)' "$FANTOME"
           # La cible est la valeur six, littéralement : ni la face maximale du
           # dé, ni son nombre de faces. Sur un D8 le dé forcé passe à six.
@@ -692,7 +699,10 @@ jobs:
           # `advance_state` est le seul producteur de la valeur écrite, et le
           # pipeline ne l'appelle jamais : sa garde est déjà posée au critère 7.
           require "critère 5  l'état n'est écrit que par advance_state" -n 'inst\.state = advance_state\(' crates/game_state/src/relics/mod.rs
-          forbid  "critère 5  état de relique écrit ailleurs qu'ici" -n '\.state = ' crates/game_state/src crates/ui_and_juice/src -g '!**/relics/mod.rs'
+          # Restreinte au code de **production** : un montage de test a le
+          # droit d'éteindre une relique pour éprouver ce qui en découle.
+          # L'ancrage sur la position relative au marqueur est celui de TASK-64.
+          forbid  "critère 5  état de relique écrit ailleurs qu'ici" -U '(?s)\.state = .*#\[cfg\(test\)\]' crates/game_state/src crates/ui_and_juice/src -g '!**/relics/mod.rs'
           # Le corps du commit de TASK-50 reste hors d'atteinte.
           forbid  "critère 5  avancement d'état dans la file de l'Étape 4" -n 'advance_state|round_end_gold' crates/ui_and_juice/src
           # L'or entre par un seul point, et en saturation.
@@ -805,6 +815,29 @@ jobs:
           # Hors du fichier de verrouillage : `bevy_scene` y figure comme
           # dépendance transitive de Bevy, ce qui n'est pas notre code.
           forbid  "critère 3  scène Bevy ou texte cosmic" -n 'cosmic-text|cosmic_text|bevy_scene|WgpuSettingsPriority::Compatibility' crates/ --glob '!Cargo.lock'
+
+
+          # ---- Étape 5 : recâblage du malus de relance (TASK-67) ----
+          SETUP=crates/game_state/src/systems/setup.rs
+          # Le bouchon a disparu, et le delta est signé de bout en bout.
+          forbid  "critère 5  bouchon de relance resté en place" -nU 'fn relic_reroll_malus[^\n]*\n\s*let _ = inventory;' "$SETUP"
+          require "critère 5  agrégat de relance signé" -n 'fn relic_reroll_malus\(inventory: &RelicInventory\) -> i8' "$SETUP"
+          forbid  "critère 5  agrégat de relance en u8" -n 'fn relic_reroll_malus[^)]*\) -> u8|as_negative_delta' "$SETUP"
+          # Le bouchon des stakes, lui, reste : ce sont les Étapes 10.
+          require "critère 5  bouchon des stakes intact" -n 'fn stake_reroll_malus\(stake_level: u8\) -> u8' "$SETUP"
+          # Site de décision unique de la neutralisation. Un prédicat, jamais un
+          # parcours filtré : `scan_relics` doit visiter les slots stériles pour
+          # remettre `left_effects` à zéro, et un itérateur qui les sauterait
+          # restaurerait la règle écartée à TASK-60.
+          require "critère 5  prédicat unique de neutralisation" -n 'pub fn participe\(&self\) -> bool' crates/core_engine/src/relics/mod.rs
+          # Exclut le prédicat lui-même : c'est le site de décision, pas un
+          # doublon. Tout autre fichier qui compare l'état à `Disabled` en
+          # ouvre un second.
+          forbid  "critère 5  neutralisation décidée ailleurs" -n 'state (!=|==) RelicState::Disabled' crates/core_engine/src crates/game_state/src -g '!**/relics/mod.rs'
+          # Les valeurs forcées : par identité, après le lancer, sans aléa.
+          require "critère 5  valeurs forcées adressées par identité" -n 'find\(\|die\| die.id == \*cible\)' "$SETUP"
+          forbid  "critère 5  valeurs forcées adressées par position" -n 'forcees\[|dice\[' "$SETUP"
+          forbid  "critère 5  aléa tiré à l'application des valeurs forcées" -nU 'fn apply_forced_values[^}]*rng' "$SETUP"
 
           exit $status
 

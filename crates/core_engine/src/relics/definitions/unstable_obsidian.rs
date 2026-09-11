@@ -34,8 +34,7 @@ pub(crate) fn effects(hook: Hook, ctx: &TriggerCtx) -> SmallVec<[ScoreEffect; 2]
 /// le signe et obligerait l'appelant à le réinterpréter ; c'est `apply_delta`,
 /// au dernier maillon de la chaîne de l'ADR-007, qui sature — *Gobelet
 /// Abandonné* plus cette relique rend zéro, jamais 255.
-pub(crate) fn roll_modifier(ctx: &TriggerCtx) -> RollModifier {
-    let _ = ctx; // définitif : rien dans le contexte ne la conditionne
+pub(crate) fn roll_modifier() -> RollModifier {
     RollModifier {
         reroll_delta: -1,
         ..RollModifier::default()

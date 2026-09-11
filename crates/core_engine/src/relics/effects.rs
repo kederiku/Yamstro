@@ -28,6 +28,7 @@
 
 use smallvec::SmallVec;
 
+use crate::dice::Die;
 use crate::relics::{RelicId, RelicState, definitions};
 use crate::scoring::{Hook, RollModifier, ScoreEffect, TriggerCtx};
 
@@ -147,15 +148,27 @@ pub fn effects_for(def: RelicId, hook: Hook, ctx: &TriggerCtx) -> SmallVec<[Scor
 /// `hook` n'entre pas dans la signature : le hook est `OnRoll` par
 /// construction. Il n'existe donc pas de « neutralité sur les autres hooks » à
 /// éprouver ici — la question ne se pose qu'à `effects_for`, qui reçoit le
-/// hook. Un test qui prétendrait passer `OnScoringDie` à cette fonction n'a
-/// aucun argument par où le faire.
+/// hook.
+///
+/// # Pourquoi pas un `TriggerCtx`
+///
+/// **Il n'en existe aucun au moment du lancer.** `TriggerCtx` exige un
+/// `&HandMatch`, et le montage de manche réinitialise le contexte de main :
+/// à la première manche d'une run, aucune figure n'a jamais été évaluée. Le
+/// fabriquer en sentinelle rejouerait le piège que `ScoringStepQueue::default`
+/// documente.
+///
+/// La signature porte donc exactement ce que les deux reliques concernées
+/// lisent : les dés et le rang du lancer. Elle était épinglée par une garde de
+/// CI écrite quand la fonction n'avait **aucun appelant** ; le premier appelant
+/// réel l'a contredite.
 ///
 /// La valeur neutre est le `Default` dérivé, jamais un littéral réécrit à la
 /// main.
-pub fn roll_modifier_for(def: RelicId, ctx: &TriggerCtx) -> RollModifier {
+pub fn roll_modifier_for(def: RelicId, dice: &[Die], roll_index: u8) -> RollModifier {
     match def {
-        RelicId::UnstableObsidian => definitions::unstable_obsidian::roll_modifier(ctx),
-        RelicId::GhostDie => definitions::ghost_die::roll_modifier(ctx),
+        RelicId::UnstableObsidian => definitions::unstable_obsidian::roll_modifier(),
+        RelicId::GhostDie => definitions::ghost_die::roll_modifier(dice, roll_index),
 
         // Définitif : ces dix ne toucheront jamais au lancer. Plus rien n'est
         // étiqueté dans cette fonction, les deux reliques concernées étant

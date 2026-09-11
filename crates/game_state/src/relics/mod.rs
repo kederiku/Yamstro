@@ -161,7 +161,7 @@ pub fn collect_relic_gold_on_blind_end(
 fn avancer(inventory: &mut RelicInventory, base: &TriggerCtx<'_>, hook: Hook) {
     for (slot, inst) in inventory.slots.iter_mut().enumerate() {
         let Some(inst) = inst else { continue };
-        if inst.state == RelicState::Disabled {
+        if !inst.participe() {
             continue;
         }
         let ctx = TriggerCtx {
