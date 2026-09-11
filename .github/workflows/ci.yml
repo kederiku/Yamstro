@@ -969,6 +969,42 @@ jobs:
           # La manche complète (récompense, score cible) s'assemble à TASK-80.
           forbid  "critère 6  manche assemblée dans le catalogue" -n 'BlindDefinition|target_score' "$BOSSES"
 
+
+          # ---- Étape 6 : Le Borgne, par filtrage amont (TASK-72) ----
+          EVAL=crates/game_state/src/systems/evaluation.rs
+          # La signature de l'évaluateur est normative au caractère près depuis
+          # TASK-10, et c'est tout l'argument du filtrage amont : la règle
+          # « ni Chips, ni figure » s'obtient en ne transmettant pas le dé,
+          # jamais par une branche ajoutée dans l'évaluateur ou le pipeline.
+          require "critère 6  la signature de l'évaluateur, intacte" -n \
+                  '^    pub fn evaluate\(dice: &\[Die\]\) -> Vec<HandMatch> \{$' crates/core_engine/src/evaluator.rs
+          forbid  "critère 6  évaluateur rouvert pour le boss" -n \
+                  'evaluate_with_blind|fn evaluate\([^)]*blind|fn evaluate\([^)]*Option<u8>' crates/
+          forbid  "critère 6  branche de boss dans le pipeline de score" -n \
+                  'DisableFace' crates/core_engine/src/scoring crates/core_engine/src/relics
+          # Lecteur unique. Le catalogue des boss et la déclaration de la
+          # variante vivent dans blinds/ ; le seul lecteur est le helper.
+          forbid  "critère 6  second lecteur de la face éteinte" -n \
+                  'DisableFace' crates/ -g '!**/blinds/**' -g '!**/systems/evaluation.rs'
+          require "critère 6  le helper de face existe et est unique" -n '^pub fn disabled_face\(' "$EVAL"
+          require "critère 6  la tranche évaluable existe" -n '^pub fn evaluable_dice\(' "$EVAL"
+          # Prédicat unique : un second filtre divergeant d'une face rendrait
+          # deux mains pour le même lancer, et l'écart ne se verrait qu'au score.
+          forbid  "critère 6  second filtre de dés hors du helper" -n \
+                  'filter\([^)]*current_value !=' crates/ -g '!**/systems/evaluation.rs'
+          # Le slice de `resolve` devient `TriggerCtx.dice`, que les reliques
+          # lisent : il reste la main **physique**, entière.
+          forbid  "critère 6  la main du pipeline est filtrée" -n \
+                  'evaluable_dice' crates/game_state/src/systems/submission.rs
+          # Rendu, jamais rangé : un champ portant la main filtrée serait le
+          # second état parallèle que TASK-35 proscrit.
+          forbid  "critère 6  la main filtrée est stockée" -n \
+                  'evaluable|filtered_dice|disabled_face' crates/game_state/src/resources.rs
+          # Les dés éteints restent dans le pool : affichés, verrouillables,
+          # relançables. Les despawner changerait le nombre d'entités-dés.
+          forbid  "critère 6  le boss retire des dés du pool" -n \
+                  'despawn[^(]*\(\)[^;]*Die|remove_die|pool\.remove' "$EVAL"
+
           exit $status
 
   # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en
