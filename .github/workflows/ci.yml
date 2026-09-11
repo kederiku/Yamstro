@@ -932,6 +932,43 @@ jobs:
           # comptage que l'ADR-010 supprime.
           forbid  "critère 6  champ de trop dans le gain"   -n '^\s*pub (applied|blind_id|ante)\s*:' "$PAYOUT"
 
+
+          # ---- Étape 6 : catalogue des boss (TASK-71) ----
+          BOSSES=$SRC/blinds/definitions/bosses.rs
+          # **Le catalogue est clos par la CI, l'exhaustivité par le
+          # compilateur.** Aucune enumération de variantes n'existe à
+          # l'exécution sans dérivé : un septième boss ajouté à l'enum mais
+          # oublié de `ALL` ne casserait aucun test. Le bloc est donc exigé au
+          # caractère près, ce qui attrape aussi un renommage et une
+          # permutation ; l'oubli dans `boss_definition`, lui, sort en E0004.
+          require "critère 6  six boss, et pas un de plus" -U -n \
+                  'pub enum BossId \{\n    OneEyed,\n    Cage,\n    Vise,\n    Flint,\n    Oblivion,\n    Rift,\n\}' "$BOSSES"
+          require "critère 6  et la table ALL les porte tous les six" -n 'pub const ALL: \[BossId; 6\]' "$BOSSES"
+          forbid  "critère 6  second catalogue de boss" -n 'enum BossId' crates/ -g '!**/blinds/definitions/bosses.rs'
+          # Ancrée sur l'**acte**, et sur la production seule : le test qui
+          # prouve que les trois autres flux n'ont pas bougé doit pouvoir les
+          # nommer. Le motif exige que l'occurrence précède `#[cfg(test)]`.
+          forbid  "critère 6  le boss tire sur un autre flux" -U -n \
+                  '(?s)(rng\.dice|rng\.shop|rng\.relic_effects).*#\[cfg\(test\)\]' "$SRC/blinds"
+          forbid  "critère 6  aléa hors flux de session" -n 'thread_rng|rand::rng\(\)|from_entropy' "$SRC/blinds"
+          # Ancrée sur l'acte — une borne littérale — et non sur le chiffre
+          # cinq, que la fixture des tests et la note du module doivent pouvoir
+          # écrire. Le Gobelet de Fortune donne six slots (C18, ADR-007).
+          forbid  "critère 6  capacité en littéral dans le tirage" -n 'random_range\(0\.\.[0-9]' "$BOSSES"
+          require "critère 6  la borne vient de la capacité" -n 'random_range\(0\.\.relic_capacity' "$BOSSES"
+          forbid  "critère 6  slot de relique en usize" -n 'DisableRelicSlot\(.*usize' crates/
+          # Fonction totale : ni bras fourre-tout, ni sortie facultative, ni
+          # valeur par défaut. Un boss sans contrainte est une erreur de
+          # compilation, et c'est ce qui rendra l'Étape 9 sûre à étendre.
+          forbid  "critère 6  la traduction du boss cesse d'être totale" -n 'Option<BossDefinition>|_ *=>|unwrap_or' "$BOSSES"
+          forbid  "critère 6  contrainte fabriquée hors de l'entrée de manche" -n 'impl Default for Boss|lazy_static|OnceLock|static [A-Z_]*: *Boss' "$BOSSES"
+          # Les noms français sont de l'i18n d'Étape 9 (ADR-008), et aucun
+          # effet ne s'implémente ici : ce fichier traduit, il n'exécute pas.
+          forbid  "critère 6  texte joueur dans le catalogue" -n 'String|&str' "$BOSSES"
+          forbid  "critère 6  effet de boss implémenté trop tôt" -n 'evaluate|rerolls_left|active_evaluations|effects_for|Hidden' "$BOSSES"
+          # La manche complète (récompense, score cible) s'assemble à TASK-80.
+          forbid  "critère 6  manche assemblée dans le catalogue" -n 'BlindDefinition|target_score' "$BOSSES"
+
           exit $status
 
   # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en

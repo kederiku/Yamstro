@@ -1,5 +1,6 @@
 //! Blind : sa définition, et le contexte de la manche en cours.
 
+pub mod definitions;
 pub mod scaling;
 
 pub use scaling::target_score;
