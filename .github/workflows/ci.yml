@@ -506,10 +506,12 @@ jobs:
           # Ancré sur les deux types, pas sur le fichier : `Hook` porte
           # légitimement serde, et la commande du corpus l'ignorait.
           forbid  "critère 5  contexte ou modificateur sérialisés" -nU 'serde::(Serialize|Deserialize)[^\n]*\n(#\[[^\n]*\n)*pub struct (TriggerCtx|RollModifier)' crates/core_engine/src/scoring/trigger.rs
-          # **Dette datée, à lever par TASK-61.** Le pipeline ne connaît pas
-          # encore le rang du lancer ; cette garde nomme le ticket qui doit la
-          # retirer, ce qui distingue une dette inscrite d'une dette oubliée.
-          require "critère 5  valeurs d'attente du lancer, à câbler par TASK-61" -n 'const ROLL_INDEX_NON_CABLE: u8 = u8::MAX;' crates/core_engine/src/scoring/pipeline.rs
+          # **Dette datée, à lever par TASK-66** — re-datée à TASK-61, dont le
+          # périmètre s'arrête à `core_engine` alors que le point d'appel vit
+          # dans `game_state`. Cette garde nomme le ticket qui doit la retirer,
+          # ce qui distingue une dette inscrite d'une dette oubliée ; encore
+          # faut-il que le numéro soit celui qui la lèvera vraiment.
+          require "critère 5  valeurs d'attente du lancer, à câbler par TASK-66" -n 'const ROLL_INDEX_NON_CABLE: u8 = u8::MAX;' crates/core_engine/src/scoring/pipeline.rs
 
           # ---- Étape 5 : squelette des comportements (TASK-56) ----
           # **Aucun bras attrape-tout au niveau de la relique.** Ancré sur
@@ -601,10 +603,6 @@ jobs:
           # par qui le retrouvera dans d'anciennes notes — règle arrêtée à
           # TASK-58 pour la valeur d'origine de l'alignement.
           forbid  "critère 5  nom écarté du balancier"   -n 'RelicId::Balance|::Balance\b|mod balance|fn balance' crates/
-          # **Dette datée, à lever par TASK-61** : le malus de relance de
-          # l'obsidienne passe par une fonction distincte, que ce ticket n'écrit
-          # pas. Rien ne doit en parler dans son corps d'effets.
-          forbid  "critère 5  relance dans les effets de l'obsidienne, à lever par TASK-61" -n 'reroll|RollModifier' crates/core_engine/src/relics/definitions/unstable_obsidian.rs
 
           MIROIR=$SRC/relics/definitions/double_mirror.rs
           # *Miroir Double*. Toutes ancrées sur l'**acte**, jamais sur le nom :
@@ -628,6 +626,37 @@ jobs:
           forbid  "critère 5  le miroir conserve la source d'origine" -n 'source: effect\.source|left_effects[^;]*\.(copied|cloned)\(' "$MIROIR"
           require "critère 5  le miroir ré-émet sous son propre uid" -n 'uid: ctx\.uid' "$MIROIR"
           require "critère 5  le miroir ré-émet sous sa propre source" -n 'def: RelicId::DoubleMirror' "$MIROIR"
+
+
+          # ---- Étape 5 : les deux reliques du lancer (TASK-61) ----
+          OBSI=$SRC/relics/definitions/unstable_obsidian.rs
+          FANTOME=$SRC/relics/definitions/ghost_die.rs
+          forbid  "critère 5  aléa dans les reliques du lancer" -n '\brng\b|\bRng\b|random|thread_rng|gen_range' "$OBSI" "$FANTOME"
+          # Ancrée sur l'accès, pas sur le mot : la note du module doit pouvoir
+          # écrire « position » et « indice » pour expliquer qu'on n'y touche
+          # pas. Le retour par position se reconnaît à l'indexation et aux
+          # itérateurs qui rendent un rang.
+          forbid  "critère 5  dé forcé désigné par sa position" -n '\bdice\[|\.dice\.get\(|\.position\(|\benumerate\(\)' "$FANTOME"
+          # Le Dé Fantôme lit le plateau, seule exception au « par dé, sur les
+          # dés comptabilisés » — motivée par le déclencheur, pas par la
+          # relique. Ancrée sur le champ, que la note nomme en prose.
+          forbid  "critère 5  le dé fantôme lit les dés comptabilisés" -n 'ctx\.hand\b' "$FANTOME"
+          require "critère 5  le dé fantôme lit le plateau"  -n 'ctx\.dice' "$FANTOME"
+          require "critère 5  zéro est le premier lancer"    -n 'ctx\.roll_index != 0' "$FANTOME"
+          require "critère 5  départage sur la valeur puis l'identifiant" -n 'min_by_key\(\|de\| \(de\.current_value, de\.id\)\)' "$FANTOME"
+          # La cible est la valeur six, littéralement : ni la face maximale du
+          # dé, ni son nombre de faces. Sur un D8 le dé forcé passe à six.
+          forbid  "critère 5  cible calculée depuis le nombre de faces" -n '\bsides\b|max_face' "$FANTOME"
+          require "critère 5  une relance retirée par l'obsidienne" -n 'reroll_delta: -1' "$OBSI"
+          # Le delta reste signé jusqu'à `apply_delta` : le convertir côté
+          # relique perdrait le signe que l'appelant doit saturer.
+          forbid  "critère 5  delta de relance non signé" -n 'reroll_delta: u8|as u8|unsigned_abs' "$OBSI" "$FANTOME"
+          forbid  "critère 5  mutation depuis un hook de lancer" -n '&mut |RefCell|Cell<' "$OBSI" "$FANTOME"
+          # Le neutre est le `Default` dérivé, jamais un littéral réécrit.
+          forbid  "critère 5  neutre du lancer réécrit à la main" -n 'RollModifier \{\s*reroll_delta: 0' "$OBSI" "$FANTOME" "$SRC/relics/effects.rs"
+          # Le squelette a servi : `roll_modifier_for` lit désormais son
+          # contexte, et la liaison d'attente n'a plus lieu d'être.
+          forbid  "critère 5  liaison d'attente restée dans roll_modifier_for" -nU 'pub fn roll_modifier_for[^\n]*\n\s*let _ = ctx;' "$SRC/relics/effects.rs"
 
           exit $status
 

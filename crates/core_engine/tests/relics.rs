@@ -73,7 +73,7 @@ fn test_relic_rarity_serde_roundtrip() {
 
 // ---- L'inventaire, vu du dehors (TASK-54) ----
 
-use core_engine::config::RunConfig;
+use core_engine::config::{RunConfig, effective_rerolls};
 use core_engine::cups::CupId;
 use core_engine::cups::definitions::cup;
 use core_engine::relics::{RelicInstance, RelicInventory, RelicState};
@@ -397,12 +397,41 @@ fn test_skeleton_effects_are_empty() {
     }
 }
 
+/// Reliques neutres sur `roll_modifier_for`.
+///
+/// **Contrairement à `EFFETS_ENCORE_NEUTRES`, cette liste ne rétrécira plus.**
+/// Les dix qui y figurent ne toucheront jamais au lancer : leur neutralité est
+/// définitive, pas datée. Elle ne se videra donc pas d'elle-même, et le test
+/// qu'elle nourrit ne se supprimera pas.
+const LANCER_NEUTRE: [RelicId; 10] = [
+    RelicId::CrackedDie,
+    RelicId::PolishedStone,
+    RelicId::TripletMaster,
+    RelicId::FullHouseArchitect,
+    RelicId::StellarAlignment,
+    RelicId::PyramidOfSixes,
+    RelicId::Pendulum,
+    RelicId::DivineYahtzee,
+    RelicId::ClayPiggyBank,
+    RelicId::DoubleMirror,
+];
+
 #[test]
 fn test_skeleton_roll_modifier_is_neutral() {
+    // **Ce test ne garde pas le Dé Fantôme, et ne l'a jamais gardé.** Les deux
+    // dés de `Decor::new()` affichent 1 — `Die::new` démarre à 1 — donc sa
+    // garde « aucun dé n'affiche 1 » y est fausse quoi qu'il arrive. Il serait
+    // resté vert sur une implémentation à l'envers. Sa couverture réelle vient
+    // de ses cinq tests propres, plus bas.
     let decor = Decor::new();
     let ctx = decor.ctx(RelicState::None);
-    for def in CATALOG {
-        let modificateur = roll_modifier_for(*def, &ctx);
+    assert_eq!(
+        LANCER_NEUTRE.len() + 2,
+        CATALOG.len(),
+        "seules l'Obsidienne et le Dé Fantôme touchent au lancer"
+    );
+    for def in LANCER_NEUTRE {
+        let modificateur = roll_modifier_for(def, &ctx);
         assert_eq!(modificateur.reroll_delta, 0, "{def:?}");
         assert!(modificateur.force_values.is_empty(), "{def:?}");
     }
@@ -1454,4 +1483,153 @@ fn test_double_mirror_silent_on_scoring_die() {
         1,
         "le montage ne teste rien si le Miroir est muet sur son propre hook"
     );
+}
+
+// ---- Les deux reliques du lancer (TASK-61) ----
+
+/// Dés dont l'identifiant **ne suit pas** la position.
+///
+/// `des` aligne `DieId(i)` sur l'indice `i`, si bien qu'aucun test bâti dessus
+/// ne distingue une recherche par identité d'un accès par indice — les deux
+/// rendent le même dé. Ce montage-ci les sépare, et c'est ce que le § 2.4
+/// demande de garder : le boss *La Meule* retire un dé en cours de manche, et
+/// tout indice capturé avant serait faux après.
+fn des_identifies(paires: &[(u32, u8)]) -> Vec<Die> {
+    paires
+        .iter()
+        .map(|(id, valeur)| {
+            let mut de = Die::new(DieId(*id), 6);
+            de.current_value = *valeur;
+            de
+        })
+        .collect()
+}
+
+/// Contexte de lancer : le décor par défaut, ses dés remplacés, à un rang donné.
+fn au_lancer(decor: &Decor, roll_index: u8) -> TriggerCtx<'_> {
+    TriggerCtx {
+        roll_index,
+        ..decor.ctx(RelicState::None)
+    }
+}
+
+fn decor_de_lancer(dice: Vec<Die>) -> Decor {
+    let mut decor = Decor::new();
+    decor.dice = dice;
+    decor
+}
+
+#[test]
+fn test_unstable_obsidian_reroll_delta() {
+    // **Le `-1` vient de `roll_modifier_for`, pas d'un littéral.** Écrit en
+    // dur, ce test mesurerait `apply_delta`, que `test_rerolls_underflow_
+    // saturates` couvre depuis l'Étape 1, et rien de cette relique.
+    //
+    // La saturation elle-même ne distingue pas debug de release : `apply_delta`
+    // est en `saturating_sub` depuis l'Étape 1, donc aucun `0 - 1` n'existe
+    // dans la chaîne. Le mode de compilation ne change rien ici.
+    let decor = decor_de_lancer(des(&[2, 3, 4, 5, 6]));
+    let delta = roll_modifier_for(RelicId::UnstableObsidian, &au_lancer(&decor, 0)).reroll_delta;
+    assert_eq!(delta, -1);
+
+    let config = RunConfig::from_cup(&cup(CupId::Abandoned));
+    assert_eq!(config.base_rerolls, 0, "le Gobelet Abandonné part de zéro");
+    assert_eq!(effective_rerolls(&config, 0, None, delta), 0);
+}
+
+#[test]
+fn test_obsidian_force_values_empty() {
+    // Inconditionnelle : le rang du lancer et les faces ne la concernent pas.
+    for valeurs in [vec![2, 3, 4, 5, 6], vec![1, 1, 1, 1, 1]] {
+        let decor = decor_de_lancer(des(&valeurs));
+        for roll_index in [0, 1, 7] {
+            let modificateur =
+                roll_modifier_for(RelicId::UnstableObsidian, &au_lancer(&decor, roll_index));
+            assert_eq!(
+                modificateur.reroll_delta, -1,
+                "{valeurs:?} au lancer {roll_index}"
+            );
+            assert!(modificateur.force_values.is_empty());
+        }
+    }
+}
+
+#[test]
+fn test_ghost_die_forces_six() {
+    let decor = decor_de_lancer(des(&[2, 3, 4, 5, 6]));
+    let modificateur = roll_modifier_for(RelicId::GhostDie, &au_lancer(&decor, 0));
+
+    assert_eq!(modificateur.force_values, vec![(DieId(0), 6)]);
+}
+
+#[test]
+fn test_ghost_die_forces_by_identity_not_by_position() {
+    // Le plus petit dé est en **dernière** position et porte `DieId(3)` ; le dé
+    // de tête porte `DieId(7)`. Un `dice[0]`, un `min` sur les indices ou un
+    // `position()` rendus tels quels donneraient une autre paire.
+    let decor = decor_de_lancer(des_identifies(&[(7, 5), (2, 6), (9, 4), (3, 2)]));
+    let modificateur = roll_modifier_for(RelicId::GhostDie, &au_lancer(&decor, 0));
+
+    assert_eq!(modificateur.force_values, vec![(DieId(3), 6)]);
+}
+
+#[test]
+fn test_ghost_die_silent_when_one_present() {
+    let decor = decor_de_lancer(des(&[1, 3, 4, 5, 6]));
+    let modificateur = roll_modifier_for(RelicId::GhostDie, &au_lancer(&decor, 0));
+
+    assert!(modificateur.force_values.is_empty());
+}
+
+#[test]
+fn test_ghost_die_silent_after_first_roll() {
+    // Zéro est le premier lancer. Une convention partant de un rendrait la
+    // relique silencieuse pour toujours.
+    let decor = decor_de_lancer(des(&[2, 3, 4, 5, 6]));
+    for roll_index in [1, 2] {
+        let modificateur = roll_modifier_for(RelicId::GhostDie, &au_lancer(&decor, roll_index));
+        assert!(modificateur.force_values.is_empty(), "lancer {roll_index}");
+    }
+}
+
+#[test]
+fn test_ghost_die_tie_breaks_on_lowest_die_id() {
+    // Deux 2, et le plus petit identifiant n'est **pas** le premier rencontré :
+    // départager sur l'ordre du balayage donnerait `DieId(8)`. Le gagnant,
+    // `DieId(5)`, est en position 1 : rang et identifiant ne coïncident pas
+    // davantage ici.
+    let decor = decor_de_lancer(des_identifies(&[(8, 2), (5, 2), (4, 4), (6, 5), (9, 6)]));
+    let modificateur = roll_modifier_for(RelicId::GhostDie, &au_lancer(&decor, 0));
+
+    assert_eq!(modificateur.force_values, vec![(DieId(5), 6)]);
+}
+
+#[test]
+fn test_ghost_die_forces_six_literally_not_the_max_face() {
+    // La cible est la valeur 6, littéralement. Sur un D8 (ADR-008), un dé forcé
+    // passe à 6 et non à 8 ; « la face maximale » serait une autre relique.
+    let mut dice = des(&[2, 3, 4, 5, 7]);
+    for de in &mut dice {
+        de.sides = 8;
+    }
+    let decor = decor_de_lancer(dice);
+    let modificateur = roll_modifier_for(RelicId::GhostDie, &au_lancer(&decor, 0));
+
+    assert_eq!(modificateur.force_values, vec![(DieId(0), 6)]);
+}
+
+#[test]
+fn test_ghost_die_has_no_reroll_delta() {
+    for (valeurs, roll_index) in [
+        (vec![2, 3, 4, 5, 6], 0),
+        (vec![1, 3, 4, 5, 6], 0),
+        (vec![2, 3, 4, 5, 6], 1),
+    ] {
+        let decor = decor_de_lancer(des(&valeurs));
+        let modificateur = roll_modifier_for(RelicId::GhostDie, &au_lancer(&decor, roll_index));
+        assert_eq!(
+            modificateur.reroll_delta, 0,
+            "{valeurs:?} au lancer {roll_index}"
+        );
+    }
 }

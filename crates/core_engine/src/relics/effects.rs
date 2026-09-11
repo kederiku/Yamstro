@@ -142,28 +142,25 @@ pub fn effects_for(def: RelicId, hook: Hook, ctx: &TriggerCtx) -> SmallVec<[Scor
     }
 }
 
-/// Ce qu'une relique change au lancer. **Squelette : toutes neutres.**
+/// Ce qu'une relique change au lancer. **Deux la changent, dix non.**
 ///
-/// `hook` n'entre pas dans la signature — le hook est `OnRoll` par
-/// construction — et `ctx` n'est lu par aucun bras tant que TASK-61 n'a pas
-/// implémenté les deux reliques concernées. La liaison `let _` est l'idiome du
-/// dépôt pour un paramètre délibérément inutilisé : plus étroite qu'un
-/// `#[allow]` de fonction, qui masquerait aussi les oublis du code à venir, et
-/// elle **cesse de compiler** dès que `ctx` sert — elle se signale au lieu de
-/// s'oublier.
+/// `hook` n'entre pas dans la signature : le hook est `OnRoll` par
+/// construction. Il n'existe donc pas de « neutralité sur les autres hooks » à
+/// éprouver ici — la question ne se pose qu'à `effects_for`, qui reçoit le
+/// hook. Un test qui prétendrait passer `OnScoringDie` à cette fonction n'a
+/// aucun argument par où le faire.
+///
+/// La valeur neutre est le `Default` dérivé, jamais un littéral réécrit à la
+/// main.
 pub fn roll_modifier_for(def: RelicId, ctx: &TriggerCtx) -> RollModifier {
-    let _ = ctx; // retiré par TASK-61
-
     match def {
-        // TASK-61
-        RelicId::UnstableObsidian => RollModifier::default(),
-        // TASK-61
-        RelicId::GhostDie => RollModifier::default(),
+        RelicId::UnstableObsidian => definitions::unstable_obsidian::roll_modifier(ctx),
+        RelicId::GhostDie => definitions::ghost_die::roll_modifier(ctx),
 
-        // Définitif : ces reliques ne touchent pas au lancer. Les nommer une à
-        // une n'ajouterait rien à l'exhaustivité — le compilateur échoue de la
-        // même façon sur une treizième variante — et diluerait le signal : ce
-        // qui est étiqueté est ce qui doit encore arriver.
+        // Définitif : ces dix ne toucheront jamais au lancer. Plus rien n'est
+        // étiqueté dans cette fonction, les deux reliques concernées étant
+        // livrées ; le groupe reste énuméré pour que l'ajout d'une treizième
+        // variante fasse échouer la compilation ici aussi.
         RelicId::CrackedDie
         | RelicId::PolishedStone
         | RelicId::TripletMaster

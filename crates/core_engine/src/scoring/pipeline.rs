@@ -144,8 +144,14 @@ fn scan_relics<O: FnMut(Hook, &TriggerCtx<'_>)>(
     }
 }
 
-/// Valeurs d'attente des deux champs de lancer. **À câbler par TASK-61**, qui
+/// Valeurs d'attente des deux champs de lancer. **À câbler par TASK-66**, qui
 /// retirera ces deux constantes et la garde de CI qui les épingle.
+///
+/// **Re-daté à TASK-61, qui ne pouvait pas le lever.** Ce ticket a implémenté
+/// les deux reliques du lancer, mais son périmètre s'arrête à `core_engine` :
+/// le point d'appel est `relic_reroll_malus`, dans `game_state`. Une dette
+/// datée d'un numéro qui ne la lèvera pas est pire qu'une dette non datée, elle
+/// se donne pour réglée.
 ///
 /// Le pipeline ne connaît ni le rang du lancer ni les relances restantes : ni
 /// l'un ni l'autre n'entre dans sa signature, et le rang n'est compté nulle part
@@ -155,7 +161,7 @@ fn scan_relics<O: FnMut(Hook, &TriggerCtx<'_>)>(
 /// zéro rendrait **vraie** la garde entière de *Dé Fantôme* — `roll_index == 0`
 /// — et ferait déclencher la relique à chaque main : une erreur de score
 /// silencieuse. À `u8::MAX`, la garde est fausse, et un câblage oublié donne une
-/// relique qui ne part jamais, ce qu'un test de TASK-61 verra. `rerolls_left`
+/// relique qui ne part jamais, ce que verra le ticket de câblage. `rerolls_left`
 /// vaut zéro pour la raison symétrique : *Tirelire en Terre* accumule cette
 /// valeur, et zéro n'accumule rien.
 const ROLL_INDEX_NON_CABLE: u8 = u8::MAX;
