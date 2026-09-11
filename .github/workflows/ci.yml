@@ -239,12 +239,19 @@ jobs:
           # prévu : TASK-42 avait posé l'exclusion sur un chemin exact
           # précisément pour que la migration ne puisse pas laisser deux
           # écrivains derrière elle, un par crate.
-          forbid  "critère 4  unique écrivain de Transform" -n '&mut Transform' crates/ -g '!crates/ui_and_juice/src/animation.rs'
+          # **Ré-ancrée sur l'acte à TASK-64** : un paramètre de système, donc
+          # une requête. Le motif nu mordait la note qui explique pourquoi une
+          # carte de relique, étant un nœud UI, ne porte pas de `Transform` et
+          # échappe donc au ressort. Vingt-septième fois dans ce projet.
+          forbid  "critère 4  unique écrivain de Transform" -n 'Query<[^>]*&mut Transform' crates/ -g '!crates/ui_and_juice/src/animation.rs'
           require "critère 4  l'animation écrit le Transform" -n 'Query<\(Entity, &mut Transform, &mut PunchScale\)>' crates/ui_and_juice/src/animation.rs
           # Une migration est un déplacement, pas une duplication : deux
           # `PunchScale` homonymes dans deux crates compilent parfaitement et
           # donnent deux systèmes écrivant des `Transform`.
-          forbid  "critère 4  PunchScale resté dans game_state" -n 'PunchScale' crates/game_state
+          # **Ré-ancrée sur l'acte à TASK-64**, même raison : la note d'une
+          # carte doit pouvoir nommer le ressort dont elle explique qu'il ne
+          # l'atteint pas. Vingt-huitième fois.
+          forbid  "critère 4  PunchScale resté dans game_state" -n 'PunchScale::|&mut PunchScale|<PunchScale>|use [^;]*PunchScale|struct PunchScale' crates/game_state
           forbid  "critère 4  overlay transformé en état" -n 'AppState::Settings|RunPhase::Settings|SettingsState' crates/game_state/src
 
           # ---- Étape 3 : budget WebAssembly (TASK-40) ----
@@ -727,6 +734,39 @@ jobs:
           # Aucune exception ne doit être ouverte dans l'invariant : une liste
           # blanche le vide de son sens et rend l'Étape 9 inéquilibrable.
           forbid  "critère 5  exception nominative dans l'invariant" -nU 'fn test_rarity_budget_invariant[^}]*def != RelicId::' "$TESTS"
+
+
+          # ---- Étape 5 : cartes de relique (TASK-64) ----
+          CARTES=crates/game_state/src/relics/slots.rs
+          # C37, ancré sur l'**acte** : un champ qui *stocke* des entités comme
+          # inventaire. Le motif nu remonte sept lignes aujourd'hui — cinq
+          # helpers de test rendant un `Vec<Entity>`, et deux **noms de tests**
+          # contenant `relic_slots`, dont un écrit à TASK-09.
+          forbid  "critère 5  inventaire stocké en entités" -n '\brelic_slots\s*[:=]|slots\s*:\s*Vec<Entity>|inventory\s*:\s*Vec<Entity>' crates/
+          # Aucune donnée de jeu recopiée dans une carte. La règle est déjà
+          # tenue par le compilateur — aucun des trois types ne dérive
+          # `Component` — mais rien n'empêche un type local de les recopier.
+          forbid  "critère 5  donnée de jeu dans une carte" -n '(spawn|insert)\(.*Relic(Instance|State|Id)\b' "$CARTES"
+          forbid  "critère 5  repli d'accès sur les cartes" -n 'ParamSet|Without<DieView>|Without<RelicSlotUI>' "$CARTES"
+          forbid  "critère 5  littéral de capacité dans les cartes" -n 'MAX_RELICS|max_capacity|capacity\s*=\s*[0-9]' "$CARTES"
+          # `unwrap` nulle part, et `expect` nulle part **avant** le module de
+          # test : le motif s'ancre sur la position relative au marqueur, seule
+          # façon d'exprimer « hors des tests » avec cet outil.
+          forbid  "critère 5  unwrap dans les cartes"       -n 'unwrap\(\)' "$CARTES"
+          forbid  "critère 5  expect en production dans les cartes" -U '(?s)\.expect\(.*#\[cfg\(test\)\]' "$CARTES"
+          # Ancrée sur la **condition**, jamais sur le nom de méthode :
+          # `Option::and` et `Option::or_else` sont légitimes et employés.
+          # Seul `SystemCondition::and` est déprécié en 0.19.1, au profit de
+          # `and_then` et `and_eager`.
+          forbid  "critère 5  combinateur de condition déprécié" -n 'run_if\(.*\.and\(' crates/game_state/src crates/ui_and_juice/src
+          forbid  "critère 5  API retirée en 0.19"          -n 'on_replace|RenderGraph|ViewNode|\brun_in\(' crates/
+          # Le placement écrit `Node`, jamais `Transform` : les deux types sont
+          # disjoints, donc l'unique écrivain de `Transform` reste celui de
+          # l'Étape 4. La carte n'a d'ailleurs pas de `Transform` du tout.
+          require "critère 5  le placement écrit le nœud"   -n 'Query<\(&RelicSlotUI, &mut Node\)>' "$CARTES"
+          require "critère 5  la carte naît nœud UI et rien de plus" -n 'commands.spawn\(\(RelicSlotUI\(slot\), Node::default\(\)\)\);' "$CARTES"
+          require "critère 5  résolution par identifiant"   -n 'pub fn slot_of_uid\(inventory: &RelicInventory, uid: u32\) -> Option<u8>' "$CARTES"
+          require "critère 5  systèmes de cartes conditionnés" -n 'in_state\(AppState::InRun\).and_then\(resource_exists::<RelicInventory>\)' "$CARTES"
 
           exit $status
 
