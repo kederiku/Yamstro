@@ -522,12 +522,12 @@ jobs:
           # Ancré sur les deux types, pas sur le fichier : `Hook` porte
           # légitimement serde, et la commande du corpus l'ignorait.
           forbid  "critère 5  contexte ou modificateur sérialisés" -nU 'serde::(Serialize|Deserialize)[^\n]*\n(#\[[^\n]*\n)*pub struct (TriggerCtx|RollModifier)' crates/core_engine/src/scoring/trigger.rs
-          # **Dette datée, à lever par TASK-66** — re-datée à TASK-61, dont le
+          # **Dette datée, à lever par TASK-67** — re-datée à TASK-61, dont le
           # périmètre s'arrête à `core_engine` alors que le point d'appel vit
           # dans `game_state`. Cette garde nomme le ticket qui doit la retirer,
           # ce qui distingue une dette inscrite d'une dette oubliée ; encore
           # faut-il que le numéro soit celui qui la lèvera vraiment.
-          require "critère 5  valeurs d'attente du lancer, à câbler par TASK-66" -n 'const ROLL_INDEX_NON_CABLE: u8 = u8::MAX;' crates/core_engine/src/scoring/pipeline.rs
+          require "critère 5  valeurs d'attente du lancer, à câbler par TASK-67" -n 'const ROLL_INDEX_NON_CABLE: u8 = u8::MAX;' crates/core_engine/src/scoring/pipeline.rs
 
           # ---- Étape 5 : squelette des comportements (TASK-56) ----
           # **Aucun bras attrape-tout au niveau de la relique.** Ancré sur
@@ -787,6 +787,24 @@ jobs:
           require "critère 5  prise exposée comme action"  -n 'pub fn begin_hold\(state: &mut DragState, slot: u8\)' "$DRAG"
           require "critère 5  dépose exposée comme action" -n 'pub fn drop_on\(state: &mut DragState, inventory: &mut RelicInventory, slot: u8\)' "$DRAG"
           require "critère 5  glissement conditionné"      -n 'in_state\(AppState::InRun\).and_then\(resource_exists::<RelicInventory>\)' "$DRAG"
+
+
+          # ---- Étape 5 : les six invariants que l'audit a trouvés non gardés (TASK-66) ----
+          # Ancrés sur l'**acte** quand le nom doit rester prononçable : huit des
+          # vingt-deux commandes du § 2 de TASK-66 mordent la prose qui explique
+          # la règle, ou la déclaration légitime. Celles-ci ne le font pas.
+          forbid  "critère 5  sérialisation par objet-trait" -n '#\[typetag|typetag::|^\s*typetag\s*=' crates/ --glob '**/Cargo.toml' --glob '**/*.rs'
+          forbid  "critère 5  état de relique en table de chaînes" -n 'state_data\s*[:=]' crates/
+          # Le mot nu, mais avec ses frontières : elles excluent déjà
+          # `RelicInventory`, `ConsumableInventory` et `RelicSlotUI`, aucune
+          # frontière n'existant entre `t` et `U`.
+          forbid  "critère 7  ressource Inventory nue"    -n '\bInventory\b' crates/
+          forbid  "critère 7  registre ou composant porteur de relique" -n '\bRelicRegistry\b|\bRelicComponent\b|\bRelicSlot\b' crates/
+          # L'attribut, pas son nom : les notes de reversion l'écrivent en prose.
+          forbid  "critère 1  lint éteint par complaisance" -n '#\[allow\(unused_variables\)\]|#\[allow\(dead_code\)\]' crates/
+          # Hors du fichier de verrouillage : `bevy_scene` y figure comme
+          # dépendance transitive de Bevy, ce qui n'est pas notre code.
+          forbid  "critère 3  scène Bevy ou texte cosmic" -n 'cosmic-text|cosmic_text|bevy_scene|WgpuSettingsPriority::Compatibility' crates/ --glob '!Cargo.lock'
 
           exit $status
 

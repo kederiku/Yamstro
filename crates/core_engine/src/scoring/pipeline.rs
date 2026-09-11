@@ -144,10 +144,13 @@ fn scan_relics<O: FnMut(Hook, &TriggerCtx<'_>)>(
     }
 }
 
-/// Valeurs d'attente des deux champs de lancer. **À câbler par TASK-66**, qui
+/// Valeurs d'attente des deux champs de lancer. **À câbler par TASK-67**, qui
 /// retirera ces deux constantes et la garde de CI qui les épingle.
 ///
-/// **Re-daté à TASK-61, qui ne pouvait pas le lever.** Ce ticket a implémenté
+/// **Re-daté deux fois : à TASK-61, qui ne pouvait pas le lever, puis à
+/// l'audit d'Étape 5.** TASK-66 n'y touche pas non plus, et le recâblage de
+/// `relic_reroll_malus` est TASK-67 : deux numéros pour un seul travail sont
+/// ce qui a produit cette confusion. Ce ticket a implémenté
 /// les deux reliques du lancer, mais son périmètre s'arrête à `core_engine` :
 /// le point d'appel est `relic_reroll_malus`, dans `game_state`. Une dette
 /// datée d'un numéro qui ne la lèvera pas est pire qu'une dette non datée, elle
@@ -1076,10 +1079,16 @@ mod tests {
     }
 
     #[test]
-    fn test_relic_reorder_changes_score() {
-        // Test central de l'étape : réordonner l'inventaire change le score.
+    fn test_fixture_order_changes_score() {
+        // Test central de l'Étape 2 : réordonner l'inventaire change le score.
         // C'est la preuve mécanique d'ADR-005, et le seul garde-fou contre un
         // regroupement des effets par type d'action.
+        //
+        // **Renommé à l'audit d'Étape 5.** Il portait le nom imposé du § 3 de
+        // TASK-59, qui désigne le test d'intégration sur les reliques de
+        // production — celui-ci travaille sur les fixtures. Deux homonymes dans
+        // deux cibles : `cargo test <nom>` n'en désignait aucun, et l'un des
+        // deux pouvait pourrir sans que personne le voie.
         let (dice, hand) = main_pleine();
         let levels = HandLevels::default();
         let blind = blind_nu();
