@@ -26,6 +26,17 @@ use crate::scoring::ScoreEffect;
 /// (Étapes 5 et 6). Les câbler ici produirait des effets fantômes dans le
 /// journal et casserait l'exemple résolu à neuf pas.
 ///
+/// **`OnRoundEnd` est une fin de *blind*, pas une fin de main.** La distinction
+/// n'est pas rhétorique et elle ne se lit pas dans le code : `RunPhase::RoundEnd`
+/// est entrée après **chaque** main — c'est là que `resolve_round_outcome`
+/// arbitre entre main suivante, boutique et défaite —, alors que ce hook ne se
+/// déclenche qu'une fois la blind battue. Confondre les deux quadruple la
+/// cadence : *Tirelire en Terre* encaisserait quatre fois et son plafond
+/// deviendrait inopérant, et une relique périssable perdrait ses charges quatre
+/// fois plus vite. Le vocabulaire du corpus dit « manche » pour les deux ;
+/// c'est ce hook qui tranche, et les systèmes de `game_state::relics` portent
+/// des noms qui disent lequel des deux ils servent.
+///
 /// `OnScoringDie` nomme un **moment**. Ce n'est pas le type dont il contient
 /// le nom, proscrit par le glossaire parce qu'il entrerait en collision avec un
 /// composant du moteur de rendu ; la garde du CI est ancrée aux limites de mot

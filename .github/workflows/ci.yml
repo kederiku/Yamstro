@@ -264,7 +264,11 @@ jobs:
           # `//!` qui explique que ces combinateurs n'existent plus. Vingt-
           # deuxième et vingt-troisième fois dans ce projet.
           forbid  "critère 4  dépendance de tweening ou audio" -n '^\s*[a-z0-9_-]*(tween|kira|rodio|audio|vorbis|symphonia|seedling)[a-z0-9_-]*\s*=|"(bevy_audio|vorbis)"' --glob '**/Cargo.toml' crates/
-          forbid  "critère 4  dépendance inverse vers le juice" -n 'ui_and_juice' crates/game_state crates/core_engine
+          # Ancrée sur l'**acte** — la ligne de manifeste, l'import, le chemin —
+          # et non sur le nom : la note qui explique pourquoi ce site d'appel
+          # n'ordonne rien côté juice doit pouvoir le nommer. Vingt-quatrième
+          # fois dans ce projet, et la première où c'est ma propre prose.
+          forbid  "critère 4  dépendance inverse vers le juice" -n '^\s*ui_and_juice\s*=|use ui_and_juice|ui_and_juice::' crates/game_state crates/core_engine
 
           # ---- Étape 4 : compteurs interpolés (TASK-44) ----
           # La dérogation `f64` est **bornée à l'affichage** (ADR-003) : le
@@ -657,6 +661,34 @@ jobs:
           # Le squelette a servi : `roll_modifier_for` lit désormais son
           # contexte, et la liaison d'attente n'a plus lieu d'être.
           forbid  "critère 5  liaison d'attente restée dans roll_modifier_for" -nU 'pub fn roll_modifier_for[^\n]*\n\s*let _ = ctx;' "$SRC/relics/effects.rs"
+
+
+          # ---- Étape 5 : or et avancement d'état (TASK-62) ----
+          TIRELIRE=$SRC/relics/definitions/clay_piggy_bank.rs
+          # Le score reste Chips x Mult : l'or a sa propre fonction pour ne pas
+          # contaminer l'effet, le palier et le dépileur de l'Étape 4.
+          require "critère 5  trois actions de score, pas quatre" -nU 'pub enum ScoreAction \{\n    AddChips\(u64\),\n    AddMult\(i64\),\n    MultiplyMult\(u32\),\n\}' "$SRC"
+          forbid  "critère 5  action de score pour l'or"  -n 'AddGold|MultiplyScore|ScoreAction::Gold' crates/
+          # Ancrée sur l'élargissement, pas sur le mot : le compteur est un u32
+          # et les relances un u8.
+          forbid  "critère 5  élargissement tronquant de la tirelire" -n ' as u32| as u8| as i64| as u64' "$TIRELIRE"
+          forbid  "critère 5  aléa ou flottant dans l'or" -n '\brng\b|\bRng\b|random|HashMap|\bf32\b|\bf64\b' "$TIRELIRE" "$SRC/economy"
+          require "critère 5  plafond de la tirelire à cinq" -n 'const GOLD_CAP: u32 = 5;' "$TIRELIRE"
+          # La remise à zéro garde la variante : `None` ferait diverger
+          # l'aller-retour serde d'une blind à l'autre.
+          forbid  "critère 5  tirelire remise à None"      -n 'Hook::OnRoundEnd => RelicState::None' "$TIRELIRE"
+          # `advance_state` est le seul producteur de la valeur écrite, et le
+          # pipeline ne l'appelle jamais : sa garde est déjà posée au critère 7.
+          require "critère 5  l'état n'est écrit que par advance_state" -n 'inst\.state = advance_state\(' crates/game_state/src/relics/mod.rs
+          forbid  "critère 5  état de relique écrit ailleurs qu'ici" -n '\.state = ' crates/game_state/src crates/ui_and_juice/src -g '!**/relics/mod.rs'
+          # Le corps du commit de TASK-50 reste hors d'atteinte.
+          forbid  "critère 5  avancement d'état dans la file de l'Étape 4" -n 'advance_state|round_end_gold' crates/ui_and_juice/src
+          # L'or entre par un seul point, et en saturation.
+          require "critère 5  seul point d'écriture de l'or" -n 'session\.gold = session\.gold\.saturating_add' crates/game_state/src/relics/mod.rs
+          forbid  "critère 5  or écrit ailleurs"            -n '\.gold\s*(=|\+=|-=)' crates/game_state/src crates/ui_and_juice/src -g '!**/relics/mod.rs' -g '!**/resources.rs' -g '!**/fixtures.rs'
+          # Les deux sites, qui sont la décision centrale du ticket.
+          require "critère 5  avancement à la sortie du scoring" -n 'OnExit\(RunPhase::Scoring\), advance_relic_states_on_hand' crates/game_state/src/relics/mod.rs
+          require "critère 5  or encaissé à la fin de la blind" -n 'OnEnter\(RunPhase::Shop\), collect_relic_gold_on_blind_end' crates/game_state/src/relics/mod.rs
 
           exit $status
 

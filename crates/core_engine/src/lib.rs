@@ -4,6 +4,7 @@ pub mod blind;
 pub mod config;
 pub mod cups;
 pub mod dice;
+pub mod economy;
 pub mod evaluator;
 pub mod hands;
 pub mod pool;

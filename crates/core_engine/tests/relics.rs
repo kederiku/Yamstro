@@ -278,6 +278,7 @@ fn test_full_inventory_add_returns_none_and_burns_no_uid() {
 
 use core_engine::blind::{BlindContext, BlindDefinition};
 use core_engine::dice::{Die, DieId};
+use core_engine::economy::round_end_gold;
 use core_engine::evaluator::HandMatch;
 use core_engine::hands::{HandGrid, HandLevels, YahtzeeHand};
 use core_engine::relics::effects::{advance_state, effects_for, gold_for, roll_modifier_for};
@@ -376,11 +377,13 @@ impl Decor {
 /// **Cette liste est le travail restant, encodée dans un test.** Chaque ticket
 /// qui implémente une relique doit l'y retirer ; l'oublier fait échouer
 /// `test_skeleton_effects_are_empty` bruyamment, et c'est le but — il est alors
-/// impossible d'implémenter une relique sans regarder cette liste en face. À
-/// TASK-62 elle sera vide et le test se supprimera de lui-même.
+/// impossible d'implémenter une relique sans regarder cette liste en face.
 ///
-/// `ClayPiggyBank` et `GhostDie` y resteront jusqu'au bout : leur neutralité sur
-/// ce hook est **définitive**, elles agissent ailleurs.
+/// **Sa part résiduelle est épuisée depuis TASK-62.** Ce qui reste est
+/// permanent : `ClayPiggyBank` et `GhostDie` sont définitivement muettes sur ce
+/// hook, elles agissent ailleurs. Elle ne se videra donc pas et le test ne se
+/// supprimera pas — la promesse inverse, écrite à TASK-56, contredisait déjà la
+/// phrase suivante.
 const EFFETS_ENCORE_NEUTRES: [RelicId; 2] = [RelicId::ClayPiggyBank, RelicId::GhostDie];
 
 #[test]
@@ -439,23 +442,51 @@ fn test_skeleton_roll_modifier_is_neutral() {
 
 #[test]
 fn test_skeleton_gold_is_zero() {
+    // **Ne garde plus la Tirelire, et ne l'a jamais gardée.** Le décor pose
+    // `RelicState::None`, sur lequel elle rend zéro de toute façon : ce test
+    // serait resté vert sur un plafond faux. Sa couverture propre est plus bas.
     let decor = Decor::new();
     let ctx = decor.ctx(RelicState::None);
-    for def in CATALOG {
-        assert_eq!(gold_for(*def, &ctx), 0, "{def:?}");
+    for def in SANS_OR_NI_MEMOIRE {
+        assert_eq!(gold_for(def, &ctx), 0, "{def:?}");
     }
 }
 
+/// Reliques sans bourse et sans mémoire : ni or, ni avancement d'état.
+///
+/// **Une seule liste pour deux propriétés distinctes**, parce qu'elles portent
+/// aujourd'hui sur exactement les mêmes onze reliques. Deux noms pour un même
+/// contenu n'ajouteraient rien ; si une relique future rapportait de l'or sans
+/// garder d'état, ou l'inverse, c'est ici qu'il faudrait scinder.
+///
+/// **Cette liste ne rétrécira plus**, comme `LANCER_NEUTRE` et contrairement à
+/// `EFFETS_ENCORE_NEUTRES`.
+const SANS_OR_NI_MEMOIRE: [RelicId; 11] = [
+    RelicId::CrackedDie,
+    RelicId::PolishedStone,
+    RelicId::TripletMaster,
+    RelicId::FullHouseArchitect,
+    RelicId::StellarAlignment,
+    RelicId::PyramidOfSixes,
+    RelicId::Pendulum,
+    RelicId::UnstableObsidian,
+    RelicId::DivineYahtzee,
+    RelicId::GhostDie,
+    RelicId::DoubleMirror,
+];
+
 #[test]
-fn test_skeleton_advance_state_is_identity() {
-    // Douze définitions x quatre déclencheurs x quatre états : 192 cas.
+fn test_advance_state_touches_no_other_relic() {
+    // Onze définitions x quatre déclencheurs x quatre états : 176 cas. La
+    // douzième, la Tirelire, a ses propres tests : elle est le seul cas où
+    // l'identité serait un défaut.
     let decor = Decor::new();
-    for def in CATALOG {
+    for def in SANS_OR_NI_MEMOIRE {
         for hook in HOOKS {
             for etat in ETATS {
                 let ctx = decor.ctx(etat);
                 assert_eq!(
-                    advance_state(*def, hook, &ctx, etat),
+                    advance_state(def, hook, &ctx, etat),
                     etat,
                     "{def:?} fait déjà avancer son état sur {hook:?}"
                 );
@@ -1632,4 +1663,216 @@ fn test_ghost_die_has_no_reroll_delta() {
             "{valeurs:?} au lancer {roll_index}"
         );
     }
+}
+
+// ---- *Tirelire en Terre*, l'or et l'avancement d'état (TASK-62) ----
+
+/// Enchaîne les mains d'une blind : un `advance_state(OnHandScored)` par main,
+/// avec les relances non utilisées de chacune.
+fn manche(decor: &Decor, depart: RelicState, relances: &[u8]) -> RelicState {
+    relances.iter().fold(depart, |etat, restantes| {
+        let ctx = TriggerCtx {
+            rerolls_left: *restantes,
+            ..decor.ctx(etat)
+        };
+        advance_state(RelicId::ClayPiggyBank, Hook::OnHandScored, &ctx, etat)
+    })
+}
+
+fn or_a(decor: &Decor, etat: RelicState) -> u32 {
+    gold_for(RelicId::ClayPiggyBank, &decor.ctx(etat))
+}
+
+#[test]
+fn test_clay_piggy_bank_on_round_end() {
+    let decor = Decor::new();
+
+    // Quatre mains, 2 + 1 + 0 + 2 relances non utilisées.
+    let apres_manche = manche(&decor, RelicState::None, &[2, 1, 0, 2]);
+    assert_eq!(apres_manche, RelicState::Counter(5));
+    assert_eq!(or_a(&decor, apres_manche), 5);
+
+    let ctx = decor.ctx(apres_manche);
+    assert_eq!(
+        advance_state(RelicId::ClayPiggyBank, Hook::OnRoundEnd, &ctx, apres_manche),
+        RelicState::Counter(0),
+        "jamais RelicState::None : la variante reste stable d'une blind à l'autre"
+    );
+
+    // Second cas : le plafond mord. Sept cumulés rendent cinq.
+    let au_dessus = manche(&decor, RelicState::None, &[3, 2, 2]);
+    assert_eq!(au_dessus, RelicState::Counter(7));
+    assert_eq!(or_a(&decor, au_dessus), 5);
+}
+
+#[test]
+fn test_piggy_cap_boundary() {
+    // Le plafond mord à partir de six et ne rogne rien en deçà.
+    let decor = Decor::new();
+    for (compteur, attendu) in [(4, 4), (5, 5), (6, 5)] {
+        assert_eq!(or_a(&decor, RelicState::Counter(compteur)), attendu);
+    }
+}
+
+#[test]
+fn test_piggy_counter_starts_from_none() {
+    // `add_relic` rend `None` : le premier avancement doit le lire comme zéro,
+    // pas paniquer et pas repartir d'une valeur arbitraire.
+    let decor = Decor::new();
+    assert_eq!(
+        manche(&decor, RelicState::None, &[3]),
+        RelicState::Counter(3)
+    );
+}
+
+#[test]
+fn test_piggy_resets_between_rounds() {
+    let decor = Decor::new();
+    let premiere = manche(&decor, RelicState::None, &[2, 1, 0, 2]);
+    assert_eq!(or_a(&decor, premiere), 5);
+
+    let ctx = decor.ctx(premiere);
+    let remis = advance_state(RelicId::ClayPiggyBank, Hook::OnRoundEnd, &ctx, premiere);
+    let seconde = manche(&decor, remis, &[1, 1, 1, 1]);
+
+    assert_eq!(seconde, RelicState::Counter(4), "rien ne franchit la blind");
+    assert_eq!(or_a(&decor, seconde), 4);
+}
+
+#[test]
+fn test_piggy_is_silent_on_the_two_other_hooks() {
+    // Elle n'a que deux déclencheurs. Sur les deux autres, l'état passe tel
+    // quel : sans ce test, un bras attrape-tout qui remettrait à zéro sur
+    // `OnRoll` viderait la tirelire à chaque relance.
+    let decor = Decor::new();
+    for hook in [Hook::OnRoll, Hook::OnScoringDie] {
+        for etat in ETATS {
+            let ctx = decor.ctx(etat);
+            assert_eq!(
+                advance_state(RelicId::ClayPiggyBank, hook, &ctx, etat),
+                etat,
+                "{hook:?} sur {etat:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_piggy_advance_reads_the_state_argument_not_the_context() {
+    // **Le contrat du § 2.3 : l'argument `state` fait foi.** Les deux sont
+    // censés désigner la même chose, donc seul un contexte délibérément
+    // désaccordé peut dire lequel est lu.
+    let decor = Decor::new();
+    let ctx = TriggerCtx {
+        rerolls_left: 1,
+        ..decor.ctx(RelicState::Counter(100))
+    };
+    assert_eq!(
+        advance_state(
+            RelicId::ClayPiggyBank,
+            Hook::OnHandScored,
+            &ctx,
+            RelicState::Counter(2)
+        ),
+        RelicState::Counter(3)
+    );
+}
+
+#[test]
+fn test_gold_is_zero_for_other_relics() {
+    let decor = Decor::new();
+    for def in SANS_OR_NI_MEMOIRE {
+        for etat in ETATS {
+            assert_eq!(gold_for(def, &decor.ctx(etat)), 0, "{def:?} sur {etat:?}");
+        }
+    }
+}
+
+#[test]
+fn test_effects_for_is_pure_and_piggy_stays_silent() {
+    // **L'assertion « `ctx.state` inchangé » du ticket n'est pas exprimable** :
+    // `effects_for` reçoit un `&TriggerCtx` et `state` est un champ `Copy` lu
+    // par valeur. La muter ne compile pas, donc un test qui l'affirme ne peut
+    // pas échouer. Ce qui se mesure, c'est la pureté — deux appels identiques
+    // rendent deux listes égales — et le silence définitif de la Tirelire.
+    let decor = Decor::new();
+    for hook in HOOKS {
+        for etat in ETATS {
+            let ctx = decor.ctx(etat);
+            assert!(
+                effects_for(RelicId::ClayPiggyBank, hook, &ctx).is_empty(),
+                "{hook:?} sur {etat:?}"
+            );
+            for def in CATALOG {
+                assert_eq!(
+                    effects_for(*def, hook, &ctx),
+                    effects_for(*def, hook, &ctx),
+                    "{def:?} n'est pas pure sur {hook:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_round_end_gold_sums_inventory() {
+    let decor = Decor::new();
+    let mut inventaire = inventaire_ordonne(&[
+        RelicId::ClayPiggyBank,
+        RelicId::TripletMaster,
+        RelicId::ClayPiggyBank,
+    ]);
+    inventaire.slots[0]
+        .as_mut()
+        .expect("relique au slot 0")
+        .state = RelicState::Counter(5);
+    inventaire.slots[1]
+        .as_mut()
+        .expect("relique au slot 1")
+        .state = RelicState::Disabled;
+    inventaire.slots[2]
+        .as_mut()
+        .expect("relique au slot 2")
+        .state = RelicState::Counter(3);
+
+    assert_eq!(
+        round_end_gold(&inventaire, &decor.ctx(RelicState::None)),
+        8,
+        "le slot éteint et les slots vides ne versent rien"
+    );
+}
+
+#[test]
+fn test_round_end_gold_reads_each_slot_own_state() {
+    // Le contexte de base porte `Counter(5)` ; si la somme le lisait au lieu
+    // de l'état de chaque slot, deux tirelires vides rendraient dix.
+    let decor = Decor::new();
+    let inventaire = inventaire_ordonne(&[RelicId::ClayPiggyBank, RelicId::ClayPiggyBank]);
+
+    assert_eq!(
+        round_end_gold(&inventaire, &decor.ctx(RelicState::Counter(5))),
+        0
+    );
+}
+
+#[test]
+fn test_round_end_gold_saturates() {
+    // Cinq tirelires pleines ne débordent pas un u32, mais la somme est écrite
+    // en saturation : ce test fige le choix plutôt que de le laisser au hasard
+    // de la capacité d'inventaire.
+    let decor = Decor::new();
+    let mut inventaire = RelicInventory::new(5);
+    for _ in 0..5 {
+        inventaire
+            .add_relic(RelicId::ClayPiggyBank)
+            .expect("slot libre");
+    }
+    for slot in inventaire.slots.iter_mut().flatten() {
+        slot.state = RelicState::Counter(u32::MAX);
+    }
+
+    assert_eq!(
+        round_end_gold(&inventaire, &decor.ctx(RelicState::None)),
+        25
+    );
 }

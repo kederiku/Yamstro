@@ -180,11 +180,8 @@ pub fn roll_modifier_for(def: RelicId, ctx: &TriggerCtx) -> RollModifier {
 
 /// L'or qu'une relique rapporte. **Squelette : toutes à zéro.**
 pub fn gold_for(def: RelicId, ctx: &TriggerCtx) -> u32 {
-    let _ = ctx; // retiré par TASK-62
-
     match def {
-        // TASK-62
-        RelicId::ClayPiggyBank => 0,
+        RelicId::ClayPiggyBank => definitions::clay_piggy_bank::gold(ctx),
 
         // Définitif : ces reliques ne rapportent pas d'or.
         RelicId::CrackedDie
@@ -199,8 +196,15 @@ pub fn gold_for(def: RelicId, ctx: &TriggerCtx) -> u32 {
         | RelicId::GhostDie
         | RelicId::DoubleMirror => 0,
 
+        // **Or indépendant de l'état, et c'est tout son objet.** Toute relique
+        // de production lit son propre `RelicState` pour calculer son or, si
+        // bien qu'éteinte elle rend zéro d'elle-même : le filtre sur `Disabled`
+        // de `round_end_gold` et le bras de la relique concourent alors au même
+        // silence, et le filtre n'est gardé par rien. Cette fixture les sépare.
         #[cfg(test)]
-        RelicId::SixFire | RelicId::MagicPair | RelicId::BrokenGlass => 0,
+        RelicId::BrokenGlass => 3,
+        #[cfg(test)]
+        RelicId::SixFire | RelicId::MagicPair => 0,
     }
 }
 
@@ -214,11 +218,8 @@ pub fn gold_for(def: RelicId, ctx: &TriggerCtx) -> u32 {
 /// normatif et reste minimal, ni depuis le pipeline : l'Étape 5 lui donnera deux
 /// systèmes propres, ordonnés autour du commit sans le modifier (TASK-62).
 pub fn advance_state(def: RelicId, hook: Hook, ctx: &TriggerCtx, state: RelicState) -> RelicState {
-    let _ = (hook, ctx); // retiré par TASK-62
-
     match def {
-        // TASK-62
-        RelicId::ClayPiggyBank => state,
+        RelicId::ClayPiggyBank => definitions::clay_piggy_bank::advance(hook, ctx, state),
 
         // Définitif : ces reliques sont sans mémoire.
         RelicId::CrackedDie
