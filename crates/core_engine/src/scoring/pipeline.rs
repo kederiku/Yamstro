@@ -406,19 +406,19 @@ mod tests {
     }
 
     fn inventaire(slots: &[Option<RelicId>]) -> RelicInventory {
-        RelicInventory {
-            slots: slots
-                .iter()
-                .enumerate()
-                .map(|(index, def)| {
-                    def.map(|def| RelicInstance {
-                        uid: index as u32 + 1,
-                        def,
-                        state: RelicState::None,
-                    })
+        let mut inventaire = RelicInventory::new(0);
+        inventaire.slots = slots
+            .iter()
+            .enumerate()
+            .map(|(index, def)| {
+                def.map(|def| RelicInstance {
+                    uid: index as u32 + 1,
+                    def,
+                    state: RelicState::None,
                 })
-                .collect(),
-        }
+            })
+            .collect();
+        inventaire
     }
 
     /// Effets de dé et de relique seulement : les deux effets de base de
@@ -835,7 +835,8 @@ mod tests {
         let (dice, hand) = main_pleine();
 
         for slots in [vec![], vec![None, None]] {
-            let relics = RelicInventory { slots };
+            let mut relics = RelicInventory::new(0);
+            relics.slots = slots;
 
             let effects = pass_a(&hand, &dice, &HandLevels::default(), &blind_nu(), &relics);
 

@@ -298,9 +298,7 @@ mod tests {
 
     fn app_avec_ressources(id: CupId) -> App {
         let session = session(id);
-        let inventaire = RelicInventory {
-            slots: vec![None; usize::from(session.config.relic_capacity)],
-        };
+        let inventaire = RelicInventory::new(session.config.relic_capacity);
 
         let mut app = App::new();
         app.add_plugins((

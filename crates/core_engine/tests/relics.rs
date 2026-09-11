@@ -70,3 +70,206 @@ fn test_relic_rarity_serde_roundtrip() {
         assert_eq!(rarete, decode);
     }
 }
+
+// ---- L'inventaire, vu du dehors (TASK-54) ----
+
+use core_engine::config::RunConfig;
+use core_engine::cups::CupId;
+use core_engine::cups::definitions::cup;
+use core_engine::relics::{RelicInstance, RelicInventory, RelicState};
+
+fn config(id: CupId) -> RunConfig {
+    RunConfig::from_cup(&cup(id))
+}
+
+/// Inventaire rempli de reliques distinctes, dans l'ordre du catalogue.
+fn rempli(capacity: u8) -> RelicInventory {
+    let mut inventaire = RelicInventory::new(capacity);
+    for def in CATALOG.iter().take(capacity as usize) {
+        inventaire.add_relic(*def).expect("slot libre");
+    }
+    inventaire
+}
+
+fn defs(inventaire: &RelicInventory) -> Vec<Option<RelicId>> {
+    inventaire
+        .slots
+        .iter()
+        .map(|slot| slot.map(|relique| relique.def))
+        .collect()
+}
+
+#[test]
+fn test_relic_inventory_serde_roundtrip() {
+    // **Les quatre variantes de `RelicState`**, plus un slot vide et un
+    // `next_uid` non nul. C'est ce test qui interdit mécaniquement le retour
+    // d'un objet-trait boxé ou d'une table associative à clés textuelles : ni
+    // l'un ni l'autre ne survit à un aller-retour serde sans bibliothèque
+    // supplémentaire, et la sauvegarde de l'Étape 10 sérialisera `RunSession`
+    // en entier. Les noms de ces deux formes sont eux-mêmes proscrits par le
+    // volet 1, d'où cette périphrase.
+    //
+    // Écrit depuis `tests/`, il ne peut nommer que des reliques de production :
+    // un inventaire sérialisé depuis l'extérieur ne peut structurellement pas
+    // contenir de fixture.
+    let mut inventaire = RelicInventory::new(5);
+    inventaire.slots = vec![
+        Some(RelicInstance {
+            uid: 1,
+            def: RelicId::CrackedDie,
+            state: RelicState::None,
+        }),
+        Some(RelicInstance {
+            uid: 2,
+            def: RelicId::PolishedStone,
+            state: RelicState::Counter(7),
+        }),
+        None,
+        Some(RelicInstance {
+            uid: 3,
+            def: RelicId::Pendulum,
+            state: RelicState::Perishable { rounds_left: 2 },
+        }),
+        Some(RelicInstance {
+            uid: 4,
+            def: RelicId::GhostDie,
+            state: RelicState::Disabled,
+        }),
+    ];
+    inventaire.next_uid = 42;
+
+    let json = serde_json::to_string(&inventaire).expect("sérialisation");
+    let retour: RelicInventory = serde_json::from_str(&json).expect("désérialisation");
+    assert_eq!(inventaire, retour);
+    assert_eq!(retour.next_uid, 42, "le compteur n'a pas survécu");
+}
+
+#[test]
+fn test_capacity_from_run_config() {
+    let standard = config(CupId::Standard);
+    let fortune = config(CupId::Fortune);
+
+    // Un seul littéral dans tout le test, pour épingler le gobelet standard ;
+    // l'écart s'écrit en termes de configuration, jamais en littéraux.
+    assert_eq!(standard.relic_capacity, 5);
+    assert_eq!(fortune.relic_capacity, standard.relic_capacity + 1);
+
+    for conf in [standard, fortune] {
+        let mut inventaire = RelicInventory::new(conf.relic_capacity);
+        for _ in 0..conf.relic_capacity {
+            assert!(
+                inventaire.add_relic(RelicId::CrackedDie).is_some(),
+                "un ajout sous la capacité a été refusé"
+            );
+        }
+        assert_eq!(inventaire.len(), usize::from(conf.relic_capacity));
+        assert_eq!(
+            inventaire.add_relic(RelicId::CrackedDie),
+            None,
+            "un ajout au-delà de la capacité a été accepté"
+        );
+    }
+}
+
+#[test]
+fn test_reorder_shifts_intermediate_slots() {
+    let mut inventaire = rempli(5);
+    let avant = defs(&inventaire);
+    inventaire.reorder(0, 2);
+
+    // Décalage, jamais échange : A passe en 2, B et C glissent d'un cran,
+    // D et E ne bougent pas.
+    assert_eq!(
+        defs(&inventaire),
+        vec![avant[1], avant[2], avant[0], avant[3], avant[4]]
+    );
+    assert_eq!(inventaire.capacity(), 5, "la capacité a changé");
+}
+
+#[test]
+fn test_reorder_out_of_bounds_is_noop() {
+    let mut inventaire = rempli(5);
+    let avant = inventaire.clone();
+
+    inventaire.reorder(0, 9);
+    inventaire.reorder(9, 0);
+    inventaire.reorder(0, 0);
+
+    assert_eq!(
+        inventaire, avant,
+        "un appel hors bornes a modifié l'inventaire"
+    );
+}
+
+#[test]
+fn test_two_adds_of_same_def_get_distinct_uids() {
+    let mut inventaire = RelicInventory::new(5);
+    assert_eq!(
+        inventaire.next_uid, 0,
+        "un inventaire neuf part d'un compteur nul"
+    );
+    let premier = inventaire
+        .add_relic(RelicId::CrackedDie)
+        .expect("slot libre");
+    let second = inventaire
+        .add_relic(RelicId::CrackedDie)
+        .expect("slot libre");
+
+    assert_ne!(premier, second, "deux copies partagent un identifiant");
+    let copies: Vec<&RelicInstance> = inventaire
+        .iter_slots()
+        .map(|(_, relique)| relique)
+        .filter(|relique| relique.def == RelicId::CrackedDie)
+        .collect();
+    assert_eq!(copies.len(), 2);
+    assert_ne!(copies[0].uid, copies[1].uid);
+}
+
+#[test]
+fn test_removed_uid_is_never_reused() {
+    let mut inventaire = RelicInventory::new(5);
+    let uids: Vec<u32> = (0..3)
+        .map(|_| {
+            inventaire
+                .add_relic(RelicId::CrackedDie)
+                .expect("slot libre")
+        })
+        .collect();
+
+    let avant = defs(&inventaire);
+    let retiree = inventaire.remove_relic(1).expect("relique présente");
+    assert_eq!(retiree.uid, uids[1]);
+
+    // **Le slot est vidé, il n'est pas supprimé.** Un `Vec::remove` décalerait
+    // toutes les reliques suivantes d'un cran : l'ordre des slots **est**
+    // l'ordre d'application (ADR-005), donc le score du joueur changerait sans
+    // qu'il ait rien demandé. Le banc a montré qu'aucun test ne le voyait.
+    assert_eq!(inventaire.capacity(), 5, "la capacité a changé");
+    assert_eq!(
+        defs(&inventaire),
+        vec![avant[0], None, avant[2], avant[3], avant[4]],
+        "les reliques suivantes ont glissé"
+    );
+
+    let neuf = inventaire
+        .add_relic(RelicId::PolishedStone)
+        .expect("slot libre");
+    assert!(
+        uids.iter().all(|ancien| neuf > *ancien),
+        "un identifiant libéré a été réattribué : {neuf} après {uids:?}"
+    );
+}
+
+#[test]
+fn test_full_inventory_add_returns_none_and_burns_no_uid() {
+    let mut inventaire = rempli(5);
+    let compteur = inventaire.next_uid;
+    let avant = inventaire.clone();
+
+    assert_eq!(inventaire.add_relic(RelicId::DoubleMirror), None);
+    assert_eq!(
+        inventaire.next_uid, compteur,
+        "un refus a brûlé un identifiant"
+    );
+    assert_eq!(inventaire, avant, "un refus a modifié l'inventaire");
+}

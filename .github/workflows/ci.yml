@@ -461,6 +461,26 @@ jobs:
           # n'ont pas de comportement : TASK-56 remplacera ces noms un à un.
           require "critère 5  douze reliques énumérées par effects_for" -nU 'RelicId::CrackedDie\n            \| RelicId::PolishedStone' crates/core_engine/src/relics/effects.rs
 
+          # ---- Étape 5 : inventaire complet (TASK-54) ----
+          # La capacité vient du gobelet, jamais d'un littéral : une seule
+          # fabrique dimensionne les slots, et personne d'autre.
+          forbid  "critère 5  capacité en dur"           -n 'max_capacity|MAX_RELICS' crates/
+          forbid  "critère 5  slots dimensionnés hors de la fabrique" -n 'vec!\[None;' crates/ -g '!crates/core_engine/src/relics/**'
+          require "critère 5  fabrique unique de l'inventaire" -n 'pub fn new\(capacity: u8\) -> Self' crates/core_engine/src/relics/inventory.rs
+          forbid  "critère 5  inventaire par défaut"     -n 'impl Default for RelicInventory|derive\([^)]*Default[^)]*\)\]\npub struct RelicInventory' -U crates/core_engine/src/relics/inventory.rs
+          # Le compteur est monotone : une seule écriture, et c'est l'incrément.
+          # La contre-épreuve positive vaut mieux qu'une liste d'interdits, qui
+          # ne couvrirait que les formes qu'on a imaginées.
+          require "critère 5  compteur monotone"         -n 'self\.next_uid = self\.next_uid\.saturating_add\(1\);' crates/core_engine/src/relics/inventory.rs
+          forbid  "critère 5  compteur remis à zéro"     -n 'next_uid\s*-=|next_uid\.saturating_sub|next_uid\s*=\s*0\s*;' crates/
+          # L'ordre des slots est l'ordre d'application : jamais trié, jamais
+          # échangé, et le réordonnancement a une seule sémantique.
+          forbid  "critère 5  slots triés ou échangés"   -n 'slots\.swap\(|slots\.sort|fn swap_slots' crates/
+          # L'objet-trait est déjà couvert par la garde de TASK-17 sur toute la
+          # crate ; il ne reste que la table associative, qui ne survivrait pas
+          # davantage à un aller-retour serde.
+          forbid  "critère 5  table associative dans les reliques" -n 'HashMap|BTreeMap' crates/core_engine/src/relics
+
           exit $status
 
   # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en
