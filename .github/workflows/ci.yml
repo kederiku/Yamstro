@@ -63,6 +63,35 @@ jobs:
             esac
           }
 
+          # Comme `forbid`, mais sur la **moitié de production** de chaque
+          # fichier : tout ce qui précède le premier `#[cfg(test)]`.
+          #
+          # Remplace le motif `-U '(?s)<motif>.*#\[cfg\(test\)\]'` employé
+          # jusqu'ici, qui est faux dès qu'un fichier porte **deux** modules de
+          # test : une occurrence dans le premier est alors suivie du
+          # `#[cfg(test)]` du second, et la garde se déclenche sur du code de
+          # test. `setup.rs` est dans ce cas.
+          forbid_prod() {
+            label=$1; motif=$2; shift 2
+            trouve=''
+            for chemin in "$@"; do
+              for f in $(find "$chemin" -name '*.rs' 2>/dev/null || echo "$chemin"); do
+                bloc=$(sed -n '1,/^#\[cfg(test)\]/p' "$f")
+                hit=$(printf '%s' "$bloc" | rg -n "$motif" 2>&1) && rc=0 || rc=$?
+                case $rc in
+                  1) ;;
+                  0) trouve="$trouve$f:$hit"$'\n' ;;
+                  *) trouve="$trouve$f: rg a échoué (code $rc)"$'\n' ;;
+                esac
+              done
+            done
+            if [ -z "$trouve" ]; then
+              printf '  ok    %s\n' "$label"
+            else
+              printf '  ECHEC %s\n%s' "$label" "$trouve"; status=1
+            fi
+          }
+
           # Contre-épreuve : le motif DOIT être présent. Garde la saturation
           # contre une suppression silencieuse.
           require() {
@@ -108,7 +137,12 @@ jobs:
           forbid  "critère 5  actions hors des trois"    -n 'MultiplyScore|SetFormula' crates/
           forbid  "critère 5  resolve renommée"          -n 'ScoringPipeline::(execute|run)\b' crates/
           forbid  "critère 7  le pipeline ne commet rien" -n '\.current_score|\.hands_remaining|\.used_hands|advance_state\(' "$SRC/scoring"
-          forbid  "critère 7  aucune source d'aléa"      -n '\brng\b|RunRng|rand::|thread_rng' "$SRC/scoring"
+          # Restreinte au code de production : un test qui construit une manche
+          # depuis `boss_definition` (TASK-71) doit pouvoir instancier un flux,
+          # cette fonction en prenant un par signature — et ne rien en tirer
+          # hors *La Cage*. Le pipeline, lui, n'y touche toujours pas.
+          forbid_prod "critère 7  aucune source d'aléa" \
+                  '\brng\b|RunRng|rand::|thread_rng' "$SRC/scoring"
           forbid  "critère 6  feature test-fixtures"     -n 'test-fixtures"|^\s*test-fixtures\s*=' crates/
           # L'exclusion de animation.rs n'est pas une échappatoire : c'est la
           # distinction que le corpus pose lui-même à TASK-30 — « les flottants
@@ -141,7 +175,12 @@ jobs:
           # justement qu'on n'en crée pas.
           forbid  "critère 4  positions fixes de dés"    -U '(?s)(0\.\.5|\[Entity; 5\]|\[Die; 5\]|\b(die_slots?|dice_slots?)\b|slots?\s*\[).*#\[cfg\(test\)\]' "$SETUP"
           forbid  "critère 4  littéraux de main"         -n 'rerolls_left\s*=\s*[0-9]|dice_count\s*=\s*[0-9]' "$SETUP"
-          forbid  "critère 4  flux hors des dés"         -n 'rng\.(shop|boss|relic_effects)|thread_rng|from_entropy' "$SETUP"
+          # Production seule, même motif : le test de *L'Étau* passe par le
+          # catalogue, donc par `boss_definition`, qui prend le flux des boss
+          # sans rien y tirer. La mise en place de la manche, elle, n'en tire
+          # toujours que sur celui des dés.
+          forbid_prod "critère 4  flux hors des dés" \
+                  'rng\.(shop|boss|relic_effects)|thread_rng|from_entropy' "$SETUP"
           forbid  "critère 4  pool de dés en parallèle"  -n 'DicePool::new|DicePool\s*\{|:\s*DicePool\b|<DicePool>' crates/game_state/src
           # Aucun test ne peut voir cette relance : après le nettoyage des
           # verrous, force = true et force = false donnent le même résultat.
@@ -1004,6 +1043,45 @@ jobs:
           # relançables. Les despawner changerait le nombre d'entités-dés.
           forbid  "critère 6  le boss retire des dés du pool" -n \
                   'despawn[^(]*\(\)[^;]*Die|remove_die|pool\.remove' "$EVAL"
+
+
+          # ---- Étape 6 : L'Étau et Le Silex, chaînes existantes (TASK-73) ----
+          LEVELS=$SRC/scoring/levels.rs
+          CONFIG=$SRC/config.rs
+          # **Le plafond vit dans config.rs, pas dans setup.rs.** `resolve_rerolls`
+          # délègue à `effective_rerolls` ; la garde est donc ancrée là où l'acte
+          # a lieu. Un `min`, jamais une affectation, jamais une soustraction —
+          # `MaxRerolls(3)` sur un gobelet à deux relances en laisse deux.
+          require "critère 6  le plafond de manche est un minimum" -n \
+                  'let after_blind = blind_cap\.map_or\(after_stake, \|cap\| after_stake\.min\(cap\)\);' "$CONFIG"
+          forbid  "critère 6  le plafond devient soustraction ou affectation" -n \
+                  'after_stake\.saturating_sub\(cap\)|blind_cap\.unwrap_or\(|= *cap;' "$CONFIG"
+          # Un seul consommateur du plafond hors de l'extracteur de setup.rs.
+          forbid  "critère 6  troisième consommateur du plafond" -n \
+                  '\bblind_cap\b' crates/ -g '!**/config.rs' -g '!**/systems/setup.rs'
+          # C10 : le nom v1 du champ. Le canonique est `rerolls_left`.
+          forbid  "critère 6  nom v1 du compteur de relances" -n 'rolls_remaining' crates/
+          # **Un seul site de division de la base.** Un second diviserait deux
+          # fois, et le test qui l'attrape épingle la valeur du palier plutôt que
+          # de la dire « différente » : deux fois divisé diffère tout autant.
+          require "critère 6  la base se divise à l'étape 1" -n \
+                  'if blind.has_modifier\(BlindModifier::HalveBaseScores\)' "$LEVELS"
+          # Ancrée sur l'**affectation**, et non sur la forme de l'arrondi : le
+          # commentaire de `pipeline.rs` qui explique le plancher écrit
+          # `(100 + 1) / 2 = 50` en toutes lettres, et doit pouvoir le faire.
+          # Dix-neuvième ancrage du corpus, et le premier que je m'inflige.
+          forbid  "critère 6  seconde division de la base" -n \
+                  '(chips|mult)[a-z_]* *=[^;=]*(div_ceil\(2\)|\+ 1\) */ *2)' crates/ -g '!**/scoring/levels.rs'
+          # L'arrondi est entier et au plus proche. La troncature nue ferait
+          # tomber les As à 2 au lieu de 3.
+          forbid  "critère 6  troncature à la place de l'arrondi" -n \
+                  'chips / 2|chips /= 2|as f64 / 2' "$LEVELS"
+          forbid  "critère 6  flottant dans la base de figure" -n '\bf32\b|\bf64\b' "$LEVELS"
+          # Le plancher du glossaire § 4, à un seul endroit : `AllMultToOne` doit
+          # pouvoir poser exactement 100 (TASK-22 § 5).
+          require "critère 6  plancher de mult dans la base" -n 'mult = mult.max\(100\);' "$LEVELS"
+          forbid  "critère 6  plancher de mult ailleurs" -n \
+                  '(mult|base_mult)[a-z_]* *=[^;=]*\.max\(100\)' crates/ -g '!**/scoring/levels.rs'
 
           exit $status
 

@@ -793,6 +793,64 @@ mod tests {
         );
     }
 
+    // ---- TASK-73 : *L'Étau*, depuis le catalogue ----
+
+    /// Définition portant la contrainte d'un boss, telle que le catalogue la
+    /// rend. **C'est l'angle neuf de ces deux tests** : les tests de TASK-32
+    /// construisent leur plafond à la main et ne verraient pas *L'Étau* changer
+    /// de contrainte dans `boss_definition`.
+    fn manche_du_boss(id: core_engine::blinds::definitions::BossId) -> BlindDefinition {
+        let mut rng = core_engine::rng::RunRng::from_seed(0);
+        BlindDefinition {
+            modifier: Some(
+                core_engine::blinds::definitions::boss_definition(id, &mut rng.boss, 5).modifier,
+            ),
+            ..BlindDefinition::default()
+        }
+    }
+
+    #[test]
+    fn test_vise_forces_one_reroll() {
+        use core_engine::blinds::definitions::BossId;
+
+        // Gobelet standard : deux relances, plafonnées à une. Le nombre est
+        // asséré en clair, là où `test_reroll_chain_matches_core_engine` se
+        // déclare tautologique et ne peut rien ancrer.
+        let partie = session(CupId::Standard, 0);
+        let stock = inventaire(&partie.config);
+        assert_eq!(cup(CupId::Standard).base_rerolls, 2, "le gobelet a changé");
+        assert_eq!(
+            resolve_rerolls(&partie, &manche_du_boss(BossId::Vise), &stock),
+            1
+        );
+
+        // Gobelet Abandonné (0) + Stake 4 (−1) + L'Étau : zéro, jamais 255.
+        // Sans saturation le compteur `u8` repasserait par le haut en release
+        // et paniquerait en debug.
+        let creux = session(CupId::Abandoned, 4);
+        let stock = inventaire(&creux.config);
+        assert_eq!(
+            resolve_rerolls(&creux, &manche_du_boss(BossId::Vise), &stock),
+            0
+        );
+    }
+
+    #[test]
+    fn test_cap_never_raises_rerolls() {
+        // Le plafond est un `min`, jamais une affectation : un gobelet à deux
+        // relances en garde **deux** sous `MaxRerolls(3)`. Le cas jumeau de
+        // TASK-32 part d'un gobelet à zéro, où un plafond qui élève et un
+        // plafond qui plafonne rendent la même chose : c'est la capacité
+        // intermédiaire qui les sépare.
+        let partie = session(CupId::Standard, 0);
+        let stock = inventaire(&partie.config);
+
+        assert_eq!(partie.config.base_rerolls, 2);
+        assert_eq!(resolve_rerolls(&partie, &blind(Some(3)), &stock), 2);
+        // Et il mord quand il est plus bas.
+        assert_eq!(resolve_rerolls(&partie, &blind(Some(1)), &stock), 1);
+    }
+
     #[test]
     fn test_blind_cap_never_raises_rerolls() {
         // Le plafond est un `min`, jamais une affectation : sur un gobelet sans
