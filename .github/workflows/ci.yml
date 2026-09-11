@@ -768,6 +768,26 @@ jobs:
           require "critère 5  résolution par identifiant"   -n 'pub fn slot_of_uid\(inventory: &RelicInventory, uid: u32\) -> Option<u8>' "$CARTES"
           require "critère 5  systèmes de cartes conditionnés" -n 'in_state\(AppState::InRun\).and_then\(resource_exists::<RelicInventory>\)' "$CARTES"
 
+
+          # ---- Étape 5 : glisser-déposer des reliques (TASK-65) ----
+          DRAG=crates/game_state/src/relics/drag_drop.rs
+          # Ancré sur l'**acte** : un échange **sur les slots de l'inventaire**.
+          # Le motif nu remonte `report.rs`, où la permutation de deux paliers de
+          # score est une fixture de test parfaitement légitime.
+          forbid  "critère 5  échange au lieu d'un décalage" -n 'swap_slots|slots\.swap\(|\.slots\.swap' crates/
+          # Le fichier appelle `reorder` et ne refait pas le décalage.
+          forbid  "critère 5  ordonnancement réimplémenté" -n 'slots\[|\.slots\.remove|\.slots\.insert|\.slots\.sort' "$DRAG"
+          require "critère 5  le geste délègue à reorder"  -n 'inventory.reorder\(from, slot\);' "$DRAG"
+          forbid  "critère 5  DragState rendu composant"   -n 'derive\([^)]*Component' "$DRAG"
+          forbid  "critère 5  donnée de jeu dans l'état de glissement" -n '(spawn|insert)\(.*Relic(Instance|Id)\b|held: *Option<Entity>|held: *Option<u32>' "$DRAG"
+          forbid  "critère 5  unwrap dans le glissement"   -n 'unwrap\(\)' "$DRAG"
+          forbid  "critère 5  expect en production dans le glissement" -U '(?s)\.expect\(.*#\[cfg\(test\)\]' "$DRAG"
+          # L'action existe hors du système de souris : sans cela l'Étape 11,
+          # qui doit rendre la partie jouable sans souris, la réécrirait.
+          require "critère 5  prise exposée comme action"  -n 'pub fn begin_hold\(state: &mut DragState, slot: u8\)' "$DRAG"
+          require "critère 5  dépose exposée comme action" -n 'pub fn drop_on\(state: &mut DragState, inventory: &mut RelicInventory, slot: u8\)' "$DRAG"
+          require "critère 5  glissement conditionné"      -n 'in_state\(AppState::InRun\).and_then\(resource_exists::<RelicInventory>\)' "$DRAG"
+
           exit $status
 
   # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en

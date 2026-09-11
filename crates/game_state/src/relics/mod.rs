@@ -27,6 +27,7 @@
 //! Encaisser **puis** remettre à zéro. L'inverse rend zéro or à chaque blind,
 //! sans erreur ni échec de compilation.
 
+pub mod drag_drop;
 pub mod slots;
 
 use bevy::prelude::*;
@@ -175,6 +176,7 @@ fn avancer(inventory: &mut RelicInventory, base: &TriggerCtx<'_>, hook: Hook) {
 
 pub(crate) fn register(app: &mut App) {
     slots::register(app);
+    drag_drop::register(app);
     app.add_systems(OnExit(RunPhase::Scoring), advance_relic_states_on_hand);
     app.add_systems(OnEnter(RunPhase::Shop), collect_relic_gold_on_blind_end);
 }
