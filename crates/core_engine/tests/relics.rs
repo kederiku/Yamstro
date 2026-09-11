@@ -381,11 +381,7 @@ impl Decor {
 ///
 /// `ClayPiggyBank` et `GhostDie` y resteront jusqu'au bout : leur neutralité sur
 /// ce hook est **définitive**, elles agissent ailleurs.
-const EFFETS_ENCORE_NEUTRES: [RelicId; 3] = [
-    RelicId::ClayPiggyBank,
-    RelicId::GhostDie,
-    RelicId::DoubleMirror,
-];
+const EFFETS_ENCORE_NEUTRES: [RelicId; 2] = [RelicId::ClayPiggyBank, RelicId::GhostDie];
 
 #[test]
 fn test_skeleton_effects_are_empty() {
@@ -1123,4 +1119,339 @@ fn test_multiplicative_relics_silent_on_scoring_die() {
             );
         }
     }
+}
+
+// ---- *Miroir Double* et la ré-émission (TASK-60) ----
+
+/// Les paliers de source relique, avec leur identifiant d'émetteur.
+fn paliers_de_relique(
+    rapport: &core_engine::scoring::ScoringReport,
+) -> Vec<(u32, RelicId, ScoreAction)> {
+    rapport
+        .steps
+        .iter()
+        .filter_map(|pas| match pas.source {
+            StepSource::Relic { uid, def } => Some((uid, def, pas.action)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn brelan_de_quatre() -> (Vec<Die>, HandMatch) {
+    let dice = des(&[4, 4, 4, 6, 1]);
+    let main = figure(&dice, YahtzeeHand::ThreeOfAKind);
+    (dice, main)
+}
+
+#[test]
+fn test_double_mirror_no_borrow_conflict() {
+    // Le Mult passe par 200, +600 du Brelan, +600 du Miroir qui ré-émet, soit
+    // 1400 ; 22 x 14,00 donne 308.
+    //
+    // **La garantie d'absence de conflit d'emprunt n'est pas testée ici, et ne
+    // peut pas l'être** : elle est structurelle. La phase A ne dispose d'aucun
+    // emprunt exclusif, donc le conflit ne peut pas se former ; si elle en
+    // disposait, la crate entière refuserait de compiler bien avant ce test.
+    // Ce que ce test mesure, c'est le score et l'attribution.
+    let (dice, main) = brelan_de_quatre();
+    let inventaire = inventaire_ordonne(&[RelicId::TripletMaster, RelicId::DoubleMirror]);
+
+    let rapport = ScoringPipeline::resolve(
+        &main,
+        &dice,
+        &HandLevels::default(),
+        &inventaire,
+        &blind_nu(),
+    );
+    assert_eq!(rapport.chips, 22);
+    assert_eq!(rapport.mult, 1400);
+    assert_eq!(rapport.final_score, 308);
+}
+
+#[test]
+fn test_double_mirror_alone_emits_nothing() {
+    let (dice, main) = brelan_de_quatre();
+    let inventaire = inventaire_ordonne(&[RelicId::DoubleMirror]);
+
+    let rapport = ScoringPipeline::resolve(
+        &main,
+        &dice,
+        &HandLevels::default(),
+        &inventaire,
+        &blind_nu(),
+    );
+    assert!(
+        paliers_de_relique(&rapport).is_empty(),
+        "rien à gauche du slot 0"
+    );
+    assert_eq!(rapport.mult, 200);
+}
+
+#[test]
+fn test_double_mirror_with_disabled_neighbour() {
+    // **Désactiver un slot casse la chaîne du Miroir.** C'est ce qui rend les
+    // boss d'extinction déterministes sans branche particulière : le Miroir ne
+    // teste pas si sa voisine est éteinte, il lit une tranche vide.
+    let (dice, main) = brelan_de_quatre();
+    let mut inventaire = inventaire_ordonne(&[RelicId::TripletMaster, RelicId::DoubleMirror]);
+    inventaire.slots[0]
+        .as_mut()
+        .expect("relique au slot 0")
+        .state = RelicState::Disabled;
+
+    let rapport = ScoringPipeline::resolve(
+        &main,
+        &dice,
+        &HandLevels::default(),
+        &inventaire,
+        &blind_nu(),
+    );
+    assert!(paliers_de_relique(&rapport).is_empty());
+    assert_eq!(rapport.mult, 200);
+}
+
+#[test]
+fn test_disabled_slot_breaks_the_chain_at_three_slots() {
+    // **Le cas discriminant de l'arbitrage.** La règle écartée — « un slot
+    // stérile ne réinitialise pas la tranche », la voisine étant alors le
+    // dernier slot ayant réellement produit — coïncide avec la règle retenue
+    // sur **toutes** les configurations à deux slots. Le test à deux slots ne
+    // distingue donc pas les deux règles : il faut trois slots et un slot
+    // éteint **au milieu**.
+    //
+    // Sans ce test, restaurer la règle écartée dans `scan_relics` ne casserait
+    // rien, et rendrait le Miroir transparent à `DisableRelicSlot`,
+    // `DisableRightmostRelic` et `DisableRarity` — les trois boss que
+    // l'arbitrage rend déterministes.
+    let (dice, main) = brelan_de_quatre();
+    let mut inventaire = inventaire_ordonne(&[
+        RelicId::TripletMaster,
+        RelicId::TripletMaster,
+        RelicId::DoubleMirror,
+    ]);
+    inventaire.slots[1]
+        .as_mut()
+        .expect("relique au slot 1")
+        .state = RelicState::Disabled;
+    let uids: Vec<u32> = inventaire
+        .iter_slots()
+        .map(|(_, relique)| relique.uid)
+        .collect();
+
+    let rapport = ScoringPipeline::resolve(
+        &main,
+        &dice,
+        &HandLevels::default(),
+        &inventaire,
+        &blind_nu(),
+    );
+    assert_eq!(
+        paliers_de_relique(&rapport),
+        vec![(uids[0], RelicId::TripletMaster, ScoreAction::AddMult(600))],
+        "le slot éteint casse la chaîne : le Miroir lit une tranche vide, \
+         il ne remonte pas au dernier slot productif"
+    );
+}
+
+#[test]
+fn test_empty_slot_breaks_the_chain_at_three_slots() {
+    // Le jumeau du test précédent. Le § 2.2 traite d'un seul souffle le voisin
+    // **absent** et le voisin éteint, mais ce sont deux branches distinctes de
+    // `scan_relics` : retirer la réinitialisation de l'une laisse l'autre
+    // verte. `remove_relic` prend par `take`, donc il laisse un trou au milieu
+    // plutôt que de tasser les slots — c'est ce qui rend ce montage possible.
+    let (dice, main) = brelan_de_quatre();
+    let mut inventaire = inventaire_ordonne(&[
+        RelicId::TripletMaster,
+        RelicId::TripletMaster,
+        RelicId::DoubleMirror,
+    ]);
+    let uids: Vec<u32> = inventaire
+        .iter_slots()
+        .map(|(_, relique)| relique.uid)
+        .collect();
+    inventaire.remove_relic(1).expect("relique au slot 1");
+    assert!(
+        inventaire.slots[1].is_none(),
+        "le retrait laisse un trou, il ne tasse pas"
+    );
+
+    let rapport = ScoringPipeline::resolve(
+        &main,
+        &dice,
+        &HandLevels::default(),
+        &inventaire,
+        &blind_nu(),
+    );
+    assert_eq!(
+        paliers_de_relique(&rapport),
+        vec![(uids[0], RelicId::TripletMaster, ScoreAction::AddMult(600))]
+    );
+}
+
+#[test]
+fn test_double_mirror_reemits_under_own_uid() {
+    // **Seule l'action est recopiée ; la source est celle du Miroir.** Le score
+    // est identique dans les deux cas, et seule l'attribution diffère : c'est
+    // elle qui garde le journal juste et qui fait que la mise en scène frappe
+    // la carte du Miroir, non celle de la voisine déjà secouée à son palier.
+    let (dice, main) = brelan_de_quatre();
+    let inventaire = inventaire_ordonne(&[RelicId::TripletMaster, RelicId::DoubleMirror]);
+    let uids: Vec<u32> = inventaire
+        .iter_slots()
+        .map(|(_, relique)| relique.uid)
+        .collect();
+
+    let rapport = ScoringPipeline::resolve(
+        &main,
+        &dice,
+        &HandLevels::default(),
+        &inventaire,
+        &blind_nu(),
+    );
+    assert_eq!(
+        paliers_de_relique(&rapport),
+        vec![
+            (uids[0], RelicId::TripletMaster, ScoreAction::AddMult(600)),
+            (uids[1], RelicId::DoubleMirror, ScoreAction::AddMult(600)),
+        ]
+    );
+}
+
+#[test]
+fn test_two_mirrors_do_not_cascade() {
+    // Le second Miroir voit **la production du premier**, un effet, jamais
+    // l'union des slots précédents : trois effets au total, pas quatre.
+    let (dice, main) = brelan_de_quatre();
+    let inventaire = inventaire_ordonne(&[
+        RelicId::TripletMaster,
+        RelicId::DoubleMirror,
+        RelicId::DoubleMirror,
+    ]);
+
+    let rapport = ScoringPipeline::resolve(
+        &main,
+        &dice,
+        &HandLevels::default(),
+        &inventaire,
+        &blind_nu(),
+    );
+    let paliers = paliers_de_relique(&rapport);
+    assert_eq!(paliers.len(), 3, "cascade : {paliers:?}");
+    assert!(
+        paliers
+            .iter()
+            .all(|(_, _, action)| *action == ScoreAction::AddMult(600))
+    );
+
+    let emetteurs: Vec<u32> = paliers.iter().map(|(uid, _, _)| *uid).collect();
+    assert_eq!(
+        emetteurs.len(),
+        emetteurs
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        "les trois paliers viennent de trois émetteurs distincts"
+    );
+}
+
+#[test]
+fn test_double_mirror_doubles_the_obsidian_multiplication() {
+    // Le Miroir double la multiplication de l'Obsidienne — et **pas** son malus
+    // de relance, qui ne transite pas par ce canal : il sort d'une autre
+    // fonction, sur un autre hook, que la phase A n'atteint pas.
+    //
+    // La neutralité du Miroir sur le modificateur de lancer est déjà tenue par
+    // `test_skeleton_roll_modifier_is_neutral` : la dupliquer ici donnerait une
+    // seconde copie à maintenir, pas une couverture de plus.
+    let (dice, main) = brelan_de_quatre();
+    let inventaire = inventaire_ordonne(&[RelicId::UnstableObsidian, RelicId::DoubleMirror]);
+
+    let rapport = ScoringPipeline::resolve(
+        &main,
+        &dice,
+        &HandLevels::default(),
+        &inventaire,
+        &blind_nu(),
+    );
+    assert_eq!(
+        paliers_de_relique(&rapport)
+            .into_iter()
+            .map(|(_, _, action)| action)
+            .collect::<Vec<_>>(),
+        vec![
+            ScoreAction::MultiplyMult(200),
+            ScoreAction::MultiplyMult(200)
+        ]
+    );
+}
+
+#[test]
+fn test_double_mirror_reemits_the_whole_slice_in_order() {
+    // Les sept tests imposés prennent tous une voisine à **un seul** effet, si
+    // bien qu'aucun ne distingue « ré-émettre la tranche » de « ré-émettre son
+    // premier effet », ni l'ordre de son inverse. Le banc de mutation le
+    // confirme : `.take(1)` et `.rev()` leur survivent tous les deux.
+    //
+    // *Architecte du Full* est la seule voisine à en produire deux, dans un
+    // ordre lui-même normatif (TASK-58 § 2.1) : elle referme les deux trous
+    // d'un coup.
+    let dice = des(&[3, 3, 5, 5, 5]);
+    let main = figure(&dice, YahtzeeHand::FullHouse);
+    let inventaire = inventaire_ordonne(&[RelicId::FullHouseArchitect, RelicId::DoubleMirror]);
+    let uids: Vec<u32> = inventaire
+        .iter_slots()
+        .map(|(_, relique)| relique.uid)
+        .collect();
+
+    let rapport = ScoringPipeline::resolve(
+        &main,
+        &dice,
+        &HandLevels::default(),
+        &inventaire,
+        &blind_nu(),
+    );
+    assert_eq!(
+        paliers_de_relique(&rapport),
+        vec![
+            (
+                uids[0],
+                RelicId::FullHouseArchitect,
+                ScoreAction::AddChips(40)
+            ),
+            (
+                uids[0],
+                RelicId::FullHouseArchitect,
+                ScoreAction::AddMult(500)
+            ),
+            (uids[1], RelicId::DoubleMirror, ScoreAction::AddChips(40)),
+            (uids[1], RelicId::DoubleMirror, ScoreAction::AddMult(500)),
+        ]
+    );
+}
+
+#[test]
+fn test_double_mirror_silent_on_scoring_die() {
+    // Miroiter par dé démultiplierait la voisine par le nombre de dés
+    // comptabilisés.
+    let decor = Decor::avec_des(&[4, 4, 4, 6, 1], YahtzeeHand::ThreeOfAKind, 3);
+    let voisine = [ScoreEffect {
+        source: StepSource::Relic {
+            uid: 9,
+            def: RelicId::TripletMaster,
+        },
+        action: ScoreAction::AddMult(600),
+    }];
+    let ctx = TriggerCtx {
+        die: Some((DieId(0), 4)),
+        left_effects: &voisine,
+        ..decor.ctx(RelicState::None)
+    };
+
+    assert!(effects_for(RelicId::DoubleMirror, Hook::OnScoringDie, &ctx).is_empty());
+    assert_eq!(
+        effects_for(RelicId::DoubleMirror, Hook::OnHandScored, &ctx).len(),
+        1,
+        "le montage ne teste rien si le Miroir est muet sur son propre hook"
+    );
 }

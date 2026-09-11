@@ -606,6 +606,29 @@ jobs:
           # pas. Rien ne doit en parler dans son corps d'effets.
           forbid  "critère 5  relance dans les effets de l'obsidienne, à lever par TASK-61" -n 'reroll|RollModifier' crates/core_engine/src/relics/definitions/unstable_obsidian.rs
 
+          MIROIR=$SRC/relics/definitions/double_mirror.rs
+          # *Miroir Double*. Toutes ancrées sur l'**acte**, jamais sur le nom :
+          # la note du module doit pouvoir écrire `split_at_mut` et
+          # `ScoreContext` pour être trouvée par qui les cherchera. Un motif sur
+          # le nom nu interdirait précisément la phrase qui explique qu'on ne
+          # s'en sert pas.
+          forbid  "critère 5  découpe mutable du slice de reliques" -n '\.split_at_mut\(' "$SRC"
+          forbid  "critère 5  emprunt exclusif dans le miroir" -n '\.iter_mut\(' "$MIROIR"
+          forbid  "critère 5  le miroir réordonne la tranche" -n '\.sort\w*\(|\.dedup\w*\(|\.rev\(\)' "$MIROIR"
+          # Le module ne peut nommer ces deux types qu'en les important : la
+          # signature d'`effects_for` ne lui donne qu'un `&TriggerCtx`, qui n'en
+          # porte aucun champ. Garder le chemin suffit donc, et couvre du même
+          # coup le `.clone()` d'inventaire du § 5 du ticket : on ne clone pas
+          # un type qu'on ne peut pas nommer.
+          forbid  "critère 5  le miroir atteint l'inventaire ou le contexte" -n 'use [^;]*\b(RelicInventory|RelicInstance|ScoreContext)\b|crate::\w+::(RelicInventory|RelicInstance|ScoreContext)' "$MIROIR"
+          # Le § 2.3 est normatif et c'est la régression la plus probable du
+          # ticket : recopier l'effet entier est le geste naturel, le score
+          # reste juste, et seul le journal ment. Deux gardes, l'une sur le
+          # geste, l'autre sur sa contre-épreuve.
+          forbid  "critère 5  le miroir conserve la source d'origine" -n 'source: effect\.source|left_effects[^;]*\.(copied|cloned)\(' "$MIROIR"
+          require "critère 5  le miroir ré-émet sous son propre uid" -n 'uid: ctx\.uid' "$MIROIR"
+          require "critère 5  le miroir ré-émet sous sa propre source" -n 'def: RelicId::DoubleMirror' "$MIROIR"
+
           exit $status
 
   # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en

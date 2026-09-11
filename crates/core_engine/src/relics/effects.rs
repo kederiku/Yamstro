@@ -131,7 +131,9 @@ pub fn effects_for(def: RelicId, hook: Hook, ctx: &TriggerCtx) -> SmallVec<[Scor
         (RelicId::UnstableObsidian, _) => definitions::unstable_obsidian::effects(hook, ctx),
         (RelicId::DivineYahtzee, _) => definitions::divine_yahtzee::effects(hook, ctx),
 
-        (RelicId::ClayPiggyBank | RelicId::GhostDie | RelicId::DoubleMirror, _) => SmallVec::new(),
+        (RelicId::DoubleMirror, _) => definitions::double_mirror::effects(hook, ctx),
+
+        (RelicId::ClayPiggyBank | RelicId::GhostDie, _) => SmallVec::new(),
 
         // Les trois fixtures sont énumérées de même : le joker ne porte que sur
         // le déclencheur.
