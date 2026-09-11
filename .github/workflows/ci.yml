@@ -505,6 +505,23 @@ jobs:
           # retirer, ce qui distingue une dette inscrite d'une dette oubliée.
           require "critère 5  valeurs d'attente du lancer, à câbler par TASK-61" -n 'const ROLL_INDEX_NON_CABLE: u8 = u8::MAX;' crates/core_engine/src/scoring/pipeline.rs
 
+          # ---- Étape 5 : squelette des comportements (TASK-56) ----
+          # **Aucun bras attrape-tout au niveau de la relique.** Ancré sur
+          # l'indentation de huit espaces que rustfmt garantit pour un bras de
+          # `match def` : le `_ =>` d'un `match hook` interne, plus indenté,
+          # reste légitime et ne doit pas être interdit.
+          forbid  "critère 5  bras attrape-tout sur la relique" -n '^\s{8}_ =>' crates/core_engine/src/relics/effects.rs
+          # Les quatre signatures sont normatives, noms de paramètres compris.
+          require "critère 5  signature d'effects_for"   -n 'pub fn effects_for\(def: RelicId, hook: Hook, ctx: &TriggerCtx\) -> SmallVec<\[ScoreEffect; 2\]>' crates/core_engine/src/relics/effects.rs
+          require "critère 5  signature de roll_modifier_for" -n 'pub fn roll_modifier_for\(def: RelicId, ctx: &TriggerCtx\) -> RollModifier' crates/core_engine/src/relics/effects.rs
+          require "critère 5  signature de gold_for"     -n 'pub fn gold_for\(def: RelicId, ctx: &TriggerCtx\) -> u32' crates/core_engine/src/relics/effects.rs
+          require "critère 5  signature d'advance_state" -n 'pub fn advance_state\(def: RelicId, hook: Hook, ctx: &TriggerCtx, state: RelicState\) -> RelicState' crates/core_engine/src/relics/effects.rs
+          # L'idiome du dépôt pour un paramètre délibérément inutilisé est la
+          # liaison `let _`, pas un attribut de fonction : plus étroite, et elle
+          # cesse de compiler dès que le paramètre sert.
+          forbid  "critère 5  variables inutilisées silencées par attribut" -n 'allow\(unused' crates/
+          require "critère 5  les douze modules de définitions" -nU 'pub mod clay_piggy_bank;[^;]*;[^;]*;[^;]*;[^;]*;[^;]*;[^;]*;[^;]*;[^;]*;[^;]*;[^;]*;\npub mod unstable_obsidian;' crates/core_engine/src/relics/definitions/mod.rs
+
           exit $status
 
   # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en

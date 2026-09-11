@@ -273,3 +273,147 @@ fn test_full_inventory_add_returns_none_and_burns_no_uid() {
     );
     assert_eq!(inventaire, avant, "un refus a modifié l'inventaire");
 }
+
+// ---- Squelette des quatre comportements (TASK-56) ----
+
+use core_engine::blind::{BlindContext, BlindDefinition};
+use core_engine::dice::{Die, DieId};
+use core_engine::evaluator::HandMatch;
+use core_engine::hands::{HandGrid, HandLevels, YahtzeeHand};
+use core_engine::relics::effects::{advance_state, effects_for, gold_for, roll_modifier_for};
+use core_engine::scoring::{Hook, TriggerCtx};
+
+const HOOKS: [Hook; 4] = [
+    Hook::OnRoll,
+    Hook::OnScoringDie,
+    Hook::OnHandScored,
+    Hook::OnRoundEnd,
+];
+
+const ETATS: [RelicState; 4] = [
+    RelicState::None,
+    RelicState::Counter(7),
+    RelicState::Perishable { rounds_left: 2 },
+    RelicState::Disabled,
+];
+
+/// Décor minimal d'un déclenchement, monté **depuis l'extérieur de la crate** :
+/// c'est ce qui prouve que les quatre fonctions sont publiquement atteignables
+/// avec les signatures annoncées.
+struct Decor {
+    hand: HandMatch,
+    dice: Vec<Die>,
+    hand_levels: HandLevels,
+    blind: BlindContext,
+}
+
+impl Decor {
+    fn new() -> Self {
+        Self {
+            hand: HandMatch {
+                hand: YahtzeeHand::FullHouse,
+                scoring_dice: vec![DieId(1), DieId(2)],
+                discarded_dice: Vec::new(),
+                potential_score: 0,
+            },
+            dice: vec![Die::new(DieId(1), 6), Die::new(DieId(2), 6)],
+            hand_levels: HandLevels::default(),
+            blind: BlindContext {
+                blind: BlindDefinition::default(),
+                target_score: 300,
+                current_score: 0,
+                hands_remaining: 4,
+                used_hands: HandGrid::default(),
+            },
+        }
+    }
+
+    fn ctx(&self, state: RelicState) -> TriggerCtx<'_> {
+        TriggerCtx {
+            hand: &self.hand,
+            dice: &self.dice,
+            hand_levels: &self.hand_levels,
+            blind: &self.blind,
+            uid: 1,
+            slot: 0,
+            state,
+            die: Some((DieId(1), 6)),
+            base_chips: 30,
+            base_mult: 400,
+            left_effects: &[],
+            roll_index: 0,
+            rerolls_left: 2,
+        }
+    }
+}
+
+#[test]
+fn test_skeleton_effects_are_empty() {
+    let decor = Decor::new();
+    let ctx = decor.ctx(RelicState::None);
+    for def in CATALOG {
+        for hook in HOOKS {
+            assert!(
+                effects_for(*def, hook, &ctx).is_empty(),
+                "{def:?} produit déjà un effet sur {hook:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_skeleton_roll_modifier_is_neutral() {
+    let decor = Decor::new();
+    let ctx = decor.ctx(RelicState::None);
+    for def in CATALOG {
+        let modificateur = roll_modifier_for(*def, &ctx);
+        assert_eq!(modificateur.reroll_delta, 0, "{def:?}");
+        assert!(modificateur.force_values.is_empty(), "{def:?}");
+    }
+}
+
+#[test]
+fn test_skeleton_gold_is_zero() {
+    let decor = Decor::new();
+    let ctx = decor.ctx(RelicState::None);
+    for def in CATALOG {
+        assert_eq!(gold_for(*def, &ctx), 0, "{def:?}");
+    }
+}
+
+#[test]
+fn test_skeleton_advance_state_is_identity() {
+    // Douze définitions x quatre déclencheurs x quatre états : 192 cas.
+    let decor = Decor::new();
+    for def in CATALOG {
+        for hook in HOOKS {
+            for etat in ETATS {
+                let ctx = decor.ctx(etat);
+                assert_eq!(
+                    advance_state(*def, hook, &ctx, etat),
+                    etat,
+                    "{def:?} fait déjà avancer son état sur {hook:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_effects_for_is_pure() {
+    // **Deux appels identiques rendent deux résultats égaux**, et l'état porté
+    // par le contexte ne bouge pas : `advance_state` est le seul écrivain
+    // d'état (ADR-010). La propriété est aujourd'hui structurelle — rien n'est
+    // mutable sur ce chemin — mais elle cessera de l'être dès que TASK-57
+    // remplira un bras, et c'est là que ce test servira.
+    let decor = Decor::new();
+    for def in CATALOG {
+        for hook in HOOKS {
+            let ctx = decor.ctx(RelicState::Counter(3));
+            let premier = effects_for(*def, hook, &ctx);
+            let second = effects_for(*def, hook, &ctx);
+            assert_eq!(premier, second, "{def:?} n'est pas pure sur {hook:?}");
+            assert_eq!(ctx.state, RelicState::Counter(3), "{def:?} a touché l'état");
+        }
+    }
+}

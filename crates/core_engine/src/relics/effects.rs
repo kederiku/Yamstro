@@ -10,11 +10,26 @@
 //! dérogation : elle exigerait une dépendance de développement de la crate sur
 //! elle-même, rendrait les fixtures compilables hors `cfg(test)`, et créerait
 //! un piège durable avec `--all-features`.
+//!
+//! # Nidification du parcours, normative
+//!
+//! `OnScoringDie` : pour chaque dé comptabilisé **dans l'ordre**, puis pour
+//! chaque slot **de gauche à droite**. `OnHandScored` : **un seul passage** sur
+//! les slots, de gauche à droite.
+//!
+//! **Aucun tri par type d'action** (ADR-005). Regrouper les additions avant les
+//! multiplications changerait le score : deux reliques dans un ordre rendent
+//! 264, dans l'autre 198.
+//!
+//! **Un slot vide ou désactivé ne produit rien et transmet une tranche vide** à
+//! son voisin de droite. C'est ce qui rend les boss de désactivation
+//! déterministes **sans branche particulière** : le voisin ne teste pas si sa
+//! gauche est désactivée, il lit une tranche vide.
 
 use smallvec::SmallVec;
 
-use crate::relics::RelicId;
-use crate::scoring::{Hook, ScoreEffect, TriggerCtx};
+use crate::relics::{RelicId, RelicState};
+use crate::scoring::{Hook, RollModifier, ScoreEffect, TriggerCtx};
 
 // Ces deux types ne sont nommés que par les bras de fixture, tous sous
 // `#[cfg(test)]`. L'Étape 5 retirera ce `cfg` en même temps qu'elle versera les
@@ -123,6 +138,105 @@ pub fn effects_for(def: RelicId, hook: Hook, ctx: &TriggerCtx) -> SmallVec<[Scor
         // le déclencheur.
         #[cfg(test)]
         (RelicId::SixFire | RelicId::MagicPair | RelicId::BrokenGlass, _) => SmallVec::new(),
+    }
+}
+
+/// Ce qu'une relique change au lancer. **Squelette : toutes neutres.**
+///
+/// `hook` n'entre pas dans la signature — le hook est `OnRoll` par
+/// construction — et `ctx` n'est lu par aucun bras tant que TASK-61 n'a pas
+/// implémenté les deux reliques concernées. La liaison `let _` est l'idiome du
+/// dépôt pour un paramètre délibérément inutilisé : plus étroite qu'un
+/// `#[allow]` de fonction, qui masquerait aussi les oublis du code à venir, et
+/// elle **cesse de compiler** dès que `ctx` sert — elle se signale au lieu de
+/// s'oublier.
+pub fn roll_modifier_for(def: RelicId, ctx: &TriggerCtx) -> RollModifier {
+    let _ = ctx; // retiré par TASK-61
+
+    match def {
+        // TASK-61
+        RelicId::UnstableObsidian => RollModifier::default(),
+        // TASK-61
+        RelicId::GhostDie => RollModifier::default(),
+
+        // Définitif : ces reliques ne touchent pas au lancer. Les nommer une à
+        // une n'ajouterait rien à l'exhaustivité — le compilateur échoue de la
+        // même façon sur une treizième variante — et diluerait le signal : ce
+        // qui est étiqueté est ce qui doit encore arriver.
+        RelicId::CrackedDie
+        | RelicId::PolishedStone
+        | RelicId::TripletMaster
+        | RelicId::FullHouseArchitect
+        | RelicId::StellarAlignment
+        | RelicId::PyramidOfSixes
+        | RelicId::Pendulum
+        | RelicId::DivineYahtzee
+        | RelicId::ClayPiggyBank
+        | RelicId::DoubleMirror => RollModifier::default(),
+
+        // Définitif : aucune fixture ne gagnera de comportement au lancer.
+        #[cfg(test)]
+        RelicId::SixFire | RelicId::MagicPair | RelicId::BrokenGlass => RollModifier::default(),
+    }
+}
+
+/// L'or qu'une relique rapporte. **Squelette : toutes à zéro.**
+pub fn gold_for(def: RelicId, ctx: &TriggerCtx) -> u32 {
+    let _ = ctx; // retiré par TASK-62
+
+    match def {
+        // TASK-62
+        RelicId::ClayPiggyBank => 0,
+
+        // Définitif : ces reliques ne rapportent pas d'or.
+        RelicId::CrackedDie
+        | RelicId::PolishedStone
+        | RelicId::TripletMaster
+        | RelicId::FullHouseArchitect
+        | RelicId::StellarAlignment
+        | RelicId::PyramidOfSixes
+        | RelicId::Pendulum
+        | RelicId::UnstableObsidian
+        | RelicId::DivineYahtzee
+        | RelicId::GhostDie
+        | RelicId::DoubleMirror => 0,
+
+        #[cfg(test)]
+        RelicId::SixFire | RelicId::MagicPair | RelicId::BrokenGlass => 0,
+    }
+}
+
+/// Fait avancer l'état d'une relique. **Squelette : identité partout.**
+///
+/// **Seul écrivain de `RelicState`** (ADR-010) : `effects_for` reste pure et ne
+/// fait avancer aucun état. L'état est pris **par valeur** et le nouvel état
+/// rendu ; cette fonction n'écrit pas dans l'inventaire, l'appelant s'en charge.
+///
+/// Elle n'est appelée **ni depuis le commit du score**, dont le corps est
+/// normatif et reste minimal, ni depuis le pipeline : l'Étape 5 lui donnera deux
+/// systèmes propres, ordonnés autour du commit sans le modifier (TASK-62).
+pub fn advance_state(def: RelicId, hook: Hook, ctx: &TriggerCtx, state: RelicState) -> RelicState {
+    let _ = (hook, ctx); // retiré par TASK-62
+
+    match def {
+        // TASK-62
+        RelicId::ClayPiggyBank => state,
+
+        // Définitif : ces reliques sont sans mémoire.
+        RelicId::CrackedDie
+        | RelicId::PolishedStone
+        | RelicId::TripletMaster
+        | RelicId::FullHouseArchitect
+        | RelicId::StellarAlignment
+        | RelicId::PyramidOfSixes
+        | RelicId::Pendulum
+        | RelicId::UnstableObsidian
+        | RelicId::DivineYahtzee
+        | RelicId::GhostDie
+        | RelicId::DoubleMirror => state,
+
+        #[cfg(test)]
+        RelicId::SixFire | RelicId::MagicPair | RelicId::BrokenGlass => state,
     }
 }
 

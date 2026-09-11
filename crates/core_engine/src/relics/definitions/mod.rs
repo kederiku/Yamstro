@@ -5,6 +5,19 @@
 //! écrits en dur (ADR-007). Il ne déclare **aucun sous-module** tant que les
 //! douze fichiers n'existent pas.
 
+pub mod clay_piggy_bank;
+pub mod cracked_die;
+pub mod divine_yahtzee;
+pub mod double_mirror;
+pub mod full_house_architect;
+pub mod ghost_die;
+pub mod pendulum;
+pub mod polished_stone;
+pub mod pyramid_of_sixes;
+pub mod stellar_alignment;
+pub mod triplet_master;
+pub mod unstable_obsidian;
+
 use super::{RelicId, RelicRarity};
 
 /// Rareté d'une relique. **Fonction totale, par exhaustivité du `match`.**

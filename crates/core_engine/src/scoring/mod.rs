@@ -11,4 +11,4 @@ pub use context::ScoreContext;
 pub use effect::{ScoreAction, ScoreEffect, StepSource};
 pub use pipeline::ScoringPipeline;
 pub use report::{ScoreStep, ScoringReport};
-pub use trigger::{Hook, TriggerCtx};
+pub use trigger::{Hook, RollModifier, TriggerCtx};
