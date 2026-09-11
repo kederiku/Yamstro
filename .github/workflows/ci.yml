@@ -910,6 +910,28 @@ jobs:
           require "critère 6  facteur de stake, à un seul endroit" -n 'fn stake_mult_permille' "$SCALING"
           forbid  "critère 6  seconde implémentation du facteur de stake" -n 'fn stake_mult_permille' crates/ -g '!**/blinds/scaling.rs'
 
+
+          # ---- Étape 6 : gain de fin de manche (TASK-70) ----
+          PAYOUT=$SRC/economy/payout.rs
+          # Une seule source de vérité pour l'or, et aucune structure qui la
+          # concurrence.
+          forbid  "critère 6  seconde source de vérité de l'or" -n 'RunEconomy|\bmoney\b|RunSaveState\.gold' crates/
+          # **Fonction libre** : un `impl` l'indenterait. Ancré sur la colonne.
+          require "critère 6  le gain est une fonction libre" -n '^pub fn calculate_payout\(' "$PAYOUT"
+          # Deux cinq de nature opposée. La tranche est une constante de règle,
+          # le plafond un paramètre de run : les intervertir ne se voit dans
+          # aucune partie, les cinq gobelets valant tous cinq.
+          require "critère 6  la tranche divise, la configuration plafonne" -n 'let interest = \(gold / INTEREST_TRANCHE\).min\(config.max_interest\);' "$PAYOUT"
+          forbid  "critère 6  plafond d'intérêts en littéral" -n 'min\(5\)|min\(5u32\)|min\(INTEREST_TRANCHE\)|/ config.max_interest' "$SRC/economy"
+          # Ancrée sur l'**usage**, pas sur le nom : la note du module doit
+          # pouvoir écrire que l'or a sa source de vérité dans la session.
+          forbid  "critère 6  le gain connaît la session ou la manche" -n 'use [^;]*(RunSession|BlindContext)|: *&?(RunSession|BlindContext)' "$PAYOUT"
+          forbid  "critère 6  élargissement tronquant dans le gain" -n ' as u32| as u8| as u64' "$PAYOUT"
+          forbid  "critère 6  flottant dans l'économie"     -n '\bf64\b|\bf32\b' "$SRC/economy"
+          # Aucun champ de plus : un drapeau d'application inviterait au double
+          # comptage que l'ADR-010 supprime.
+          forbid  "critère 6  champ de trop dans le gain"   -n '^\s*pub (applied|blind_id|ante)\s*:' "$PAYOUT"
+
           exit $status
 
   # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en

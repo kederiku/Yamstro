@@ -5,6 +5,10 @@
 //! reliques a besoin, et elle est posée à sa place définitive plutôt que
 //! rangée provisoirement dans le module des reliques.
 
+pub mod payout;
+
+pub use payout::{INTEREST_TRANCHE, Payout, calculate_payout};
+
 use crate::relics::RelicInventory;
 use crate::relics::effects::gold_for;
 use crate::scoring::TriggerCtx;
