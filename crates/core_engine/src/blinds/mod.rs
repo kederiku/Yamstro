@@ -1,5 +1,9 @@
 //! Blind : sa définition, et le contexte de la manche en cours.
 
+pub mod scaling;
+
+pub use scaling::target_score;
+
 #[cfg(feature = "bevy")]
 use bevy_ecs::reflect::ReflectComponent;
 

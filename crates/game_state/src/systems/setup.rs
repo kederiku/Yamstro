@@ -73,20 +73,6 @@ use crate::components::{DieView, Locked, Scoring};
 use crate::resources::{HandContext, RunSession};
 use crate::states::{AppState, RunPhase};
 
-/// Dénominateur des facteurs en pour-mille. Aucun flottant n'entre dans la
-/// courbe : `1.6` s'écrit `1_600`.
-const MILLI: u64 = 1_000;
-
-/// Cible de l'ante 1, avant tout multiplicateur.
-// Étape 6 bis : à calibrer par le harnais de simulation.
-const BASE_TARGET: u64 = 300;
-
-/// Croissance d'un ante au suivant, en pour-mille : `1.6` s'écrit `1_600`.
-/// Le suffixe `_MILLI` ne se met que là où l'unité est réellement le
-/// pour-mille, ce qui n'est pas le cas de `BASE_TARGET`, qui est un score.
-// Étape 6 bis : à calibrer par le harnais de simulation.
-const ANTE_GROWTH_MILLI: u64 = 1_600;
-
 /// Ante dont la Mise Boss clôt la run.
 // Étape 6 : la progression complète des antes.
 const FINAL_ANTE: u8 = 8;
@@ -189,78 +175,34 @@ pub fn resolve_rerolls(
     )
 }
 
-/// Multiplie par un facteur en pour-mille, arrondi au plus proche, en entiers.
-fn scale_milli(value: u64, factor_milli: u64) -> u64 {
-    value
-        .saturating_mul(factor_milli)
-        .saturating_add(MILLI / 2)
-        .saturating_div(MILLI)
-}
-
-/// `base_target(ante) = BASE_TARGET × (ANTE_GROWTH_MILLI ÷ 1000)^(ante moins un)`,
-/// écrite comme une boucle de multiplications entières avec arrondi au plus
-/// proche à chaque étage. La borne s'écrit `1..ante` pour que l'ante 1 ne
-/// franchisse aucun étage sans jamais soustraire.
-fn base_target(ante: u8) -> u64 {
-    let mut target = BASE_TARGET;
-    for _ in 1..ante {
-        target = scale_milli(target, ANTE_GROWTH_MILLI);
-    }
-    target
-}
-
-/// Rang de la blind : petit 1000‰, gros 1500‰, boss 2000‰.
-fn blind_mult(kind: BlindType) -> u64 {
-    match kind {
-        BlindType::Small => 1_000,
-        BlindType::Big => 1_500,
-        BlindType::Boss => 2_000,
-    }
-}
-
-/// Étape 6 — Gobelets. Neutre tant qu'aucun gobelet ne module la cible.
-/// À REMPLACER par la table des gobelets, jamais à contourner.
-fn cup_mult(session: &RunSession) -> u64 {
-    let _ = session;
-    MILLI
-}
-
-/// Étape 10 — Stakes. Neutre tant que la table des Stakes n'existe pas.
-/// À REMPLACER par la table des Stakes, jamais à contourner.
-fn stake_mult(stake_level: u8) -> u64 {
-    let _ = stake_level;
-    MILLI
-}
-
-/// Étape 6 — Boss. Neutre tant qu'aucun boss ne module la cible.
-/// À REMPLACER par la définition du boss, jamais à contourner.
-fn boss_mult(blind: &BlindDefinition) -> u64 {
-    let _ = blind;
-    MILLI
-}
-
-/// Cible **effective** de la manche : la courbe du § 4.4 du glossaire, puis les
-/// quatre multiplicateurs dans cet ordre exact.
-fn target_score(session: &RunSession, blind: &BlindDefinition) -> u64 {
-    let mut target = base_target(session.ante);
-    target = scale_milli(target, blind_mult(blind.kind));
-    target = scale_milli(target, cup_mult(session));
-    target = scale_milli(target, stake_mult(session.stake_level));
-    scale_milli(target, boss_mult(blind))
-}
-
-/// Étape 6 — la progression à trois blinds par ante, et le catalogue des boss.
-/// À REMPLACER par la lecture du catalogue, jamais à contourner : `RunSession`
-/// ne porte aujourd'hui que l'ante, et savoir si l'on entame la petite, la
-/// grosse ou la Mise Boss suppose un compteur qui appartient à cette étape-là.
+/// Cible **effective** de la manche.
 ///
-/// `target_score` est ici la cible **nominale** de la définition, c'est-à-dire
-/// la base de l'ante ; la cible effective de la manche applique par-dessus les
-/// quatre multiplicateurs.
+/// **Adaptateur, jamais une seconde courbe.** L'arithmétique vit dans
+/// `core_engine::blinds::scaling`, seule à porter les constantes et les quatre
+/// facteurs. L'Étape 3 en avait écrit une copie ici, avec ses trois bouchons et
+/// un arrondi à chaque étage : elle rendait 5034 et 8054 aux antes 7 et 8, là où
+/// la courbe normative rend 5033 et 8053. Deux courbes pour une difficulté, et
+/// celle que le jeu employait était la fausse.
+fn target_score(session: &RunSession, blind: &BlindDefinition) -> u64 {
+    core_engine::blinds::target_score(
+        session.ante,
+        blind.kind,
+        session.cup_id,
+        session.stake_level,
+        blind.modifier.as_ref(),
+    )
+}
+
 fn current_blind_definition(session: &RunSession) -> BlindDefinition {
     BlindDefinition {
         kind: BlindType::Small,
-        target_score: base_target(session.ante),
+        target_score: core_engine::blinds::target_score(
+            session.ante,
+            BlindType::Small,
+            session.cup_id,
+            session.stake_level,
+            None,
+        ),
         reward: 0,
         modifier: None,
     }
@@ -962,25 +904,28 @@ mod tests {
 
     #[test]
     fn test_target_follows_the_ante_curve() {
-        // Ante 1 : la cible est la base, sans aucun étage de croissance. Une
-        // boucle comptant un tour de trop la ferait croître.
+        // **La courbe vit désormais dans le moteur.** Ce test ne la recalcule
+        // plus : il vérifie que la manche montée en porte la valeur, ce qui est
+        // la seule chose que cette crate décide encore.
+        //
+        // Le commentaire d'origine disait : « Arrondi au plus proche, jamais
+        // troncature. Aucune valeur de la table actuelle ne le met en évidence
+        // — 300 x 1,6 tombe juste à chaque étage. » **C'était faux** : à
+        // l'ante 7, 5033,6 ne tombe pas juste, et c'est précisément là que la
+        // courbe locale divergeait de la normative. La phrase avait été écrite
+        // quand la table n'était vérifiée que jusqu'à l'ante 2.
         let mut app = app_en_run(CupId::Standard);
-        assert_eq!(
-            app.world().resource::<BlindContext>().target_score,
-            BASE_TARGET
-        );
+        assert_eq!(app.world().resource::<BlindContext>().target_score, 300);
 
-        app.world_mut().resource_mut::<RunSession>().ante = 2;
-        rentrer_dans_une_blind(&mut app);
-        assert_eq!(
-            app.world().resource::<BlindContext>().target_score,
-            scale_milli(BASE_TARGET, ANTE_GROWTH_MILLI)
-        );
-
-        // Arrondi au plus proche, jamais troncature. Aucune valeur de la table
-        // actuelle ne le met en évidence — 300 × 1,6 tombe juste à chaque
-        // étage — donc l'arrondi se vérifie sur la fonction d'échelle elle-même.
-        assert_eq!(scale_milli(1, 1_500), 2);
+        for (ante, attendu) in [(2u8, 480u64), (7, 5033), (8, 8053)] {
+            app.world_mut().resource_mut::<RunSession>().ante = ante;
+            rentrer_dans_une_blind(&mut app);
+            assert_eq!(
+                app.world().resource::<BlindContext>().target_score,
+                attendu,
+                "ante {ante}"
+            );
+        }
 
         // Le rang de la blind multiplie la cible. `current_blind_definition`
         // ne rend qu'un petit blind à cette étape : la comparaison passe donc

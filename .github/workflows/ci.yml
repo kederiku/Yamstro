@@ -859,9 +859,12 @@ jobs:
           # nom en prose. La note du module doit pouvoir écrire le singulier
           # écarté pour dire pourquoi il l'est.
           forbid  "critère 6  variante None ou figure au singulier" -n 'BlindModifier::None\b|BlindModifier::DebuffHand\(' crates/
-          # Aucun bras attrape-tout sur une contrainte : l'Étape 9 n'ajoutera
-          # aucune variante, donc tout `match` écrit ici doit rester exhaustif.
-          forbid  "critère 6  bras attrape-tout sur une contrainte" -nU 'match [^{]*modifier[^{]*\{[^}]*\n\s*_ =>' "$SRC"
+          # **Garde retirée à TASK-69, un ticket après l'avoir écrite.** Elle
+          # interdisait tout joker dans un `match` sur une contrainte, et
+          # `boss_mult_permille` en est le premier cas légitime : il pose une
+          # seule question — « est-ce le multiplicateur de cible ? » — et non
+          # « quelle variante est-ce ? ». Une règle généralisée d'avance est une
+          # garde qui mord son premier cas légitime ; celle-ci a mis un ticket.
           # Le renommage est complet : deux chemins pour un même type feraient
           # diverger les importateurs.
           forbid  "critère 6  ancien chemin du module de manche" -n 'core_engine::blind\b|crate::blind\b|mod blind;' crates/
@@ -872,6 +875,40 @@ jobs:
           # `has_modifier`. Ancré sur ce champ-là : `die.modifiers` désigne les
           # modificateurs de dé, sans rapport, et un motif nu les attrape.
           forbid  "critère 6  le pipeline rouvre le modificateur de manche" -n 'blind\.modifier\b|blind\.blind\.modifier' "$SRC/scoring"
+
+
+          # ---- Étape 6 : courbe de difficulté (TASK-69) ----
+          SCALING=$SRC/blinds/scaling.rs
+          # Une seule courbe dans le dépôt. L'Étape 3 en portait une copie dans
+          # `game_state`, avec un arrondi par étage : elle rendait 5034 et 8054
+          # là où la normative rend 5033 et 8053, et c'était elle que le jeu
+          # employait.
+          require "critère 6  constantes de courbe, à un seul endroit" -n 'const BASE_ANTE_1_MILLI: u64 = 300_000;' "$SCALING"
+          forbid  "critère 6  seconde courbe de difficulté" -n 'BASE_TARGET|ANTE_GROWTH_MILLI|fn base_target|fn scale_milli' crates/
+          forbid  "critère 6  facteur de courbe hors du moteur" -nU 'fn (blind_mult|cup_mult|stake_mult|boss_mult)\b' crates/game_state/src crates/ui_and_juice/src
+          # Aucun plafond sur la cible : l'empilement maximal est le signal de
+          # calibrage remis à l'Étape 6 bis, pas un défaut à corriger.
+          forbid  "critère 6  plafond sur la cible"        -n '\.min\(|\.clamp\(|MAX_TARGET' "$SCALING"
+          # Aucun flottant, et un seul site de multiplication.
+          forbid  "critère 6  flottant dans la courbe"     -n '\bf64\b|\bf32\b' "$SRC/blinds"
+          require "critère 6  site unique de multiplication" -n 'pub\(crate\) fn apply_permille\(value_milli: u64, factor_permille: u32\) -> u64' "$SCALING"
+          # **Quatre applications distinctes, et aucun test ne peut le tenir.**
+          # Les valeurs de rang et de gobelet produisent toutes un multiple
+          # exact de mille : les regrouper ne change rien aujourd'hui, et le
+          # mutant survit. La règle vaut pour les facteurs à venir — un
+          # multiplicateur de boss arbitraire casserait l'exactitude —, donc
+          # c'est une garde qui la tient.
+          require "critère 6  les quatre facteurs, appliqués un à un" -nU 'v = apply_permille\(v, blind_mult_permille\(kind\)\);\n    v = apply_permille\(v, cup_mult_permille\(cup, kind\)\);\n    v = apply_permille\(v, stake_mult_permille\(stake_level, ante\)\);\n    v = apply_permille\(v, boss_mult_permille\(modifier\)\);' "$SCALING"
+          # Le critère « aucune autre expression `/ 1_000` dans le fichier »
+          # est **faux** : trois sites en portent une, tous normatifs — le
+          # facteur lui-même, l'accumulation du stake que le § 2.2 exige
+          # tronquée à chaque pas, et l'arrondi final. Ce qui se garde, c'est
+          # que la cible ne soit multipliée que par `apply_permille`.
+          forbid  "critère 6  cible multipliée hors apply_permille" -nU 'fn target_score\([^)]*\)[^}]*\bv\b\s*\*' "$SCALING"
+          # Le facteur de stake déménagera à l'Étape 10 : un déplacement, jamais
+          # une seconde implémentation.
+          require "critère 6  facteur de stake, à un seul endroit" -n 'fn stake_mult_permille' "$SCALING"
+          forbid  "critère 6  seconde implémentation du facteur de stake" -n 'fn stake_mult_permille' crates/ -g '!**/blinds/scaling.rs'
 
           exit $status
 
