@@ -459,7 +459,13 @@ jobs:
           forbid  "critère 5  pondération de tirage dans le moteur" -n '\b(weight|weighted|chance|probabilit|\bpoids\b|drop_rate)' crates/core_engine/src/relics
           # Les douze reliques sont énumérées dans effects_for tant qu'elles
           # n'ont pas de comportement : TASK-56 remplacera ces noms un à un.
-          require "critère 5  douze reliques énumérées par effects_for" -nU 'RelicId::CrackedDie\n            \| RelicId::PolishedStone' crates/core_engine/src/relics/effects.rs
+          # **Retirée à TASK-57**, et c'est ma faute de l'avoir posée ainsi :
+          # ancrée sur la forme du bras groupé, elle cassait dès qu'une relique
+          # quittait le groupe pour une délégation — donc à chacun des six
+          # tickets d'implémentation. Une garde que le ticket suivant doit
+          # éditer n'est pas une garde. La propriété qu'elle approchait —
+          # l'exhaustivité sur les douze — est tenue par le **compilateur**, ce
+          # que TASK-56 a mesuré : une treizième relique produit cinq E0004.
 
           # ---- Étape 5 : inventaire complet (TASK-54) ----
           # La capacité vient du gobelet, jamais d'un littéral : une seule
@@ -521,6 +527,29 @@ jobs:
           # cesse de compiler dès que le paramètre sert.
           forbid  "critère 5  variables inutilisées silencées par attribut" -n 'allow\(unused' crates/
           require "critère 5  les douze modules de définitions" -nU 'pub mod clay_piggy_bank;[^;]*;[^;]*;[^;]*;[^;]*;[^;]*;[^;]*;[^;]*;[^;]*;[^;]*;[^;]*;\npub mod unstable_obsidian;' crates/core_engine/src/relics/definitions/mod.rs
+
+          # ---- Étape 5 : les trois reliques par dé (TASK-57) ----
+          # `MultiplyMult` est réservé aux raretés Rare et Légendaire : deux de
+          # ces trois reliques sont Communes, la troisième Peu commune.
+          forbid  "critère 5  multiplication hors des raretés hautes" -n 'MultiplyMult' crates/core_engine/src/relics/definitions/cracked_die.rs crates/core_engine/src/relics/definitions/polished_stone.rs crates/core_engine/src/relics/definitions/pyramid_of_sixes.rs
+          # Une relique ne lit que le dé courant : le parcours appartient au
+          # pipeline, et itérer le plateau produirait un effet par dé écarté.
+          forbid  "critère 5  relique qui parcourt le plateau" -n 'ctx\.dice|discarded_dice|scoring_dice' crates/core_engine/src/relics/definitions
+          # Aucun déballage paniquant ni aucun aléa dans les définitions. La
+          # règle vaut pour les douze modules, pas seulement pour ces trois : la
+          # prose des modules l'énonce **sans écrire ces mots**, comme
+          # l'en-tête de `trigger.rs` depuis TASK-20.
+          forbid  "critère 5  déballage paniquant dans une définition" -n 'unwrap|expect|panic!|unreachable!|todo!' crates/core_engine/src/relics/definitions
+          forbid  "critère 5  aléa dans une définition"  -n '\brng\b|\bRng\b|random|thread_rng' crates/core_engine/src/relics/definitions
+          # Chaque valeur normative est épinglée **dans son module** : la
+          # déplacer d'un fichier à l'autre casse, ce qui attrape la confusion
+          # entre la relique des six et la fixture homonyme.
+          require "critère 5  un Mult par dé impair"     -n 'ScoreAction::AddMult\(100\)' crates/core_engine/src/relics/definitions/cracked_die.rs
+          require "critère 5  dix Chips par dé pair"     -n 'ScoreAction::AddChips\(10\)' crates/core_engine/src/relics/definitions/polished_stone.rs
+          require "critère 5  quinze Chips par six"      -n 'ScoreAction::AddChips\(15\)' crates/core_engine/src/relics/definitions/pyramid_of_sixes.rs
+          # La face six, jamais « la face maximale » : un dé à huit faces
+          # montrant huit ne déclenche pas la pyramide.
+          forbid  "critère 5  pyramide sur la face maximale" -n '\bsides\b|max_face|value == de\.sides' crates/core_engine/src/relics/definitions/pyramid_of_sixes.rs
 
           exit $status
 

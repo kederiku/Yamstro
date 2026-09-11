@@ -347,14 +347,36 @@ impl Decor {
     }
 }
 
+/// Reliques encore muettes sur `effects_for`.
+///
+/// **Cette liste est le travail restant, encodée dans un test.** Chaque ticket
+/// qui implémente une relique doit l'y retirer ; l'oublier fait échouer
+/// `test_skeleton_effects_are_empty` bruyamment, et c'est le but — il est alors
+/// impossible d'implémenter une relique sans regarder cette liste en face. À
+/// TASK-62 elle sera vide et le test se supprimera de lui-même.
+///
+/// `ClayPiggyBank` et `GhostDie` y resteront jusqu'au bout : leur neutralité sur
+/// ce hook est **définitive**, elles agissent ailleurs.
+const EFFETS_ENCORE_NEUTRES: [RelicId; 9] = [
+    RelicId::TripletMaster,
+    RelicId::FullHouseArchitect,
+    RelicId::StellarAlignment,
+    RelicId::Pendulum,
+    RelicId::UnstableObsidian,
+    RelicId::DivineYahtzee,
+    RelicId::ClayPiggyBank,
+    RelicId::GhostDie,
+    RelicId::DoubleMirror,
+];
+
 #[test]
 fn test_skeleton_effects_are_empty() {
     let decor = Decor::new();
     let ctx = decor.ctx(RelicState::None);
-    for def in CATALOG {
+    for def in EFFETS_ENCORE_NEUTRES {
         for hook in HOOKS {
             assert!(
-                effects_for(*def, hook, &ctx).is_empty(),
+                effects_for(def, hook, &ctx).is_empty(),
                 "{def:?} produit déjà un effet sur {hook:?}"
             );
         }
@@ -415,5 +437,292 @@ fn test_effects_for_is_pure() {
             assert_eq!(premier, second, "{def:?} n'est pas pure sur {hook:?}");
             assert_eq!(ctx.state, RelicState::Counter(3), "{def:?} a touché l'état");
         }
+    }
+}
+
+// ---- Les trois reliques `OnScoringDie` (TASK-57) ----
+
+use core_engine::evaluator::HandEvaluator;
+use core_engine::scoring::{ScoreAction, ScoringPipeline, StepSource};
+
+/// Dés de valeurs imposées, identifiants dans l'ordre du tableau.
+fn des(valeurs: &[u8]) -> Vec<Die> {
+    valeurs
+        .iter()
+        .enumerate()
+        .map(|(index, valeur)| {
+            let mut de = Die::new(DieId(index as u32), 6);
+            de.current_value = *valeur;
+            de
+        })
+        .collect()
+}
+
+fn figure(dice: &[Die], voulue: YahtzeeHand) -> HandMatch {
+    HandEvaluator::evaluate(dice)
+        .into_iter()
+        .find(|candidate| candidate.hand == voulue)
+        .expect("figure attendue")
+}
+
+fn inventaire_de(def: RelicId) -> RelicInventory {
+    let mut inventaire = RelicInventory::new(5);
+    inventaire.add_relic(def).expect("slot libre");
+    inventaire
+}
+
+fn blind_nu() -> BlindContext {
+    BlindContext {
+        blind: BlindDefinition::default(),
+        target_score: 300,
+        current_score: 0,
+        hands_remaining: 4,
+        used_hands: HandGrid::default(),
+    }
+}
+
+/// Les effets d'un palier, filtrés sur ceux que la relique a produits.
+fn effets_de_relique(rapport: &core_engine::scoring::ScoringReport) -> Vec<ScoreAction> {
+    rapport
+        .steps
+        .iter()
+        .filter(|pas| matches!(pas.source, StepSource::Relic { .. }))
+        .map(|pas| pas.action)
+        .collect()
+}
+
+/// Un appel direct sur un dé donné : éprouve la **logique** de la relique,
+/// sans décor de pipeline.
+fn sur_le_de(def: RelicId, decor: &Decor, valeur: u8) -> Vec<ScoreAction> {
+    let ctx = TriggerCtx {
+        die: Some((DieId(1), valeur)),
+        ..decor.ctx(RelicState::None)
+    };
+    effects_for(def, Hook::OnScoringDie, &ctx)
+        .into_iter()
+        .map(|effet| effet.action)
+        .collect()
+}
+
+#[test]
+fn test_cracked_die_on_odd_dice() {
+    // **Par le pipeline**, parce que ce test affirme un *score* : trois dés
+    // impairs sur une Grande Suite de niveau 1 donnent 40 + 15 = 55 Chips et
+    // 400 + 300 = 700 centièmes de Mult, soit 385.
+    let dice = des(&[1, 3, 5, 2, 4]);
+    let main = figure(&dice, YahtzeeHand::LargeStraight);
+    assert_eq!(
+        main.scoring_dice.len(),
+        5,
+        "les cinq dés sont comptabilisés"
+    );
+
+    let rapport = ScoringPipeline::resolve(
+        &main,
+        &dice,
+        &HandLevels::default(),
+        &inventaire_de(RelicId::CrackedDie),
+        &blind_nu(),
+    );
+
+    assert_eq!(
+        effets_de_relique(&rapport),
+        vec![
+            ScoreAction::AddMult(100),
+            ScoreAction::AddMult(100),
+            ScoreAction::AddMult(100)
+        ],
+        "un effet par dé impair, et rien d'autre"
+    );
+    // **Qui signe l'effet.** La source identifie la relique et l'exemplaire :
+    // le journal l'affiche, et la mise en scène de l'Étape 4 s'en sert pour
+    // frapper la bonne carte. Rien ne le vérifiait, et le banc a montré qu'une
+    // relique pouvait signer du nom d'une autre.
+    for pas in rapport
+        .steps
+        .iter()
+        .filter(|pas| matches!(pas.source, StepSource::Relic { .. }))
+    {
+        assert_eq!(
+            pas.source,
+            StepSource::Relic {
+                uid: 0,
+                def: RelicId::CrackedDie
+            }
+        );
+    }
+
+    assert_eq!(rapport.chips, 55);
+    assert_eq!(rapport.mult, 700);
+    assert_eq!(rapport.final_score, 385);
+}
+
+#[test]
+fn test_polished_stone_on_even_dice() {
+    let decor = Decor::new();
+    assert_eq!(
+        sur_le_de(RelicId::PolishedStone, &decor, 2),
+        vec![ScoreAction::AddChips(10)]
+    );
+    assert_eq!(
+        sur_le_de(RelicId::PolishedStone, &decor, 4),
+        vec![ScoreAction::AddChips(10)]
+    );
+    assert!(sur_le_de(RelicId::PolishedStone, &decor, 1).is_empty());
+    assert!(sur_le_de(RelicId::PolishedStone, &decor, 5).is_empty());
+    // Une face au-delà de six garde sa parité naturelle.
+    assert_eq!(
+        sur_le_de(RelicId::PolishedStone, &decor, 8),
+        vec![ScoreAction::AddChips(10)]
+    );
+    assert!(sur_le_de(RelicId::PolishedStone, &decor, 7).is_empty());
+}
+
+#[test]
+fn test_cracked_die_logic_is_parity() {
+    let decor = Decor::new();
+    for impair in [1, 3, 5, 7] {
+        assert_eq!(
+            sur_le_de(RelicId::CrackedDie, &decor, impair),
+            vec![ScoreAction::AddMult(100)],
+            "face {impair}"
+        );
+    }
+    for pair in [2, 4, 6, 8] {
+        assert!(
+            sur_le_de(RelicId::CrackedDie, &decor, pair).is_empty(),
+            "face {pair}"
+        );
+    }
+}
+
+#[test]
+fn test_pyramid_without_six_is_silent() {
+    let decor = Decor::new();
+    for valeur in [1, 2, 3, 4, 5, 7, 8] {
+        assert!(
+            sur_le_de(RelicId::PyramidOfSixes, &decor, valeur).is_empty(),
+            "face {valeur}"
+        );
+    }
+}
+
+#[test]
+fn test_pyramid_fires_once_per_six() {
+    // Par le pipeline : ce test parle du **nombre** de déclenchements, donc du
+    // parcours, pas de la logique d'un dé.
+    let dice = des(&[6, 6, 6, 1, 2]);
+    let main = figure(&dice, YahtzeeHand::Sixes);
+    assert_eq!(main.scoring_dice.len(), 3);
+
+    let rapport = ScoringPipeline::resolve(
+        &main,
+        &dice,
+        &HandLevels::default(),
+        &inventaire_de(RelicId::PyramidOfSixes),
+        &blind_nu(),
+    );
+    assert_eq!(
+        effets_de_relique(&rapport),
+        vec![
+            ScoreAction::AddChips(15),
+            ScoreAction::AddChips(15),
+            ScoreAction::AddChips(15)
+        ]
+    );
+}
+
+#[test]
+fn test_discarded_die_triggers_nothing() {
+    // **Par le pipeline**, parce que ce test parle d'une *sélection* de dés,
+    // qui est le travail de l'évaluateur. Figure « Deux » : les deux 2 sont
+    // comptabilisés, et l'écart porte un impair, un pair et un six.
+    let dice = des(&[2, 2, 1, 4, 6]);
+    let main = figure(&dice, YahtzeeHand::Twos);
+    assert_eq!(main.scoring_dice.len(), 2);
+    assert_eq!(
+        main.discarded_dice.len(),
+        3,
+        "un impair, un pair et un six écartés"
+    );
+
+    for (def, attendu) in [
+        (RelicId::CrackedDie, vec![]),
+        (
+            RelicId::PolishedStone,
+            vec![ScoreAction::AddChips(10), ScoreAction::AddChips(10)],
+        ),
+        (RelicId::PyramidOfSixes, vec![]),
+    ] {
+        let rapport = ScoringPipeline::resolve(
+            &main,
+            &dice,
+            &HandLevels::default(),
+            &inventaire_de(def),
+            &blind_nu(),
+        );
+        assert_eq!(effets_de_relique(&rapport), attendu, "{def:?}");
+    }
+}
+
+#[test]
+fn test_scoring_die_relics_silent_on_hand_scored() {
+    // **Chaque relique est éprouvée sur une face qui la ferait parler**, et sa
+    // source est vérifiée au passage. Avec une face unique, la garde de hook
+    // serait masquée par la condition de valeur : un six laisse *Le Dé Fêlé*
+    // muet parce qu'il est pair, pas parce que le hook ne lui convient pas. Et
+    // sans l'assertion de source, une relique pourrait signer du nom d'une
+    // autre — la mise en scène de l'Étape 4 frapperait alors la mauvaise carte.
+    // Le banc a montré les deux trous.
+    let decor = Decor::new();
+    for (def, face_qui_declenche) in [
+        (RelicId::CrackedDie, 3),
+        (RelicId::PolishedStone, 4),
+        (RelicId::PyramidOfSixes, 6),
+    ] {
+        let ctx = TriggerCtx {
+            die: Some((DieId(1), face_qui_declenche)),
+            ..decor.ctx(RelicState::None)
+        };
+
+        let produits = effects_for(def, Hook::OnScoringDie, &ctx);
+        assert_eq!(
+            produits.len(),
+            1,
+            "{def:?} ne parle pas sur la face qui devrait la déclencher"
+        );
+        assert_eq!(
+            produits[0].source,
+            StepSource::Relic { uid: ctx.uid, def },
+            "{def:?} signe du nom d'une autre"
+        );
+
+        for hook in [Hook::OnRoll, Hook::OnHandScored, Hook::OnRoundEnd] {
+            assert!(
+                effects_for(def, hook, &ctx).is_empty(),
+                "{def:?} parle sur {hook:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_scoring_die_relics_tolerate_none_die() {
+    // Rien n'interdit structurellement un appel sans dé : la lecture doit
+    // rendre une file vide, jamais interrompre le calcul.
+    let decor = Decor::new();
+    let ctx = TriggerCtx {
+        die: None,
+        ..decor.ctx(RelicState::None)
+    };
+    for def in [
+        RelicId::CrackedDie,
+        RelicId::PolishedStone,
+        RelicId::PyramidOfSixes,
+    ] {
+        assert!(
+            effects_for(def, Hook::OnScoringDie, &ctx).is_empty(),
+            "{def:?}"
+        );
     }
 }

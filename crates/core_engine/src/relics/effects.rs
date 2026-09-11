@@ -28,7 +28,7 @@
 
 use smallvec::SmallVec;
 
-use crate::relics::{RelicId, RelicState};
+use crate::relics::{RelicId, RelicState, definitions};
 use crate::scoring::{Hook, RollModifier, ScoreEffect, TriggerCtx};
 
 // Ces deux types ne sont nommés que par les bras de fixture, tous sous
@@ -118,13 +118,17 @@ pub fn effects_for(def: RelicId, hook: Hook, ctx: &TriggerCtx) -> SmallVec<[Scor
         // reliques le compilateur est le seul contrôle qui tienne encore.
         // C'est l'argument que le corpus emploie pour interdire le `_ =>` dans
         // `rarity_of` ; il vaut ici mot pour mot.
+        // Délégation : les valeurs de score vivent dans le module de la
+        // relique, jamais ici. Le `match` reste une table lisible sur douze
+        // bras, et le hook est filtré par la relique elle-même.
+        (RelicId::CrackedDie, _) => definitions::cracked_die::effects(hook, ctx),
+        (RelicId::PolishedStone, _) => definitions::polished_stone::effects(hook, ctx),
+        (RelicId::PyramidOfSixes, _) => definitions::pyramid_of_sixes::effects(hook, ctx),
+
         (
-            RelicId::CrackedDie
-            | RelicId::PolishedStone
-            | RelicId::TripletMaster
+            RelicId::TripletMaster
             | RelicId::FullHouseArchitect
             | RelicId::StellarAlignment
-            | RelicId::PyramidOfSixes
             | RelicId::Pendulum
             | RelicId::UnstableObsidian
             | RelicId::DivineYahtzee
@@ -418,20 +422,13 @@ mod tests {
             assert!(effects_for(def, hook, &ctx).is_empty(), "{def:?} {hook:?}");
         }
 
-        // Vide à cette étape, `CATALOG` étant `&[]` : cette boucle ne fait
-        // aucune itération et n'affirme donc rien aujourd'hui. Elle devient
-        // substantielle à l'Étape 5, quand les douze reliques de production y
-        // entreront. Les trois couples ci-dessus, eux, mordent réellement.
-        for def in CATALOG {
-            for hook in [
-                Hook::OnRoll,
-                Hook::OnScoringDie,
-                Hook::OnHandScored,
-                Hook::OnRoundEnd,
-            ] {
-                assert!(effects_for(*def, hook, &ctx).is_empty());
-            }
-        }
+        // **La boucle sur le catalogue a été retirée à TASK-57.** Elle
+        // affirmait que toute relique du catalogue est muette sur tout hook,
+        // ce qui était vrai du squelette et cesse de l'être à la première
+        // relique implémentée. La propriété résiduelle — les reliques encore
+        // neutres le restent — est portée par `test_skeleton_effects_are_empty`
+        // dans `tests/relics.rs`, avec **une seule** liste à maintenir. Ce test
+        // retrouve donc son sujet : les trois fixtures et leurs hooks.
     }
 
     #[test]
