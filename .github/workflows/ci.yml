@@ -1183,6 +1183,49 @@ jobs:
           forbid_prod "critère 7  évaluation partielle des dés visibles" \
                   'Without<Hidden>|hidden_ui|visible_dice|partial_eval' crates/
 
+
+          # ---- Étape 6 : étalage et rareté (TASK-76) ----
+          SHOP=$SRC/shop
+          GEN=$SHOP/generator.rs
+          # **Table unique du projet.** Une table à soixante-dix pour cent de
+          # Communes a circulé dans un document plus ancien ; elle est fausse.
+          # La garde porte sur une **déclaration** de poids, non sur le chiffre :
+          # la prose doit pouvoir nommer la table écartée, ce qui est même
+          # demandé par le ticket.
+          require "critère 6  la table de rareté, au pour-mille" -n \
+                  'pub const RARITY_WEIGHTS_PERMILLE: \[u32; 4\] = \[650, 250, 90, 10\];' "$GEN"
+          forbid  "critère 6  seconde table de rareté" -n 'RARITY_WEIGHTS_PERMILLE *(:|=)' crates/ -g '!**/shop/generator.rs'
+          forbid  "critère 6  table de rareté fausse" -n \
+                  'WEIGHTS[A-Z_]* *(:[^=]*)?= *\[ *(700|70|650 *, *250 *, *45)' crates/
+          # Déterminisme de l'offre : ordre d'itération garanti, entiers seuls.
+          forbid  "critère 6  table associative dans l'offre" -n 'HashMap|HashSet' "$SHOP"
+          forbid  "critère 6  flottant dans l'offre" -n '\bf64\b|\bf32\b' "$SHOP"
+          forbid  "critère 6  aléa hors du flux de boutique" -n \
+                  'thread_rng|rand::random|OsRng|from_entropy|rng\.dice|rng\.boss|rng\.relic_effects' "$SHOP"
+          # Aucune panique dans la génération : le vivier vide s'écrit en
+          # `let Some(..) else`, et rend un étalage amputé.
+          forbid  "critère 6  panique dans la génération" -n 'unwrap\(\)|expect\(|panic!|\[0\]' "$GEN"
+          # Le nom v1 de la variante. Ancrée sur une **déclaration ou une
+          # construction**, non sur le nom : le commentaire qui explique que ce
+          # nom est proscrit doit pouvoir l'écrire, et le ticket l'exige même.
+          forbid  "critère 6  nom v1 du modificateur de dé" -n \
+                  'DiceMod\(|::DiceMod\b|^\s{4}DiceMod' crates/
+          # L'étalage est une ressource, jamais un composant.
+          forbid  "critère 6  l'étalage dérive Component" -n 'derive\([^)]*\bComponent\b|component::Component' "$SHOP"
+          # Le coût de relance initial, déclaré une fois et posé par le
+          # générateur : c'est ce qui rend la remise à zéro vraie par visite.
+          require "critère 6  le coût de relance initial est unique" -n \
+                  '^pub const INITIAL_REROLL_COST: u32 = 5;' "$SHOP/mod.rs"
+          forbid  "critère 6  seconde déclaration du coût de relance" -n \
+                  'const INITIAL_REROLL_COST' crates/ -g '!**/shop/mod.rs'
+          # La correspondance seuil vers rareté est séparée du tirage : c'est
+          # elle qui rend les frontières éprouvables valeur par valeur.
+          require "critère 6  la correspondance est séparée du tirage" -n \
+                  '^pub fn rarity_for_permille\(seuil: u32\) -> RelicRarity \{' "$GEN"
+          # Aucun retirage : il décalerait le flux dès qu'une Légendaire sort.
+          forbid  "critère 6  boucle de retirage dans le repli" -n \
+                  'while[^{]*is_empty|loop *\{' "$GEN"
+
           exit $status
 
   # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en
