@@ -54,7 +54,7 @@ use bevy::prelude::*;
 use core_engine::blinds::{BlindContext, BlindModifier};
 use core_engine::dice::Die;
 use core_engine::evaluator::{HandEvaluator, HandMatch, rescore_with_levels};
-use core_engine::hands::YahtzeeHand;
+use core_engine::hands::{HandLevels, YahtzeeHand};
 
 use crate::components::{Hidden, Locked};
 use crate::plugin::GameSet;
@@ -139,6 +139,51 @@ pub fn evaluable_dice(dice: &[Die], blind: &BlindContext) -> Vec<Die> {
         .collect()
 }
 
+/// Les figures d'une main, chiffrées aux niveaux de la run.
+///
+/// **Chemin de calcul unique.** L'évaluation temps réel et la révélation de
+/// *La Fissure* passent toutes deux par ici : un second chemin divergerait de
+/// l'autre, et l'écart ne se verrait qu'au score.
+///
+/// **Elle ne porte pas la garde d'occultation, et ne peut pas la porter.**
+/// `submit_hand` retire `Hidden` par `Commands`, dont l'application est
+/// différée : le retrait n'est pas visible dans la même exécution. Une garde
+/// placée ici verrait donc encore les marqueurs et rendrait une liste vide, et
+/// le boss ne révélerait jamais rien. La garde reste dans
+/// `update_hand_evaluations`, qui est son seul lieu légitime.
+///
+/// La tranche reçue est déjà triée par identifiant et déjà filtrée par
+/// `evaluable_dice` : `evaluate` retient les plus petits identifiants d'une
+/// face, donc l'ordre décide des dés retenus.
+pub fn remplir(roll: &[Die], levels: &HandLevels) -> Vec<HandMatch> {
+    let mut found = HandEvaluator::evaluate(roll);
+    // Après la détection, avant le remplissage. `evaluate` chiffre tout au
+    // niveau 1 : sans ce passage, la surbrillance classe faux dès le premier
+    // parchemin de grille. La liste sort retriée ; ne pas la retrier.
+    //
+    // **La même tranche** qu'`evaluate` : le chiffrage résout par identifiant
+    // et ne somme que `scoring_dice`, donc le lancer complet donnerait le même
+    // nombre, mais deux notions de « la main » circuleraient ici.
+    rescore_with_levels(&mut found, roll, levels);
+    found
+}
+
+/// La tranche d'une main, triée puis filtrée par le boss courant.
+///
+/// Partagée par les deux chemins pour la même raison que `remplir` : l'ordre
+/// des dés décide de ceux que chaque figure retient.
+pub fn tranche_evaluable(
+    dice: impl Iterator<Item = Die>,
+    blind: Option<&BlindContext>,
+) -> Vec<Die> {
+    let mut roll: Vec<Die> = dice.collect();
+    roll.sort_unstable_by_key(|die| die.id);
+    match blind {
+        Some(blind) => evaluable_dice(&roll, blind),
+        None => roll,
+    }
+}
+
 /// La meilleure figure encore disponible : la première entrée de la liste,
 /// **déjà triée** par `rescore_with_levels`, qui n'a pas été consommée.
 ///
@@ -221,30 +266,9 @@ fn update_hand_evaluations(
         return;
     }
 
-    // Trié par identifiant : `evaluate` retient les plus petits identifiants
-    // d'une face, donc l'ordre d'itération de la requête changerait les dés
-    // retenus par chaque figure.
-    let mut roll: Vec<Die> = dice.iter().cloned().collect();
-    roll.sort_unstable_by_key(|die| die.id);
+    let roll = tranche_evaluable(dice.iter().cloned(), blind.as_deref());
 
-    // Sous *Le Borgne*, l'évaluateur ne voit pas les dés éteints. Hors manche
-    // le contexte est absent du monde, et la main passe entière.
-    let roll = match blind {
-        Some(blind) => evaluable_dice(&roll, &blind),
-        None => roll,
-    };
-
-    let mut found = HandEvaluator::evaluate(&roll);
-    // Après la détection, avant le remplissage. `evaluate` chiffre tout au
-    // niveau 1 : sans ce passage, la surbrillance classe faux dès le premier
-    // parchemin de grille. La liste sort retriée ; ne pas la retrier.
-    //
-    // **La même tranche** qu'`evaluate` : le chiffrage résout par identifiant
-    // et ne somme que `scoring_dice`, donc le lancer complet donnerait le même
-    // nombre — mais deux notions de « la main » circuleraient ici.
-    rescore_with_levels(&mut found, &roll, &session.hand_levels);
-
-    hand.active_evaluations = found;
+    hand.active_evaluations = remplir(&roll, &session.hand_levels);
 }
 
 /// Branche le recalcul des figures.
@@ -510,6 +534,52 @@ mod tests {
         assert_eq!(trouvees[0].potential_score, 5);
         assert!(trouvees[0].scoring_dice.is_empty());
         assert!(trouvees[0].discarded_dice.is_empty());
+    }
+
+    // ---- TASK-75 : *La Fissure* ----
+
+    #[test]
+    fn test_fissure_hides_evaluations() {
+        let mut app = app_en_run(CupId::Standard);
+        entrer_dans_roll(&mut app);
+        poser_les_valeurs(&mut app, &[5, 5, 5, 2, 2]);
+        app.update();
+
+        // Témoin : sans occultation, la main produit bien des figures.
+        assert!(!evaluations_vides(&app), "le montage ne prouve rien");
+        let plein = app
+            .world()
+            .resource::<HandContext>()
+            .active_evaluations
+            .clone();
+
+        // Un seul dé masqué suffit à tout éteindre.
+        let entite = entites_des(&mut app)[0];
+        app.world_mut().entity_mut(entite).insert(Hidden);
+        app.update();
+
+        assert!(
+            evaluations_vides(&app),
+            "une figure a survécu à l'occultation"
+        );
+        // **La fuite que le raccord B ferme.** Masquer à l'affichage laisserait
+        // l'information dans une ressource que tout système peut lire, et le
+        // premier écran de l'Étape 7 l'afficherait. Aucune valeur de dé, aucun
+        // score potentiel, aucun identifiant de la main n'y subsiste.
+        assert!(
+            best_available_hand(&[], &manche(None)).is_none(),
+            "une surbrillance est proposée sur une liste vide"
+        );
+        assert!(!plein.is_empty(), "témoin vide");
+
+        // Et le retrait rend la vue.
+        app.world_mut().entity_mut(entite).remove::<Hidden>();
+        app.update();
+        assert_eq!(
+            app.world().resource::<HandContext>().active_evaluations,
+            plein,
+            "la révélation ne rend pas la même main"
+        );
     }
 
     #[test]

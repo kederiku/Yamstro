@@ -69,7 +69,7 @@ use core_engine::hands::HandGrid;
 use core_engine::relics::RelicInventory;
 use core_engine::relics::effects::roll_modifier_for;
 
-use crate::components::{DieView, Locked, Scoring};
+use crate::components::{DieView, Hidden, Locked, Scoring};
 use crate::resources::{HandContext, RunSession};
 use crate::states::{AppState, RunPhase};
 
@@ -306,7 +306,12 @@ fn rank_of(index: usize) -> u8 {
 ///
 /// Calcule les relances, réinitialise le contexte de main, ajuste le nombre de
 /// dés à la configuration puis les roule. N'écrit rien dans le contexte de
-/// blind, ne décrémente aucune relance, ne consomme que le flux `rng.dice`.
+/// blind et ne décrémente aucune relance.
+///
+/// **Deux flux, et deux seulement.** `rng.dice` pour les lancers, et `rng.boss`
+/// pour les dés que *La Fissure* cache : ceux-ci ne peuvent se tirer qu'ici,
+/// les dés n'existant pas avant, et les tirer sur `rng.dice` décalerait la
+/// séquence des lancers selon la présence du boss.
 fn setup_round(
     mut commands: Commands,
     session: Option<ResMut<RunSession>>,
@@ -348,12 +353,28 @@ fn setup_round(
         commands.entity(entity).despawn();
     }
 
+    // *La Fissure* cache ses dés **au lancer**, et le tirage porte sur les
+    // rangs : les dés manquants naissent plus bas, par `Commands`, et ne sont
+    // donc pas encore visibles ici. Un tirage sur les entités présentes
+    // laisserait la première manche d'une run sans aucun dé caché.
+    //
+    // Le marqueur est retiré de tous les dés avant d'être reposé : survivant à
+    // une manche sans boss, il laisserait la liste des figures vide sans
+    // raison visible.
+    let masques =
+        core_engine::blinds::hidden_ranks(blind.blind.hidden_dice(), wanted, &mut session.rng.boss);
+
     // 4 et 5 sur les dés conservés, dans l'ordre des identifiants.
     for (index, (entity, _)) in present.iter().enumerate() {
         // Le marqueur et le champ se retirent ensemble : c'est `Die.locked`
         // que `Die::roll` consulte, et une divergence rendrait le verrouillage
         // inopérant sans erreur de compilation.
-        commands.entity(*entity).remove::<(Locked, Scoring)>();
+        commands
+            .entity(*entity)
+            .remove::<(Locked, Scoring, Hidden)>();
+        if masques.contains(&index) {
+            commands.entity(*entity).insert(Hidden);
+        }
 
         let Ok((_, mut die, mut view)) = dice.get_mut(*entity) else {
             continue;
@@ -369,13 +390,16 @@ fn setup_round(
         next = next.saturating_add(1);
         die.roll(&mut session.rng.dice, false);
 
-        commands.spawn((
+        let mut neuf = commands.spawn((
             die,
             DieView {
                 order: rank_of(index),
             },
             DespawnOnExit(AppState::InRun),
         ));
+        if masques.contains(&index) {
+            neuf.insert(Hidden);
+        }
     }
 
     commands.insert_resource(NextDieId(next));
@@ -1081,7 +1105,7 @@ mod tests_relances_et_valeurs_forcees {
     use core_engine::relics::{RelicId, RelicState};
 
     use crate::systems::fixtures::{
-        app_a_la_graine, des_tries, entrer_dans_roll, inventaire, session, valeurs_des,
+        app_a_la_graine, des_tries, entrer_dans_roll, frapper, inventaire, session, valeurs_des,
     };
 
     fn blind_nue() -> BlindDefinition {
@@ -1173,6 +1197,140 @@ mod tests_relances_et_valeurs_forcees {
                 &BlindDefinition::default(),
             ),
             -1
+        );
+    }
+
+    // ---- TASK-75 : *La Fissure* ----
+
+    /// Manche cachant `n` dés.
+    fn manche_fissuree(n: u8) -> BlindDefinition {
+        BlindDefinition {
+            modifier: Some(BlindModifier::HideDice(n)),
+            ..BlindDefinition::default()
+        }
+    }
+
+    fn masques(app: &mut App) -> Vec<DieId> {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&Die, With<crate::components::Hidden>>();
+        let mut v: Vec<DieId> = q.iter(app.world()).map(|die| die.id).collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// Entre dans une main sous la manche donnée.
+    fn main_sous(app: &mut App, blind: BlindDefinition) {
+        app.world_mut().resource_mut::<BlindContext>().blind = blind;
+        entrer_dans_roll(app);
+        app.update();
+    }
+
+    #[test]
+    fn test_hidden_dice_are_reproducible() {
+        let cacher = |graine: u64| {
+            let mut app = app_a_la_graine(CupId::Standard, graine);
+            main_sous(&mut app, manche_fissuree(2));
+            masques(&mut app)
+        };
+
+        let gauche = cacher(11);
+        assert_eq!(gauche.len(), 2, "deux dés cachés, distincts");
+        assert_eq!(gauche, cacher(11), "même graine, mêmes dés");
+        // **Graine fixée, assertion sur ce qu'elle produit.** Sans les valeurs
+        // en clair, un mélange changé de forme rend d'autres dés et reste
+        // reproductible : le test passerait sans rien garder.
+        assert_eq!(gauche, vec![DieId(2), DieId(4)]);
+
+        // Contre-épreuve : sans elle, un tirage constant passerait.
+        let mut autre = (12..40).map(cacher).filter(|v| *v != gauche);
+        assert!(
+            autre.next().is_some(),
+            "aucune graine ne cache d'autres dés : le tirage est constant"
+        );
+    }
+
+    #[test]
+    fn test_hidden_draw_does_not_shift_the_dice_stream() {
+        // **Le motif du flux séparé.** Tirer les dés cachés sur `rng.dice`
+        // décalerait la séquence des lancers selon la présence du boss : deux
+        // joueurs de même graine n'auraient plus les mêmes dés dès la première
+        // Mise Boss. Sans ce test, un tirage sur le mauvais flux passe au vert.
+        let valeurs = |blind: BlindDefinition| {
+            let mut app = app_a_la_graine(CupId::Standard, 11);
+            main_sous(&mut app, blind);
+            valeurs_des(&mut app)
+        };
+
+        assert_eq!(
+            valeurs(manche_fissuree(2)),
+            valeurs(BlindDefinition::default()),
+            "le boss a décalé la séquence des dés"
+        );
+    }
+
+    #[test]
+    fn test_reroll_keeps_hidden_markers() {
+        let mut app = app_a_la_graine(CupId::Standard, 11);
+        main_sous(&mut app, manche_fissuree(2));
+        let avant = masques(&mut app);
+        assert_eq!(avant.len(), 2);
+
+        // Une relance : les valeurs changent, les marqueurs restent.
+        let valeurs = valeurs_des(&mut app);
+        frapper(&mut app, KeyCode::Space);
+        app.update();
+        assert_ne!(valeurs_des(&mut app), valeurs, "la relance n'a rien roulé");
+
+        assert_eq!(masques(&mut app), avant, "un marqueur a bougé à la relance");
+    }
+
+    #[test]
+    fn test_hidden_cleared_between_blinds() {
+        let mut app = app_a_la_graine(CupId::Standard, 11);
+        main_sous(&mut app, manche_fissuree(2));
+        assert_eq!(masques(&mut app).len(), 2);
+
+        // Manche suivante, sans boss : aucun marqueur ne survit.
+        main_sous(&mut app, BlindDefinition::default());
+        assert!(
+            masques(&mut app).is_empty(),
+            "un marqueur a survécu au boss"
+        );
+        assert!(
+            !app.world()
+                .resource::<HandContext>()
+                .active_evaluations
+                .is_empty(),
+            "la liste est restée vide sans raison visible"
+        );
+    }
+
+    #[test]
+    fn test_hidden_ranks_draw_without_replacement() {
+        // Le tirage est pur : il s'éprouve sans monde Bevy.
+        let mut rng = core_engine::rng::RunRng::from_seed(3);
+
+        for (demande, total, attendu) in [(2_u8, 5_usize, 2_usize), (9, 5, 5), (2, 0, 0), (0, 5, 0)]
+        {
+            let rangs = core_engine::blinds::hidden_ranks(demande, total, &mut rng.boss);
+            assert_eq!(rangs.len(), attendu, "{demande} sur {total}");
+            assert!(rangs.iter().all(|r| *r < total), "rang hors bornes");
+
+            let mut uniques = rangs.clone();
+            uniques.dedup();
+            assert_eq!(uniques, rangs, "un rang est tiré deux fois");
+        }
+
+        // **Une graine qui sépare les deux formes de mélange.** Un mélange
+        // partiel et un mélange avec remise rendent tous deux des rangs
+        // distincts, le tableau restant une permutation : seule la valeur
+        // tirée les distingue. Mesuré, la graine 11 les confond et la 4 les
+        // sépare ; c'est donc celle-ci qu'il faut épingler.
+        let mut graine_4 = core_engine::rng::RunRng::from_seed(4);
+        assert_eq!(
+            core_engine::blinds::hidden_ranks(2, 5, &mut graine_4.boss),
+            vec![2, 4]
         );
     }
 

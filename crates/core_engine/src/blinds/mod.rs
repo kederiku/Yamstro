@@ -8,6 +8,7 @@ pub use scaling::target_score;
 #[cfg(feature = "bevy")]
 use bevy_ecs::reflect::ReflectComponent;
 
+use rand::{Rng, RngExt};
 use smallvec::SmallVec;
 
 use crate::hands::{HandGrid, YahtzeeHand};
@@ -117,6 +118,18 @@ pub struct BlindDefinition {
 }
 
 impl BlindDefinition {
+    /// Le nombre de dés que *La Fissure* cache, zéro sous toute autre manche.
+    ///
+    /// Même motif que l'accesseur voisin : la variante porte une charge utile
+    /// qu'il faut **lire**, pas comparer, et le site unique se corrige d'un
+    /// seul endroit si la forme du modificateur évolue.
+    pub fn hidden_dice(&self) -> u8 {
+        match self.modifier {
+            Some(BlindModifier::HideDice(nombre)) => nombre,
+            _ => 0,
+        }
+    }
+
     /// Le slot mis en cage par *La Cage*, `None` sous toute autre manche.
     ///
     /// **Lecture seule, et site unique.** `has_modifier` ne convient pas : la
@@ -134,6 +147,39 @@ impl BlindDefinition {
             _ => None,
         }
     }
+}
+
+/// Les rangs des dés que *La Fissure* cache, tirés **sans remise**.
+///
+/// Elle vit ici, et non dans la crate d'états, pour deux raisons. Le tirage est
+/// de l'arithmétique de manche, comme `target_score` ; et la crate d'états ne
+/// dépend délibérément que de `core_engine` et de `bevy`, si bien qu'y écrire
+/// un tirage lui imposerait `rand` en dépendance directe.
+///
+/// **Mélange partiel plutôt que tirage avec rejet.** Un rejet consommerait un
+/// nombre variable de valeurs du flux selon les collisions, et deux runs de
+/// même graine divergeraient dès la première Mise Boss. Ici la consommation ne
+/// dépend que de `total`.
+///
+/// Rend **tous** les rangs quand le boss en demande plus que la main n'en
+/// compte, et une liste **vide** quand elle est vide : `random_range` panique
+/// sur un intervalle vide, comme `Die::roll` le documente déjà.
+///
+/// Les rangs sortent **triés**, ce qui rend la liste comparable d'une run à
+/// l'autre sans dépendre de l'ordre du mélange.
+#[allow(clippy::implied_bounds_in_impls)]
+pub fn hidden_ranks(count: u8, total: usize, rng: &mut (impl Rng + RngExt)) -> Vec<usize> {
+    let vises = usize::from(count).min(total);
+    let mut rangs: Vec<usize> = (0..total).collect();
+
+    for pris in 0..vises {
+        let tire = pris + rng.random_range(0..(total - pris));
+        rangs.swap(pris, tire);
+    }
+
+    rangs.truncate(vises);
+    rangs.sort_unstable();
+    rangs
 }
 
 /// État de la manche en cours.

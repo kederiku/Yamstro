@@ -184,12 +184,24 @@ jobs:
           forbid_prod "critère 4  positions fixes de dés" \
                   '(0\.\.5|\[Entity; 5\]|\[Die; 5\]|\b(die_slots?|dice_slots?)\b|slots?\s*\[)' "$SETUP"
           forbid  "critère 4  littéraux de main"         -n 'rerolls_left\s*=\s*[0-9]|dice_count\s*=\s*[0-9]' "$SETUP"
-          # Production seule, même motif : le test de *L'Étau* passe par le
-          # catalogue, donc par `boss_definition`, qui prend le flux des boss
-          # sans rien y tirer. La mise en place de la manche, elle, n'en tire
-          # toujours que sur celui des dés.
+          # Production seule : le test de *L'Étau* passe par le catalogue, donc
+          # par `boss_definition`, qui prend le flux des boss sans rien y tirer.
+          #
+          # **Une exception, nommée.** *La Fissure* tire ses dés cachés sur
+          # `rng.boss`, et ce tirage ne peut avoir lieu qu'ici : les dés
+          # n'existent pas avant. Le tirer sur `rng.dice` décalerait la séquence
+          # des lancers selon la présence du boss, ce que
+          # `test_hidden_draw_does_not_shift_the_dice_stream` interdit. La garde
+          # exige donc la forme exacte de cet appel, et refuse toute autre.
           forbid_prod "critère 4  flux hors des dés" \
-                  'rng\.(shop|boss|relic_effects)|thread_rng|from_entropy' "$SETUP"
+                  'rng\.(shop|relic_effects)|thread_rng|from_entropy' "$SETUP"
+          # `rg` n'a pas de lookahead : le « second tirage » s'interdit par sa
+          # forme réelle, un appel de méthode porté directement sur le flux.
+          forbid_prod "critère 6  tirage direct sur le flux des boss" \
+                  'rng\.boss\.' crates/game_state/src
+          require "critère 6  les dés cachés se tirent sur le flux des boss" -U -n \
+                  'hidden_ranks\(blind\.blind\.hidden_dice\(\), wanted, &mut session\.rng\.boss\)' \
+                  crates/game_state/src/systems/setup.rs
           forbid  "critère 4  pool de dés en parallèle"  -n 'DicePool::new|DicePool\s*\{|:\s*DicePool\b|<DicePool>' crates/game_state/src
           # Aucun test ne peut voir cette relance : après le nettoyage des
           # verrous, force = true et force = false donnent le même résultat.
@@ -1140,6 +1152,36 @@ jobs:
           # Le pipeline n'atteint jamais le champ : il passe par les accesseurs.
           forbid_prod "critère 6  le pipeline lit le modificateur à nu" \
                   'blind\.modifier|\.blind\.modifier' "$SRC/scoring"
+
+
+          # ---- Étape 6 : La Fissure (TASK-75) ----
+          # **Ancré sur l'acte, non sur le nom.** `Hidden` apparaît vingt-deux
+          # fois dans la crate d'états : sa déclaration, sa ré-exportation, les
+          # en-têtes qui expliquent la règle, et les tests. Ce qui doit rester
+          # unique, c'est l'endroit où il est **posé** et celui où il est
+          # **retiré**.
+          require "critère 7  le masque se pose à la mise en place" -n \
+                  'commands\.entity\(\*entity\)\.insert\(Hidden\)' \
+                  crates/game_state/src/systems/setup.rs
+          forbid_prod "critère 7  masque posé ailleurs qu'à la mise en place" \
+                  'insert\(Hidden\)|insert\(\(Hidden|, Hidden\)' --exclure '/systems/setup.rs' crates/
+          require "critère 7  le masque se retire à la soumission" -n \
+                  'remove::<Hidden>\(\)' crates/game_state/src/systems/submission.rs
+          forbid_prod "critère 7  masque retiré ailleurs qu'à la soumission" \
+                  'remove::<Hidden>' --exclure '/systems/submission.rs|/systems/setup.rs' crates/
+          # Chemin de calcul unique : l'évaluation temps réel et la révélation
+          # passent par la même fonction, sans quoi elles divergeraient.
+          forbid_prod "critère 7  second chemin d'évaluation" \
+                  'HandEvaluator::evaluate' --exclure '/systems/evaluation.rs' crates/game_state/src
+          require "critère 7  le remplissage est partagé" -n '^pub fn remplir\(' "$EVAL"
+          # La garde d'occultation ne descend pas dans le remplissage : le
+          # retrait par `Commands` est différé, et elle y verrait encore les
+          # marqueurs. Elle reste dans le système.
+          forbid_prod "critère 7  garde d'occultation descendue dans le remplissage" \
+                  'fn remplir\([^)]*Hidden' crates/
+          # Aucune évaluation partielle : elle divulguerait par différence (C23).
+          forbid_prod "critère 7  évaluation partielle des dés visibles" \
+                  'Without<Hidden>|hidden_ui|visible_dice|partial_eval' crates/
 
           exit $status
 

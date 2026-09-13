@@ -33,19 +33,20 @@ use core_engine::dice::Die;
 use core_engine::relics::RelicInventory;
 use core_engine::scoring::ScoringPipeline;
 
-use crate::components::{DieView, Scoring};
+use crate::components::{DieView, Hidden, Scoring};
 use crate::plugin::InputSet;
 use crate::resources::{HandContext, RunSession, ScoringStepQueue};
 use crate::states::RunPhase;
-use crate::systems::evaluation::is_hand_available;
+use crate::systems::evaluation::{is_hand_available, remplir, tranche_evaluable};
 
 /// `Update`, sous `in_state(RunPhase::Roll)`, dans l'ensemble gelé par
 /// l'overlay. C'est un système d'**entrée** : ni `OnExit`, ni `OnEnter`.
 fn submit_hand(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
+    session: Option<Res<RunSession>>,
     blind: Option<Res<BlindContext>>,
-    hand: Option<Res<HandContext>>,
+    hand: Option<ResMut<HandContext>>,
     dice: Query<(Entity, &Die)>,
     mut next: ResMut<NextState<RunPhase>>,
 ) {
@@ -53,7 +54,7 @@ fn submit_hand(
         return;
     }
 
-    let (Some(blind), Some(hand)) = (blind, hand) else {
+    let (Some(session), Some(blind), Some(mut hand)) = (session, blind, hand) else {
         return;
     };
 
@@ -64,6 +65,23 @@ fn submit_hand(
     if !is_hand_available(&blind, cell) {
         return;
     }
+
+    // **La révélation, ici et pas ailleurs.** *La Fissure* a laissé la liste
+    // des figures vide toute la main : le marqueur `Scoring` se pose juste
+    // dessous, et `build_scoring_report` relit `active_evaluations` à l'entrée
+    // dans la phase de comptage. Compter sur le recalcul temps réel pour
+    // repasser après coup suspendrait les deux à l'ordre de deux ensembles et
+    // à une transition qui n'a pas encore pris effet.
+    //
+    // Le retrait passe par `Commands`, donc il est différé : c'est pourquoi le
+    // recalcul ci-dessous ne consulte aucun marqueur et évalue la main
+    // entière. `remplir` est le **même** chemin que l'évaluation temps réel ;
+    // un second divergerait, et l'écart ne se verrait qu'au score.
+    for (entity, _) in &dice {
+        commands.entity(entity).remove::<Hidden>();
+    }
+    let roll = tranche_evaluable(dice.iter().map(|(_, die)| die.clone()), Some(&blind));
+    hand.active_evaluations = remplir(&roll, &session.hand_levels);
 
     // Marquer exactement les dés retenus par la figure, et aucun autre. Aucun
     // dé n'est retiré, verrouillé ou non : seul le marqueur distingue les dés
@@ -194,6 +212,7 @@ pub(crate) fn register(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::Hidden;
     use core_engine::blinds::BlindContext;
     use core_engine::cups::CupId;
     use core_engine::dice::{Die, DieId};
@@ -352,6 +371,102 @@ mod tests {
         app.update();
         app.update();
         assert_eq!(phase(&app), RunPhase::Scoring);
+    }
+
+    // ---- TASK-75 : *La Fissure* ----
+
+    /// Les entités portant le marqueur d'occultation.
+    fn masques(app: &mut App) -> Vec<Entity> {
+        let mut q = app.world_mut().query_filtered::<Entity, With<Hidden>>();
+        let mut v: Vec<Entity> = q.iter(app.world()).collect();
+        v.sort();
+        v
+    }
+
+    fn evaluations(app: &App) -> usize {
+        app.world()
+            .resource::<HandContext>()
+            .active_evaluations
+            .len()
+    }
+
+    #[test]
+    fn test_submission_reveals_and_reevaluates() {
+        let mut app = app_prete(None);
+        poser_le_boss(&mut app, core_engine::blinds::definitions::BossId::Rift);
+        // La manche est entrée avant que le boss soit posé : on repasse par
+        // une main pour que `setup_round` applique l'occultation.
+        entrer_dans_roll(&mut app);
+        app.update();
+
+        assert_eq!(masques(&mut app).len(), 2, "deux dés cachés");
+        assert_eq!(evaluations(&app), 0, "la liste doit rester vide");
+
+        // La case se choisit à l'aveugle, puis la soumission révèle.
+        app.world_mut().resource_mut::<HandContext>().selected_hand = Some(YahtzeeHand::Chance);
+        frapper(&mut app, KeyCode::Enter);
+        // Deux frames : la première exécute la soumission, la seconde applique
+        // le `NextState`.
+        app.update();
+        app.update();
+
+        assert!(masques(&mut app).is_empty(), "un marqueur a survécu");
+        assert!(evaluations(&app) > 0, "la révélation n'a rien rempli");
+        assert_eq!(phase(&app), RunPhase::Scoring);
+
+        // **Ce que la révélation sert, et ce qui la rend nécessaire.** Le
+        // recalcul doit avoir lieu **dans** la soumission : le marqueur se pose
+        // juste dessous, et le rapport se construit à l'entrée dans la phase.
+        // Sans ces deux assertions, une révélation qui ne recalculerait rien
+        // passerait au vert, la frame suivante remplissant la liste de toute
+        // façon une fois les marqueurs retirés.
+        assert!(
+            !des_marques(&mut app).is_empty(),
+            "aucun dé marqué : la figure n'a pas été retrouvée à la révélation"
+        );
+        assert!(
+            !app.world().resource::<ScoringStepQueue>().steps.is_empty(),
+            "la file est vide : le rapport n'a rien reçu"
+        );
+    }
+
+    #[test]
+    fn test_unrealised_hand_is_submittable() {
+        // **Le cœur du boss.** Une figure non réalisée transite quand même, et
+        // la case est misée. Mesuré : il n'y a alors **aucun** score, et non un
+        // score faible : `build_scoring_report` sort tôt faute de `HandMatch`,
+        // et `ScoringStepQueue` reste vide. Le « score faible » que le corpus
+        // promet n'est chiffré nulle part, et le sort de la case est une
+        // question ouverte pour TASK-81 et l'Étape 6 bis.
+        let mut app = app_prete(None);
+        // 5-5-5-2-2 : ni Yams, ni Grande Suite.
+        app.world_mut().resource_mut::<HandContext>().selected_hand = Some(YahtzeeHand::Yahtzee);
+        assert!(
+            !app.world()
+                .resource::<HandContext>()
+                .active_evaluations
+                .iter()
+                .any(|trouvee| trouvee.hand == YahtzeeHand::Yahtzee),
+            "la main réalise le Yams : le montage ne prouve rien"
+        );
+
+        frapper(&mut app, KeyCode::Enter);
+        app.update();
+        app.update();
+
+        assert_eq!(
+            phase(&app),
+            RunPhase::Scoring,
+            "la soumission a été refusée"
+        );
+        assert!(
+            des_marques(&mut app).is_empty(),
+            "un dé a été marqué pour une figure non réalisée"
+        );
+        assert!(
+            app.world().resource::<ScoringStepQueue>().steps.is_empty(),
+            "un score a été fabriqué pour une figure non réalisée"
+        );
     }
 
     /// Les `DieId` portant le marqueur de comptabilisation, triés.
