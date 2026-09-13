@@ -217,3 +217,134 @@ fn test_reroll_cost_starts_at_its_constant() {
         INITIAL_REROLL_COST
     );
 }
+
+// ---- Tarification, revente et coût de relance (TASK-77) ----
+
+use core_engine::dice::DieModifier;
+use core_engine::hands::YahtzeeHand;
+use core_engine::relics::RelicId;
+use core_engine::shop::pricing::{REROLL_COST_STEP, bump_reroll_cost, price_of, sell_value};
+
+#[test]
+fn test_reroll_cost_increments() {
+    // Une visite : on paie le coût courant, **puis** on l'incrémente.
+    let mut rng = RunRng::from_seed(1);
+    let mut etalage = generate_shop(&mut rng.shop);
+
+    let mut payes = Vec::new();
+    for _ in 0..3 {
+        payes.push(etalage.reroll_cost);
+        etalage.reroll_cost = bump_reroll_cost(etalage.reroll_cost);
+    }
+    assert_eq!(payes, vec![5, 6, 7]);
+    assert_eq!(
+        etalage.reroll_cost, 8,
+        "le champ porte le coût de la prochaine"
+    );
+
+    // **La visite suivante repart à cinq**, et personne ne remet rien à zéro :
+    // `generate_shop` pose la constante à chaque appel.
+    let suivante = generate_shop(&mut rng.shop);
+    assert_eq!(suivante.reroll_cost, INITIAL_REROLL_COST);
+    assert_eq!(suivante.reroll_cost, 5);
+}
+
+#[test]
+fn test_sell_value_floor_is_one() {
+    // Troncature vers zéro, jamais d'arrondi au plus proche.
+    assert_eq!(sell_value(7), 3, "on tronque");
+    assert_eq!(sell_value(10), 5);
+    assert_eq!(sell_value(3), 1);
+    // Le plancher : sans lui, `1 / 2` rendrait zéro et vendre coûterait de l'or.
+    assert_eq!(sell_value(2), 1);
+    assert_eq!(sell_value(1), 1);
+}
+
+#[test]
+fn test_sell_value_of_free_item_is_zero() {
+    // Le plancher protège une revente réelle, il ne fabrique pas d'or. Sans
+    // cette clause, le parchemin à zéro du `BlueSeal` (Étape 9) se revendrait
+    // un dollar tiré de nulle part.
+    assert_eq!(sell_value(0), 0);
+}
+
+#[test]
+fn test_price_is_total_and_deterministic() {
+    let articles = [
+        ShopItem::RelicCard(RelicId::CrackedDie),
+        ShopItem::GridUpgrade(YahtzeeHand::Chance),
+        ShopItem::DieMod(DieModifier::BonusChips(30)),
+        ShopItem::Consumable(ConsumableId::RuneOfFate),
+    ];
+
+    for article in &articles {
+        assert!(price_of(article) > 0, "{article:?} est gratuit");
+        assert_eq!(price_of(article), price_of(article), "{article:?} varie");
+    }
+
+    // Les quatre paliers de la table, par des articles qui les empruntent.
+    assert_eq!(price_of(&ShopItem::GridUpgrade(YahtzeeHand::Chance)), 4);
+    assert_eq!(price_of(&ShopItem::DieMod(DieModifier::BonusMult(100))), 6);
+    // Une Commune, une Rare : la relique suit sa rareté.
+    assert_eq!(price_of(&ShopItem::RelicCard(RelicId::CrackedDie)), 4);
+    assert_eq!(price_of(&ShopItem::RelicCard(RelicId::DoubleMirror)), 8);
+
+    // **Les trois magnitudes de dé coûtent le même prix.** Écart assumé : elles
+    // empruntent un palier, et ni les magnitudes ni ce prix ne sont chiffrés
+    // par le corpus. À calibrer par l'Étape 6 bis, avec les magnitudes.
+    assert_eq!(
+        price_of(&ShopItem::DieMod(DieModifier::BonusChips(30))),
+        price_of(&ShopItem::DieMod(DieModifier::BonusChips(50)))
+    );
+}
+
+#[test]
+fn test_rune_of_fate_costs_eight() {
+    // Huit, **par le palier Rare** et non par un cas particulier : la seconde
+    // assertion tombe si quelqu'un code le chiffre en dur.
+    assert_eq!(price_of(&ShopItem::Consumable(ConsumableId::RuneOfFate)), 8);
+    assert_eq!(
+        core_engine::consumables::rarity_of(ConsumableId::RuneOfFate),
+        RelicRarity::Rare
+    );
+    assert_eq!(
+        price_of(&ShopItem::Consumable(ConsumableId::RuneOfFate)),
+        price_of(&ShopItem::RelicCard(RelicId::DoubleMirror)),
+        "la Rune du Destin et une relique Rare tombent du même palier"
+    );
+}
+
+#[test]
+fn test_reroll_cost_does_not_overflow() {
+    assert_eq!(REROLL_COST_STEP, 1);
+
+    let mut cout = INITIAL_REROLL_COST;
+    for _ in 0..50 {
+        cout = bump_reroll_cost(cout);
+    }
+    assert_eq!(cout, 55);
+
+    assert_eq!(
+        bump_reroll_cost(u32::MAX),
+        u32::MAX,
+        "aucune panique au plafond"
+    );
+}
+
+#[test]
+fn test_sell_value_never_exceeds_price() {
+    for prix in [1, 2, 3, 4, 6, 8, 10, 17, 1_000, u32::MAX] {
+        assert!(sell_value(prix) <= prix, "prix {prix}");
+    }
+    // Et toute la table, par ses articles.
+    for article in [
+        ShopItem::RelicCard(RelicId::CrackedDie),
+        ShopItem::GridUpgrade(YahtzeeHand::Aces),
+        ShopItem::DieMod(DieModifier::BonusChips(30)),
+        ShopItem::Consumable(ConsumableId::RuneOfFate),
+    ] {
+        let prix = price_of(&article);
+        assert!(sell_value(prix) <= prix, "{article:?}");
+        assert!(sell_value(prix) >= 1, "{article:?} se revend zéro");
+    }
+}

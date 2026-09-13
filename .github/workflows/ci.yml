@@ -1226,6 +1226,41 @@ jobs:
           forbid  "critère 6  boucle de retirage dans le repli" -n \
                   'while[^{]*is_empty|loop *\{' "$GEN"
 
+
+          # ---- Étape 6 : prix, revente et relance (TASK-77) ----
+          PRIX=$SHOP/pricing.rs
+          # **Le prix de la Rune du Destin tombe du palier Rare.** Codé en dur,
+          # il rendrait la même valeur aujourd'hui — aucun test ne peut le
+          # distinguer — et survivrait à un recalibrage de la table en donnant
+          # deux prix pour une même rareté. C'est donc ici que ça se garde.
+          forbid  "critère 6  prix littéral sur un article" -n \
+                  'ShopItem::[A-Za-z]+\([^)]*\) *=> *[0-9]' "$PRIX"
+          forbid  "critère 6  la rareté du consommable décidée au barème" -n \
+                  'ConsumableId::[A-Za-z]+' "$PRIX"
+          require "critère 6  la rareté du consommable vit avec son identité" -n \
+                  '^pub fn rarity_of\(id: ConsumableId\) -> RelicRarity \{' $SRC/consumables.rs
+          # Fonction totale : une variante ajoutée doit produire un E0004.
+          forbid  "critère 6  bras attrape-tout dans le barème" -n '_ *=>|unwrap_or' "$PRIX"
+          # Les trois règles sont des fonctions libres, hors de tout `impl`.
+          require "critère 6  le prix est une fonction libre" -n '^pub fn price_of\(item: &ShopItem\) -> u32 \{' "$PRIX"
+          require "critère 6  la revente est une fonction libre" -n '^pub fn sell_value\(price: u32\) -> u32 \{' "$PRIX"
+          require "critère 6  l.incrément est une fonction libre" -n '^pub fn bump_reroll_cost\(cost: u32\) -> u32 \{' "$PRIX"
+          forbid  "critère 6  seconde règle de prix" -n \
+                  'fn price_of|fn sell_value|fn bump_reroll_cost|fn price_of_rarity' crates/ -g '!**/shop/pricing.rs'
+          forbid  "critère 6  second pas de relance" -n 'const REROLL_COST_STEP' crates/ -g '!**/shop/pricing.rs'
+          # La tarification ne connaît que ses arguments.
+          forbid  "critère 6  le barème connaît la session" -n \
+                  'RunSession|RelicInventory|RunConfig|\bgold\b' "$PRIX"
+          # Ancrée sur l'**acte** : une soustraction portant sur un prix ou un
+          # coût. Le motif nu ' - ' attrape une puce de commentaire — la
+          # séquence espace-tiret-espace y figure — et un `len() - 1` légitime.
+          forbid  "critère 6  soustraction nue sur un prix" -n \
+                  '(price|cost|prix|cout)[a-z_]* *-[^>=]|- *(price|cost)\b' "$PRIX"
+          # Le plancher de revente, et le zéro qui ne fabrique pas d'or.
+          require "critère 6  plancher de revente à un" -n '\(price / 2\).max\(1\)' "$PRIX"
+          require "critère 6  un article gratuit se revend zéro" -U -n \
+                  'if price == 0 \{\n        return 0;\n    \}' "$PRIX"
+
           exit $status
 
   # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en

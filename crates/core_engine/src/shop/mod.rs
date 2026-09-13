@@ -13,6 +13,7 @@
 use bevy_ecs::reflect::ReflectComponent;
 
 pub mod generator;
+pub mod pricing;
 
 use crate::consumables::ConsumableId;
 use crate::dice::DieModifier;
