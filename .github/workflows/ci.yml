@@ -1261,6 +1261,56 @@ jobs:
           require "critère 6  un article gratuit se revend zéro" -U -n \
                   'if price == 0 \{\n        return 0;\n    \}' "$PRIX"
 
+
+          # ---- Étape 6 : crate de boutique (TASK-78) ----
+          BOUTIQUE=crates/shop_system
+          # **Le sens des dépendances, et il ne se négocie pas.** Une seule
+          # ligne inverse ferme un cycle et le workspace cesse de compiler ;
+          # la garde le dit avant le compilateur.
+          forbid  "critère 6  dépendance inverse vers la boutique" -n \
+                  'shop_system' crates/game_state crates/core_engine crates/ui_and_juice
+          # Aucun son ici : l'audio est l'affaire de l'Étape 8, par une autre
+          # bibliothèque. Une feature absente l'est sans erreur de compilation.
+          # Ancrée sur une **entrée de liste**, entre guillemets, et non sur le
+          # nom : le commentaire qui dit que ces features sont exclues est le
+          # contrat, et il doit pouvoir les nommer.
+          forbid  "critère 6  audio ou tweening dans la boutique" -n \
+                  '"(bevy_audio|vorbis|kira|rodio|symphonia)"|^ *(kira|rodio|symphonia|bevy_tweening) *=' \
+                  "$BOUTIQUE/Cargo.toml"
+          # `cargo deny` compte une crate publiable comme non licenciée, et une
+          # dépendance de chemin nue comme un joker.
+          require "critère 6  la crate de boutique n'est pas publiable" -n \
+                  '^publish = false$' "$BOUTIQUE/Cargo.toml"
+          forbid  "critère 6  dépendance de chemin sans version" -n \
+                  '\{ path = "\.\./[a-z_]+" \}' "$BOUTIQUE/Cargo.toml"
+          # Combinateurs supprimés en 0.19.
+          forbid  "critère 6  combinateur d'ordonnancement supprimé" -n \
+                  '\brun_in\b|\brun_after\b|\brun_before\b' "$BOUTIQUE"
+          # Aucun type de cette crate n'est une ressource : une dérivation posée
+          # par erreur sur la carte compilerait et n'en laisserait qu'une.
+          forbid  "critère 6  ressource dans la crate de boutique" -n \
+                  'derive\([^)]*\bResource\b|resource::Resource' "$BOUTIQUE/src"
+          # Aucune donnée de jeu sur une carte : l'étalage est la source unique.
+          forbid  "critère 6  donnée de jeu portée par une carte" -n \
+                  'struct Shop[A-Za-z]*\([^)]*(ShopItem|RelicId|RelicInstance|RelicRarity)' "$BOUTIQUE/src"
+          # Le skip de blind est retiré de la v1.0. **Ancrée sur l'acte** : le
+          # motif nu `skip` attrape `.skip(`, méthode d'itérateur sans rapport.
+          forbid  "critère 6  bouton de skip ou tag bonus" -n \
+                  'SkipButton|skip_blind|BonusTag|SkipBlind|bouton .?Passer' "$BOUTIQUE/src"
+          # Le placement passe par `Node` : la passe d'interface calcule sa
+          # propre transformation, et y écrire n'aurait aucun effet.
+          forbid  "critère 6  Transform dans la boutique" -n \
+                  'Query<[^>]*&mut Transform' "$BOUTIQUE/src"
+          # Un seul compteur animé dans le projet, et il vit ailleurs.
+          forbid  "critère 6  second compteur animé" -n \
+                  'struct [A-Za-z]*Number|struct [A-Za-z]*Counter|lerp' "$BOUTIQUE/src"
+          require "critère 6  le solde emploie le compteur de la mise en scène" -n \
+                  'ui_and_juice::animation::AnimatedNumber' "$BOUTIQUE/src/ui.rs"
+          # Le fichier de systèmes appartient au ticket aval : un `pub mod` sans
+          # fichier ne compile pas et bloquerait celui-ci.
+          forbid  "critère 6  module de systèmes en avance" -n \
+                  'pub mod systems|pub mod audio' "$BOUTIQUE/src/lib.rs"
+
           exit $status
 
   # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en
