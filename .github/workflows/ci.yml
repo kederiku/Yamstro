@@ -548,7 +548,11 @@ jobs:
           # La capacité vient du gobelet, jamais d'un littéral : une seule
           # fabrique dimensionne les slots, et personne d'autre.
           forbid  "critère 5  capacité en dur"           -n 'max_capacity|MAX_RELICS' crates/
-          forbid  "critère 5  slots dimensionnés hors de la fabrique" -n 'vec!\[None;' crates/ -g '!crates/core_engine/src/relics/**'
+          # Deux fabriques désormais, et deux seulement : celle des reliques et
+          # celle des consommables, toutes deux dimensionnées depuis la
+          # configuration du gobelet.
+          forbid  "critère 5  slots dimensionnés hors d'une fabrique" -n 'vec!\[None;' crates/ \
+                  -g '!crates/core_engine/src/relics/**' -g '!crates/core_engine/src/consumables.rs'
           require "critère 5  fabrique unique de l'inventaire" -n 'pub fn new\(capacity: u8\) -> Self' crates/core_engine/src/relics/inventory.rs
           forbid  "critère 5  inventaire par défaut"     -n 'impl Default for RelicInventory|derive\([^)]*Default[^)]*\)\]\npub struct RelicInventory' -U crates/core_engine/src/relics/inventory.rs
           # Le compteur est monotone : une seule écriture, et c'est l'incrément.
@@ -1308,8 +1312,61 @@ jobs:
                   'ui_and_juice::animation::AnimatedNumber' "$BOUTIQUE/src/ui.rs"
           # Le fichier de systèmes appartient au ticket aval : un `pub mod` sans
           # fichier ne compile pas et bloquerait celui-ci.
-          forbid  "critère 6  module de systèmes en avance" -n \
-                  'pub mod systems|pub mod audio' "$BOUTIQUE/src/lib.rs"
+          # `systems` est livré par TASK-79 ; `audio` reste l'affaire de
+          # l'Étape 8, et un `pub mod` sans fichier ne compile pas.
+          forbid  "critère 6  module audio en avance" -n 'pub mod audio' "$BOUTIQUE/src/lib.rs"
+
+
+          # ---- Étape 6 : transactions de boutique (TASK-79) ----
+          TRANS=$BOUTIQUE/src/systems.rs
+          # Une seule règle de capacité, et elle vient de la configuration du
+          # gobelet : le Gobelet de Fortune donne six slots là où le standard en
+          # donne cinq.
+          require "critère 6  la règle de capacité est écrite une fois" -n \
+                  '^pub fn has_free_slot\(occupied: usize, capacity: u8\) -> bool \{' "$TRANS"
+          forbid  "critère 6  seconde règle de capacité" -n 'fn has_free_slot' crates/ -g '!**/shop_system/src/systems.rs'
+          forbid  "critère 6  plafond de capacité en littéral" -n \
+                  '(relics|slots|items|inventory)[a-z_]*\.len\(\) *< *[0-9]|max_capacity|MAX_RELICS' crates/
+          # Aucune dette : l'or est non signé, et sature des deux côtés.
+          forbid  "critère 6  or muté sans saturation" -n \
+                  'gold *[-+]=|gold *= *[a-z_.]*gold *[-+][^=]' crates/
+          forbid  "critère 6  seconde source de vérité de l'or" -n 'RunEconomy|\bmoney\b' crates/
+          forbid  "critère 6  or signé dans les transactions" -n '\bi64\b|\bi32\b|\bf64\b|\bf32\b' "$TRANS"
+          # Le seul flux de la boutique.
+          forbid  "critère 6  aléa hors du flux de boutique" -n \
+                  'thread_rng|rand::random|rng\.dice|rng\.boss|rng\.relic_effects' "$BOUTIQUE/src"
+          # **L'ordre de la relance est normatif, et il porte un piège.** Le
+          # générateur rend un étalage entier, coût compris et remis à sa valeur
+          # initiale : lui affecter la ressource replacerait ce coût, et les
+          # relances successives coûteraient toutes le même prix.
+          require "critère 6  la relance ne remplace que les articles" -U -n \
+                  'session\.gold = session\.gold\.saturating_sub\(shop\.reroll_cost\);\n        shop\.items = generate_shop\(&mut session\.rng\.shop\)\.items;\n        shop\.reroll_cost = bump_reroll_cost\(shop\.reroll_cost\);' "$TRANS"
+          forbid  "critère 6  la relance remplace l'étalage entier" -n \
+                  '\*shop = generate_shop|\*inventory = generate_shop' "$TRANS"
+          # Le pas d'incrément et le prix de reprise ont un seul site.
+          forbid  "critère 6  incrément de relance recopié" -n \
+                  'reroll_cost *= *[a-z_.]*saturating_add|reroll_cost *\+' "$TRANS"
+          # **Ancrée positivement**, et c'est plus sûr qu'une interdiction : le
+          # motif nu de la division attrape la numérotation d'un commentaire,
+          # « 2. Le prix se lit », et manque la forme réelle du recalcul, où la
+          # division suit une parenthèse fermante. Exiger l'appel à la
+          # tarification tombe dès que quelqu'un le remplace.
+          require "critère 6  la reprise passe par la tarification" -n \
+                  'let reprise = sell_value\(price_of\(' "$TRANS"
+          # L'or se vérifie avant de partir, et la comparaison est stricte.
+          require "critère 6  l'or est vérifié avant le débit d'achat" -n \
+                  '^        if session\.gold < prix \{$' "$TRANS"
+          require "critère 6  l'or est vérifié avant le débit de relance" -n \
+                  '^        if session\.gold < shop\.reroll_cost \{$' "$TRANS"
+          # Les trois systèmes sont des clics : ils habitent l'ensemble
+          # d'interaction, que le plugin garde par la phase de boutique.
+          require "critère 6  les transactions habitent l'ensemble d'interaction" -U -n \
+                  '\(handle_purchases, handle_sales, handle_rerolls\)\n            \.chain\(\)\n            \.in_set\(ShopSet::Interact\)' "$TRANS"
+          # Aucune transition d'état ici : la sortie de boutique est TASK-80.
+          # Production seule : le montage des tests doit pouvoir entrer dans la
+          # phase de boutique, ce qui est le contraire d'y écrire une transition.
+          forbid_prod "critère 6  transition d'état dans les transactions" \
+                  'NextState|set_if_neq|RunPhase::BlindSelect' "$TRANS"
 
           exit $status
 

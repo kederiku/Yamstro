@@ -22,6 +22,7 @@
 //! `App::add_message`). Les trois noms ci-dessous gardent le suffixe `Event`
 //! que le corpus déclare normatif, mais ce sont des **messages** au sens 0.19.
 
+pub mod systems;
 pub mod ui;
 
 use bevy::prelude::*;
@@ -86,6 +87,8 @@ impl Plugin for ShopPlugin {
                 .chain()
                 .run_if(in_state(RunPhase::Shop)),
         );
+
+        crate::systems::register(app);
     }
 }
 
@@ -125,10 +128,16 @@ mod tests {
         let update = schedules.get(Update).expect("le calendrier Update");
         let graphe = update.graph();
 
+        // **Les nœuds d'ensemble, et eux seuls.** Nommer un nœud de système
+        // panique tant que le calendrier n'est pas initialisé : la première
+        // version de ce test, écrite quand les ensembles étaient vides,
+        // tombait dès qu'ils ont été peuplés. C'est l'ordre des **ensembles**
+        // qui est son objet.
         let aretes: Vec<(String, String)> = graphe
             .dependency()
             .graph()
             .all_edges()
+            .filter(|arete| arete.0.is_set() && arete.1.is_set())
             .map(|arete| {
                 (
                     graphe.get_node_name(&arete.0),
