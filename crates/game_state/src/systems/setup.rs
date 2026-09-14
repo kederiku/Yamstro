@@ -193,19 +193,83 @@ fn target_score(session: &RunSession, blind: &BlindDefinition) -> u64 {
     )
 }
 
-fn current_blind_definition(session: &RunSession) -> BlindDefinition {
+/// La récompense d'une manche, par son rang.
+///
+/// **Écrite ici, lue par le gain de fin de manche**, qui ne la recalcule
+/// jamais : le champ fait foi, et l'Étape 10 le prouvera en faisant varier la
+/// récompense par le stake sans toucher au calcul du gain.
+///
+/// Valeurs de départ, à calibrer par le harnais de l'Étape 6 bis.
+fn reward_for(kind: BlindType) -> u32 {
+    match kind {
+        BlindType::Small => 3,
+        BlindType::Big => 4,
+        BlindType::Boss => 5,
+    }
+}
+
+/// La manche courante, telle que le rang de la session la décide.
+///
+/// **Seule la Mise Boss consomme de l'aléa**, et sur le flux des boss : le
+/// catalogue tire son identité, puis sa contrainte. Les deux autres rangs n'en
+/// tirent rien, et le flux ressort au même point qu'il y est entré.
+fn current_blind_definition(session: &mut RunSession) -> BlindDefinition {
+    let kind = session.blind_kind;
+    let modifier = if kind == BlindType::Boss {
+        let capacite = session.config.relic_capacity;
+        let id = core_engine::blinds::definitions::draw_boss(&mut session.rng.boss);
+        Some(
+            core_engine::blinds::definitions::boss_definition(id, &mut session.rng.boss, capacite)
+                .modifier,
+        )
+    } else {
+        None
+    };
+
     BlindDefinition {
-        kind: BlindType::Small,
+        kind,
         target_score: core_engine::blinds::target_score(
             session.ante,
-            BlindType::Small,
+            kind,
             session.cup_id,
             session.stake_level,
-            None,
+            modifier.as_ref(),
         ),
-        reward: 0,
-        modifier: None,
+        reward: reward_for(kind),
+        modifier,
     }
+}
+
+/// `OnEnter(RunPhase::BlindSelect)` : passe à la manche suivante.
+///
+/// **Ordonné après l'arbitre de fin de run et avant la mise en place.**
+/// L'arbitre lit l'ante et la manche **précédentes** pour décider de la
+/// victoire ; avancer avant lui rendrait la Mise Boss de l'ante final
+/// invisible, et la run ne pourrait jamais être gagnée.
+///
+/// **Il n'avance qu'à partir de la seconde entrée.** La première manche d'une
+/// run est la Petite Mise de l'ante un, posée par la construction de la
+/// session ; l'absence de contexte de manche est ce qui distingue les deux cas,
+/// et c'est le seul témoin disponible.
+///
+/// Petite, Grosse, Boss, puis l'ante suivante. L'ante sature : une run qui
+/// dépasserait l'ante final est déjà gagnée, l'arbitre ayant tranché avant.
+fn advance_blind_progression(
+    session: Option<ResMut<RunSession>>,
+    blind: Option<Res<BlindContext>>,
+) {
+    let (Some(mut session), Some(_)) = (session, blind) else {
+        return;
+    };
+
+    session.blind_kind = match session.blind_kind {
+        BlindType::Small => BlindType::Big,
+        BlindType::Big => BlindType::Boss,
+        BlindType::Boss => {
+            session.ante = session.ante.saturating_add(1);
+            BlindType::Small
+        }
+    };
 }
 
 /// Vrai si une bascule vers `AppState::Victory` est déjà en attente.
@@ -224,12 +288,12 @@ pub(crate) fn victory_is_pending(next: Res<NextState<AppState>>) -> bool {
 ///
 /// N'écrit **que** le contexte de blind : ni score commis (ADR-010), ni
 /// relances, ni transition.
-fn setup_blind(mut commands: Commands, session: Option<Res<RunSession>>) {
-    let Some(session) = session else {
+fn setup_blind(mut commands: Commands, session: Option<ResMut<RunSession>>) {
+    let Some(mut session) = session else {
         return;
     };
 
-    let blind = current_blind_definition(&session);
+    let blind = current_blind_definition(&mut session);
     commands.insert_resource(BlindContext {
         target_score: target_score(&session, &blind),
         blind,
@@ -472,6 +536,7 @@ pub(crate) fn register(app: &mut App) {
         OnEnter(RunPhase::BlindSelect),
         (
             check_run_completion,
+            advance_blind_progression.run_if(not(victory_is_pending)),
             setup_blind.run_if(not(victory_is_pending)),
         )
             .chain(),
@@ -1003,9 +1068,27 @@ mod tests {
         let mut app = app_en_run(CupId::Standard);
         assert_eq!(app.world().resource::<BlindContext>().target_score, 300);
 
+        // **La progression avance à chaque entrée : on pose l'état d'avant.**
+        // Boss suivi de l'ante moins un donne, après avancement, une Petite
+        // Mise à l'ante voulu. Sans cela la boucle éprouverait la courbe de
+        // rang autant que celle d'ante, et l'ante 2 rendrait 720.
+        // **La progression avance à chaque entrée en sélection de manche : on
+        // pose donc l'état d'AVANT.** Une Mise Boss à l'ante précédent donne,
+        // après avancement, une Petite Mise à l'ante voulu. Sans cela la
+        // boucle éprouverait la courbe de rang autant que celle d'ante.
         for (ante, attendu) in [(2u8, 480u64), (7, 5033), (8, 8053)] {
-            app.world_mut().resource_mut::<RunSession>().ante = ante;
+            {
+                let mut partie = app.world_mut().resource_mut::<RunSession>();
+                partie.ante = ante - 1;
+                partie.blind_kind = BlindType::Boss;
+            }
             rentrer_dans_une_blind(&mut app);
+
+            // Témoin : sans lui, une progression changée ferait dire au test
+            // autre chose que ce qu'il croit mesurer.
+            let partie = app.world().resource::<RunSession>();
+            assert_eq!((partie.ante, partie.blind_kind), (ante, BlindType::Small));
+
             assert_eq!(
                 app.world().resource::<BlindContext>().target_score,
                 attendu,
@@ -1029,6 +1112,156 @@ mod tests {
             target_score(&partie, &boss),
             target_score(&partie, &petit).saturating_mul(2)
         );
+    }
+
+    // ---- TASK-80 : la manche suivante ----
+
+    #[test]
+    fn test_next_blind_target_is_correct() {
+        // Les deux cibles du corpus, atteintes par le chemin réel : on pose
+        // l'état d'avant l'avancement, et la sortie de manche fait le reste.
+        let cible = |ante_avant: u8, kind_avant: BlindType| {
+            let mut app = app_en_run(CupId::Standard);
+            {
+                let mut partie = app.world_mut().resource_mut::<RunSession>();
+                partie.ante = ante_avant;
+                partie.blind_kind = kind_avant;
+            }
+            rentrer_dans_une_blind(&mut app);
+            let manche = app.world().resource::<BlindContext>();
+            (
+                app.world().resource::<RunSession>().ante,
+                manche.blind.kind,
+                manche.target_score,
+            )
+        };
+
+        // Ante 2 Grosse Mise : la Petite de l'ante 2 vient d'être battue.
+        assert_eq!(cible(2, BlindType::Small), (2, BlindType::Big, 720));
+        // Ante 8 Mise Boss : la Grosse de l'ante 8 vient d'être battue.
+        assert_eq!(cible(8, BlindType::Big), (8, BlindType::Boss, 16_106));
+    }
+
+    #[test]
+    fn test_next_blind_reward_follows_kind() {
+        // Trois rangs, trois récompenses, **écrites dans la manche**. Le gain de
+        // fin de manche lit le champ et ne le recalcule jamais.
+        for (avant, attendu_kind, attendu_reward) in [
+            (BlindType::Boss, BlindType::Small, 3u32),
+            (BlindType::Small, BlindType::Big, 4),
+            (BlindType::Big, BlindType::Boss, 5),
+        ] {
+            let mut app = app_en_run(CupId::Standard);
+            app.world_mut().resource_mut::<RunSession>().blind_kind = avant;
+            rentrer_dans_une_blind(&mut app);
+
+            let manche = app.world().resource::<BlindContext>();
+            assert_eq!(manche.blind.kind, attendu_kind, "depuis {avant:?}");
+            assert_eq!(manche.blind.reward, attendu_reward, "depuis {avant:?}");
+        }
+    }
+
+    #[test]
+    fn test_progression_cycles_through_the_three_ranks() {
+        // Petite, Grosse, Boss, puis l'ante suivante. Sans ce cycle, la run
+        // reste figée sur la première manche et la victoire est inatteignable.
+        let mut app = app_en_run(CupId::Standard);
+        let mut vus = Vec::new();
+        for _ in 0..4 {
+            let partie = app.world().resource::<RunSession>();
+            vus.push((partie.ante, partie.blind_kind));
+            rentrer_dans_une_blind(&mut app);
+        }
+        let partie = app.world().resource::<RunSession>();
+        vus.push((partie.ante, partie.blind_kind));
+
+        assert_eq!(
+            vus,
+            vec![
+                (1, BlindType::Small),
+                (1, BlindType::Big),
+                (1, BlindType::Boss),
+                (2, BlindType::Small),
+                (2, BlindType::Big),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_boss_blind_carries_a_modifier() {
+        // Seule la Mise Boss porte une contrainte, et elle la tire du
+        // catalogue. Les deux autres rangs n'en portent aucune.
+        let mut app = app_en_run(CupId::Standard);
+        app.world_mut().resource_mut::<RunSession>().blind_kind = BlindType::Big;
+        rentrer_dans_une_blind(&mut app);
+
+        let manche = app.world().resource::<BlindContext>();
+        assert_eq!(manche.blind.kind, BlindType::Boss);
+        assert!(
+            manche.blind.modifier.is_some(),
+            "la Mise Boss est sans contrainte"
+        );
+
+        let mut sans = app_en_run(CupId::Standard);
+        sans.world_mut().resource_mut::<RunSession>().blind_kind = BlindType::Small;
+        rentrer_dans_une_blind(&mut sans);
+        assert!(
+            sans.world()
+                .resource::<BlindContext>()
+                .blind
+                .modifier
+                .is_none(),
+            "une Grosse Mise porte une contrainte"
+        );
+    }
+
+    #[test]
+    fn test_progression_advances_after_the_arbiter() {
+        // **L'ordre des deux systèmes décide de la victoire.** L'arbitre lit
+        // l'ante et le rang **précédents** ; avancer avant lui ferait passer
+        // l'ante final à neuf, la Mise Boss deviendrait invisible, et la run ne
+        // pourrait jamais être gagnée.
+        //
+        // Le rang de la **session** doit être posé, et pas seulement celui du
+        // contexte : c'est lui que la progression lit, et c'est son passage de
+        // Boss à Petite qui incrémente l'ante. Mesuré, un montage qui ne pose
+        // que le contexte laisse le mutant survivre.
+        let mut app = app_en_run(CupId::Standard);
+        {
+            let mut partie = app.world_mut().resource_mut::<RunSession>();
+            partie.ante = FINAL_ANTE;
+            partie.blind_kind = BlindType::Boss;
+        }
+        {
+            let mut manche = app.world_mut().resource_mut::<BlindContext>();
+            manche.blind.kind = BlindType::Boss;
+            manche.current_score = manche.target_score;
+        }
+
+        rentrer_dans_une_blind(&mut app);
+
+        assert!(
+            matches!(
+                *app.world().resource::<NextState<AppState>>(),
+                NextState::PendingIfNeq(AppState::Victory) | NextState::Pending(AppState::Victory)
+            ) || *app.world().resource::<State<AppState>>().get() == AppState::Victory,
+            "la Mise Boss de l'ante final n'a pas été vue par l'arbitre"
+        );
+    }
+
+    #[test]
+    fn test_used_hands_empty_on_new_blind() {
+        let mut app = app_en_run(CupId::Standard);
+        {
+            let mut manche = app.world_mut().resource_mut::<BlindContext>();
+            for figure in [YahtzeeHand::Chance, YahtzeeHand::Yahtzee, YahtzeeHand::Aces] {
+                manche.used_hands.mark(figure);
+            }
+        }
+        assert!(!app.world().resource::<BlindContext>().used_hands.is_empty());
+
+        rentrer_dans_une_blind(&mut app);
+        assert!(app.world().resource::<BlindContext>().used_hands.is_empty());
     }
 
     #[test]

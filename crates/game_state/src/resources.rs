@@ -18,6 +18,7 @@
 use std::collections::VecDeque;
 
 use bevy::prelude::*;
+use core_engine::blinds::BlindType;
 use core_engine::config::RunConfig;
 use core_engine::cups::CupId;
 use core_engine::evaluator::HandMatch;
@@ -36,6 +37,12 @@ use core_engine::scoring::ScoreStep;
 pub struct RunSession {
     pub config: RunConfig,
     pub ante: u8,
+    /// Le rang de la manche en cours : Petite, Grosse, puis Boss.
+    ///
+    /// **Il vit ici parce qu'il survit à la manche.** `BlindContext` est
+    /// reconstruit à chaque entrée en `BlindSelect` ; y garder le rang le
+    /// perdrait, et rien ne saurait plus quelle manche vient ensuite.
+    pub blind_kind: BlindType,
     pub gold: u32,
     pub cup_id: CupId,
     pub stake_level: u8,
@@ -274,6 +281,7 @@ mod tests {
         RunSession {
             config: RunConfig::from_cup(&deck),
             ante: 1,
+            blind_kind: BlindType::Small,
             gold: deck.starting_gold,
             cup_id: id,
             stake_level: 0,

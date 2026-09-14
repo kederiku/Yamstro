@@ -27,7 +27,9 @@ use core_engine::shop::generator::generate_shop;
 use core_engine::shop::pricing::{bump_reroll_cost, price_of, sell_value};
 use core_engine::shop::{ShopInventory, ShopItem};
 use game_state::resources::RunSession;
+use game_state::states::RunPhase;
 
+use crate::ui::ContinueButton;
 use crate::{PurchaseEvent, RerollEvent, SellEvent, ShopSet};
 
 /// La règle de capacité, **écrite une fois**.
@@ -184,7 +186,41 @@ fn handle_rerolls(
     }
 }
 
-/// Branche les trois systèmes.
+/// La sortie de boutique. **Le déclencheur a migré, la transition non.**
+///
+/// La transition est celle de TASK-38, au caractère près :
+/// `NextState::set_if_neq(&mut phase, RunPhase::BlindSelect)`. Seul son
+/// déclencheur change, l'entrée provisoire au clavier cédant la place au
+/// bouton de sortie. La formule « corps bit-à-bit identique » ne pouvait pas
+/// s'appliquer telle quelle : ce système faisait deux lignes, et **sa seule
+/// instruction était son déclencheur**. C'est la transition qui est
+/// l'invariant, et elle est ici intacte.
+///
+/// **Il n'existe pas de transition vers le lancer.** La sélection de manche
+/// construit la manche suivante puis y enchaîne : un raccourci sauterait la
+/// progression, la cible, la remise à zéro de la grille et l'arbitre de fin de
+/// run, et la victoire deviendrait inatteignable.
+///
+/// **`set_if_neq`, sans exception.** Un `set` redondant vers la phase courante
+/// rejouerait l'entrée en boutique, où l'or des reliques est encaissé : il le
+/// serait **deux fois**, silencieusement. Le motif souvent cité, la destruction
+/// des entités de run, ne s'applique pas ici : mesuré, elles sont portées par
+/// l'état d'application, jamais par une phase.
+///
+/// Ce système **n'arbitre rien** : ni victoire, ni défaite, ni score.
+fn shop_continue(
+    boutons: Query<&Interaction, (Changed<Interaction>, With<ContinueButton>)>,
+    mut phase: ResMut<NextState<RunPhase>>,
+) {
+    if boutons
+        .iter()
+        .any(|interaction| *interaction == Interaction::Pressed)
+    {
+        NextState::set_if_neq(&mut phase, RunPhase::BlindSelect);
+    }
+}
+
+/// Branche les quatre systèmes.
 ///
 /// Ils habitent `ShopSet::Interact` : ce sont des **clics**, et l'ensemble
 /// suivant resynchronise l'affichage sur ce qu'ils ont produit. Chaînés entre
@@ -193,7 +229,12 @@ fn handle_rerolls(
 pub(crate) fn register(app: &mut App) {
     app.add_systems(
         Update,
-        (handle_purchases, handle_sales, handle_rerolls)
+        (
+            handle_purchases,
+            handle_sales,
+            handle_rerolls,
+            shop_continue,
+        )
             .chain()
             .in_set(ShopSet::Interact),
     );
@@ -203,6 +244,7 @@ pub(crate) fn register(app: &mut App) {
 mod tests {
     use bevy::prelude::*;
     use bevy::state::app::StatesPlugin;
+    use core_engine::blinds::BlindType;
     use core_engine::config::RunConfig;
     use core_engine::consumables::{ConsumableId, ConsumableInventory};
     use core_engine::cups::CupId;
@@ -216,6 +258,7 @@ mod tests {
     use game_state::states::{AppState, RunPhase};
 
     use crate::systems::has_free_slot;
+    use crate::ui::ContinueButton;
     use crate::{PurchaseEvent, RerollEvent, SellEvent, ShopPlugin};
 
     /// Une boutique ouverte, sur un gobelet donné, avec l'or voulu.
@@ -231,6 +274,7 @@ mod tests {
         app.insert_resource(RunSession {
             config,
             ante: 1,
+            blind_kind: BlindType::Small,
             gold: or,
             cup_id: id,
             stake_level: 0,
@@ -541,6 +585,109 @@ mod tests {
         app.update();
 
         assert_eq!((or(&app), etalage(&app), reliques(&app)), avant);
+    }
+
+    // ---- TASK-80 : la sortie de boutique ----
+
+    /// Presse le bouton de sortie. **`Interaction` est posée à la main** : le
+    /// système de focus de l'interface exige le plugin d'interface et une
+    /// fenêtre principale, qu'un montage headless n'a pas. C'est le procédé des
+    /// tests de glisser-déposer de l'Étape 5.
+    fn presser_continuer(app: &mut App) {
+        let bouton = app
+            .world_mut()
+            .spawn((ContinueButton, Interaction::Pressed))
+            .id();
+        app.update();
+        app.world_mut().entity_mut(bouton).despawn();
+    }
+
+    fn phase(app: &App) -> RunPhase {
+        *app.world().resource::<State<RunPhase>>().get()
+    }
+
+    #[test]
+    fn test_shop_to_blind_select() {
+        let mut app = app_en_boutique(CupId::Standard, 10, vec![commune()]);
+
+        // Des entités de run, portées comme les dés le sont : par l'état
+        // d'application, jamais par une phase.
+        let temoins: Vec<Entity> = (0..3)
+            .map(|_| app.world_mut().spawn(DespawnOnExit(AppState::InRun)).id())
+            .collect();
+
+        presser_continuer(&mut app);
+        app.update();
+
+        assert_eq!(phase(&app), RunPhase::BlindSelect, "jamais vers le lancer");
+        for temoin in &temoins {
+            assert!(
+                app.world().get_entity(*temoin).is_ok(),
+                "une entité de run a été détruite"
+            );
+        }
+    }
+
+    #[test]
+    fn test_set_if_neq_on_current_state_does_nothing() {
+        // **Le vrai danger, mesuré.** Aucune entité de production n'est portée
+        // par une phase : une transition de la boutique vers elle-même n'en
+        // détruirait aucune, et un test sur leur survie passerait avec `set`
+        // comme avec `set_if_neq`. Ce qu'elle ferait, c'est rejouer l'entrée en
+        // boutique, où l'or des reliques est encaissé.
+        let mut app = app_en_boutique(CupId::Standard, 10, vec![commune()]);
+        let avant = or(&app);
+
+        {
+            let mut suivante = app.world_mut().resource_mut::<NextState<RunPhase>>();
+            NextState::set_if_neq(&mut suivante, RunPhase::Shop);
+        }
+        app.update();
+        app.update();
+
+        assert_eq!(phase(&app), RunPhase::Shop, "la phase a bougé");
+        assert_eq!(or(&app), avant, "l'entrée en boutique a été rejouée");
+    }
+
+    #[test]
+    fn test_reroll_cost_resets_to_five() {
+        // **Complète le test des trois relances.** Celui-ci prouve que le coût
+        // monte dans une visite ; celui-là, qu'il repart de sa valeur initiale à
+        // la visite suivante. Aucun code ne le remet à zéro : le générateur le
+        // pose à chaque appel, et il n'est appelé qu'à l'entrée.
+        let mut app = app_en_boutique(CupId::Standard, 100, vec![commune()]);
+        for _ in 0..2 {
+            app.world_mut().write_message(RerollEvent);
+            app.update();
+        }
+        assert_eq!(app.world().resource::<ShopInventory>().reroll_cost, 7);
+
+        // Une nouvelle visite, par le même chemin que le jeu : l'entrée en
+        // boutique régénère l'étalage.
+        let etalage_neuf = {
+            let mut session = app.world_mut().resource_mut::<RunSession>();
+            core_engine::shop::generator::generate_shop(&mut session.rng.shop)
+        };
+        app.insert_resource(etalage_neuf);
+
+        assert_eq!(
+            app.world().resource::<ShopInventory>().reroll_cost,
+            core_engine::shop::INITIAL_REROLL_COST
+        );
+    }
+
+    #[test]
+    fn test_shop_does_not_arbitrate_outcome() {
+        // La boutique n'écrit ni l'état d'application, ni aucune phase autre
+        // que la sélection de manche.
+        let mut app = app_en_boutique(CupId::Standard, 10, vec![commune()]);
+        let etat_avant = *app.world().resource::<State<AppState>>().get();
+
+        presser_continuer(&mut app);
+        app.update();
+
+        assert_eq!(*app.world().resource::<State<AppState>>().get(), etat_avant);
+        assert_eq!(phase(&app), RunPhase::BlindSelect);
     }
 
     #[test]

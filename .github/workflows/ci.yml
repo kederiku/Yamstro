@@ -169,7 +169,8 @@ jobs:
           # écrit pas ; elle est donc ancrée sur un appel.
           SETUP=crates/game_state/src/systems
 
-          forbid  "critère 4  soustraction nue (manche)" -n '\w*(reroll|hand|gold|slot|capacity|count|interest|score|target|ante)\w*\s*(-=|- )' "$SETUP"
+          forbid_prod "critère 4  soustraction nue (manche)" \
+                  '\w*(reroll|hand|gold|slot|capacity|count|interest|score|target|ante)\w*\s*(-=|- )' "$SETUP"
           forbid  "critère 4  aucun flottant (manche)"   -n '\bf32\b|\bf64\b' "$SETUP" -g '!**/animation.rs'
           forbid  "critère 4  combinateurs de 0.18"      -n '\b(run_in|run_after|run_before)\s*\(' crates/
           require "critère 4  stubs de malus marqués"    -n 'Étape 5|Étape 10' "$SETUP/setup.rs"
@@ -486,7 +487,9 @@ jobs:
           # forme**, pas sur l'affectation : les fixtures de test posent
           # légitimement un score ou une grille, et aucune garde textuelle ne
           # sait distinguer un montage d'un commit. La forme, elle, est unique.
-          forbid  "critère 4  commit dupliqué hors du juice" -n 'current_score\.saturating_add|hands_remaining\.saturating_sub|used_hands\.mark\(' crates/game_state/src crates/core_engine/src
+          forbid_prod "critère 4  commit dupliqué hors du juice" \
+                  'current_score\.saturating_add|hands_remaining\.saturating_sub|used_hands\.mark\(' \
+                  crates/game_state/src crates/core_engine/src
           # La sortie de phase attend le drapeau : sans lui, RoundEnd arbitrerait
           # sur un contexte où rien n'a été ajouté.
           require "critère 4  sortie de phase liée au commit" -n 'steps\.is_empty\(\) && queue\.committed' crates/game_state/src/systems/round_end.rs
@@ -1361,12 +1364,49 @@ jobs:
           # Les trois systèmes sont des clics : ils habitent l'ensemble
           # d'interaction, que le plugin garde par la phase de boutique.
           require "critère 6  les transactions habitent l'ensemble d'interaction" -U -n \
-                  '\(handle_purchases, handle_sales, handle_rerolls\)\n            \.chain\(\)\n            \.in_set\(ShopSet::Interact\)' "$TRANS"
+                  'handle_purchases,\n            handle_sales,\n            handle_rerolls,\n            shop_continue,\n        \)\n            \.chain\(\)\n            \.in_set\(ShopSet::Interact\)' "$TRANS"
           # Aucune transition d'état ici : la sortie de boutique est TASK-80.
-          # Production seule : le montage des tests doit pouvoir entrer dans la
-          # phase de boutique, ce qui est le contraire d'y écrire une transition.
-          forbid_prod "critère 6  transition d'état dans les transactions" \
-                  'NextState|set_if_neq|RunPhase::BlindSelect' "$TRANS"
+          # **La transition de sortie a migré ici à TASK-80**, et elle y est
+          # légitime. Ce qui reste interdit est toute **autre** écriture d'état,
+          # et les gardes de la sortie de boutique s'en chargent : pas de
+          # raccourci vers le lancer, pas de `set` nu, pas d'état d'application.
+          forbid_prod "critère 6  seconde transition dans les transactions" \
+                  'RunPhase::(Roll|Scoring|RoundEnd)\b' "$TRANS"
+
+
+          # ---- Étape 6 : sortie de boutique et progression (TASK-80) ----
+          # **Il n'existe pas de transition vers le lancer.** Ancrée sur l'acte
+          # et sur la production : un test qui sort de la boutique pour vérifier
+          # qu'on n'y transige plus doit pouvoir nommer la phase de lancer.
+          forbid_prod "critère 6  raccourci de la boutique vers le lancer" \
+                  'set_if_neq\([^)]*RunPhase::Roll|set\(RunPhase::Roll\)' "$BOUTIQUE/src"
+          # `set_if_neq` sans exception : un `set` redondant rejouerait l'entrée
+          # en boutique, où l'or des reliques est encaissé.
+          forbid_prod "critère 6  transition posée sans set_if_neq" \
+                  '(phase|next|suivante)[a-z_]*\.set\(' "$BOUTIQUE/src"
+          require "critère 6  la transition de sortie est celle de l'Étape 3" -n \
+                  'NextState::set_if_neq\(&mut phase, RunPhase::BlindSelect\);' "$TRANS"
+          # La boutique n'arbitre ni victoire ni défaite. Production seule : le
+          # montage des tests doit pouvoir entrer dans la run.
+          forbid_prod "critère 6  la boutique arbitre l'issue" \
+                  'AppState|current_score *>=|VictoryScreen' "$BOUTIQUE/src"
+          forbid  "critère 6  écran de victoire inventé" -n '\bVictoryScreen\b' crates/
+          # Le skip de manche est retiré de la v1.0. **Ancrée sur l'acte** : le
+          # motif nu, insensible à la casse, attrape le verbe français *passer*
+          # conjugué — « un doublon non écarté passerait le test ».
+          forbid  "critère 6  bouton de skip ou tag bonus" -n \
+                  'SkipButton|SkipBlind|skip_blind|BonusTag|BlindTag|bouton .?Passer' crates/
+          # Le déclencheur a migré : il n'existe qu'une fois.
+          forbid  "critère 6  déclencheur de sortie dupliqué" -n 'fn shop_continue' crates/ -g '!**/shop_system/src/systems.rs'
+          forbid  "critère 6  test de sortie dupliqué" -n 'fn test_shop_continue' crates/game_state
+          # La progression de manche vit à un seul endroit, et après l'arbitre.
+          require "critère 6  la progression avance après l'arbitre" -U -n \
+                  'check_run_completion,\n            advance_blind_progression' "$SETUP"
+          forbid  "critère 6  seconde progression de manche" -n 'fn advance_blind_progression' crates/ -g '!**/systems/setup.rs'
+          # La récompense s'écrit avec la manche et se lit au gain.
+          require "critère 6  la récompense suit le rang" -n '^fn reward_for\(kind: BlindType\) -> u32 \{' "$SETUP"
+          forbid  "critère 6  récompense recalculée au gain" -n \
+                  'reward_for|match [a-z_.]*kind' "$SRC/economy"
 
           exit $status
 
