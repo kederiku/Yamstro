@@ -10,6 +10,8 @@
 //! Le binaire, lui, tient en trois lignes : il appelle [`run`].
 
 pub mod config;
+pub mod state;
+pub mod view;
 
 use clap::Parser;
 use config::{PolicyKind, ShopPolicyKind, SimConfig, WinRateRange};
