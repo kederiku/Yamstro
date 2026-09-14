@@ -9,6 +9,7 @@
 //!
 //! Le binaire, lui, tient en trois lignes : il appelle [`run`].
 
+pub mod blind;
 pub mod config;
 pub mod state;
 pub mod view;

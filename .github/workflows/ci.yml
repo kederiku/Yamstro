@@ -936,7 +936,14 @@ jobs:
           # garde qui mord son premier cas légitime ; celle-ci a mis un ticket.
           # Le renommage est complet : deux chemins pour un même type feraient
           # diverger les importateurs.
-          forbid  "critère 6  ancien chemin du module de manche" -n 'core_engine::blind\b|crate::blind\b|mod blind;' crates/
+          # **Deux portées, et pas une.** Le chemin absolu est faux partout : un
+          # importateur qui l'écrit vise un module qui n'existe plus. Le chemin
+          # relatif et la déclaration de module, eux, n'ont de sens que dans le
+          # moteur — mesuré à TASK-143 : le harnais de simulation porte son
+          # propre `blind.rs`, que son périmètre lui impose, et la forme unique
+          # interdisait un fichier qu'un ticket exige.
+          forbid  "critère 6  ancien chemin du module de manche" -n 'core_engine::blind\b' crates/
+          forbid  "critère 6  module de manche au singulier dans le moteur" -n 'crate::blind\b|mod blind;' crates/core_engine/src
           # Reflect seul sur les trois types de données ; seul le contexte est
           # une ressource.
           forbid  "critère 6  contrainte rendue composant ou ressource" -nU 'reflect\(Resource\)[^\n]*\n(#[^\n]*\n)*pub (enum BlindModifier|enum BlindType|struct BlindDefinition)' "$BLINDS"
@@ -954,7 +961,24 @@ jobs:
           # employait.
           require "critère 6  constantes de courbe, à un seul endroit" -n 'const BASE_ANTE_1_MILLI: u64 = 300_000;' "$SCALING"
           forbid  "critère 6  seconde courbe de difficulté" -n 'BASE_TARGET|ANTE_GROWTH_MILLI|fn base_target|fn scale_milli' crates/
-          forbid  "critère 6  facteur de courbe hors du moteur" -nU 'fn (blind_mult|cup_mult|stake_mult|boss_mult)\b' crates/game_state/src crates/ui_and_juice/src
+          # **La liste de chemins avait vieilli.** Elle nommait les deux crates
+          # qui existaient à TASK-69 ; il y en a cinq. Mesuré à TASK-143 : une
+          # courbe entière réimplémentée dans le harnais de simulation ne
+          # déclenchait **aucune** garde. La portée devient `crates/`, avec la
+          # seule exception qui la justifie, comme le fait déjà la garde du
+          # facteur de stake dix lignes plus bas.
+          # **Le motif ne voyait pas les vrais noms, et la liste de chemins avait
+          # vieilli.** La frontière de mot exigeait qu'un caractère non-mot
+          # suive « blind_mult » ; en « blind_mult_permille » c'est un souligné,
+          # donc aucune correspondance — la garde ne pouvait attraper qu'un nom
+          # tronqué que personne n'écrit. Et elle ne nommait que les deux crates
+          # qui existaient alors, sur cinq aujourd'hui. Mesuré à TASK-143 : une
+          # courbe entière réimplémentée dans le harnais de simulation ne
+          # déclenchait rien. Ancrée sur la **déclaration**, portée sur les
+          # sources — une signature souhaitée dans `MISSING_API.md` n'est pas
+          # une implémentation, et le ticket qui relève le manque doit pouvoir
+          # la nommer.
+          forbid  "critère 6  facteur de courbe hors du moteur" -n 'fn (blind_mult|cup_mult|stake_mult|boss_mult)[a-z_]*\(' crates/ -g '*.rs' -g '!**/blinds/scaling.rs'
           # Aucun plafond sur la cible : l'empilement maximal est le signal de
           # calibrage remis à l'Étape 6 bis, pas un défaut à corriger.
           forbid  "critère 6  plafond sur la cible"        -n '\.min\(|\.clamp\(|MAX_TARGET' "$SCALING"
@@ -977,7 +1001,10 @@ jobs:
           # Le facteur de stake déménagera à l'Étape 10 : un déplacement, jamais
           # une seconde implémentation.
           require "critère 6  facteur de stake, à un seul endroit" -n 'fn stake_mult_permille' "$SCALING"
-          forbid  "critère 6  seconde implémentation du facteur de stake" -n 'fn stake_mult_permille' crates/ -g '!**/blinds/scaling.rs'
+          # Restreinte aux sources : une **signature souhaitée** consignée dans
+          # `MISSING_API.md` n'est pas une implémentation, et le ticket qui
+          # relève le manque doit pouvoir la nommer. Mesuré à TASK-143.
+          forbid  "critère 6  seconde implémentation du facteur de stake" -n 'fn stake_mult_permille' crates/ -g '*.rs' -g '!**/blinds/scaling.rs'
 
 
           # ---- Étape 6 : gain de fin de manche (TASK-70) ----
