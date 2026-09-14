@@ -6,6 +6,7 @@
 //! `use crate::policy::HandDecision;` sans savoir où ils sont déclarés.
 
 pub mod greedy;
+pub mod grid_aware;
 
 pub use crate::view::{HandDecision, ShopAction};
 
