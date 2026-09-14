@@ -1,0 +1,25 @@
+# crates/sim_harness/Cargo.toml
+[package]
+name = "sim_harness"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+# **Aucune feature n'est activée ici**, à l'inverse des quatre crates de jeu.
+# La formulation est en toutes lettres et ne recopie pas la chaîne qu'elle
+# proscrit : la porte de CI de TASK-154 lit ce fichier sans tenir compte de la
+# casse, et un commentaire qui citerait l'interdit la ferait rougir.
+#
+# La version accompagne le chemin, comme sur les trois autres crates : une
+# dépendance de chemin nue est comptée **joker** par `cargo deny`, que
+# `wildcards = "deny"` refuse. Mesuré ici : `error[wildcard]: found 1 wildcard
+# dependency for crate 'sim_harness'`.
+core_engine = { path = "../core_engine", version = "0.1.0" }
+clap = { workspace = true }
+csv = { workspace = true }
+rand_chacha = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+smallvec = { workspace = true }
