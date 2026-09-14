@@ -1105,6 +1105,79 @@ mod tests {
         assert!(session.gold < 1_000, "le sixième achat n'a pas été payé");
     }
 
+    /// **Le seul chemin de la couche d'achat qu'aucun test ne couvrait.** Il
+    /// vit ici et non auprès de la politique : le contrat de relance est celui
+    /// de la boucle, et `appliquer_achats` n'est atteignable que d'ici.
+    #[test]
+    fn test_reroll_cost_increases_within_a_visit() {
+        let mut session = SimSession::new(CupId::Standard, 1, 1);
+        session.gold = 100;
+        let mut etalage = generate_shop(&mut session.rng.shop);
+        let depart = etalage.reroll_cost;
+        let premiers = etalage.items.clone();
+
+        let mut payes = Vec::new();
+        for _ in 0..3 {
+            let avant = session.gold;
+            let cout = etalage.reroll_cost;
+            appliquer_achats(&mut session, &mut etalage, &[ShopAction::RerollShop]);
+            payes.push(avant.saturating_sub(session.gold));
+            assert_eq!(
+                payes[payes.len() - 1],
+                cout,
+                "le coût payé n'est pas le coût affiché"
+            );
+        }
+
+        // Trois relances, trois prix croissants d'un pas.
+        assert_eq!(
+            payes,
+            vec![
+                depart,
+                bump_reroll_cost(depart),
+                bump_reroll_cost(bump_reroll_cost(depart))
+            ],
+            "les relances d'une même visite coûtent toutes le même prix"
+        );
+        assert_eq!(
+            etalage.reroll_cost,
+            bump_reroll_cost(bump_reroll_cost(bump_reroll_cost(depart)))
+        );
+        // **Les articles ont changé, le coût n'a pas été réinitialisé.** Le
+        // générateur repose le coût initial à chaque appel : lui affecter
+        // l'inventaire entier rendrait les relances gratuites à perpétuité, et
+        // rien n'échouerait — les articles seraient corrects, seul le compteur
+        // mentirait.
+        assert_ne!(etalage.items, premiers, "l'étalage n'a pas été renouvelé");
+
+        // La remise à zéro est **par visite**, et personne ne la programme.
+        assert_eq!(generate_shop(&mut session.rng.shop).reroll_cost, depart);
+    }
+
+    /// Une relance que la bourse ne paie pas ne fait rien, et ne compte pas.
+    #[test]
+    fn test_reroll_is_refused_without_enough_gold() {
+        let mut session = SimSession::new(CupId::Standard, 1, 1);
+        let mut etalage = generate_shop(&mut session.rng.shop);
+        session.gold = etalage.reroll_cost.saturating_sub(1);
+        let avant = etalage.items.clone();
+        let cout = etalage.reroll_cost;
+
+        let anomalies = appliquer_achats(&mut session, &mut etalage, &[ShopAction::RerollShop]);
+
+        assert_eq!(anomalies, 0);
+        assert_eq!(
+            session.gold,
+            cout.saturating_sub(1),
+            "un débit sur un refus"
+        );
+        assert_eq!(etalage.reroll_cost, cout, "le coût a bougé sur un refus");
+        assert_eq!(
+            etalage.items, avant,
+            "l'étalage a été renouvelé sans paiement"
+        );
+    }
+
     #[test]
     fn test_grid_upgrade_raises_the_hand_level() {
         let mut session = SimSession::new(CupId::Standard, 1, 1);

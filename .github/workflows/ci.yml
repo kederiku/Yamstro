@@ -1231,6 +1231,14 @@ jobs:
           forbid  "critère 6  seconde table de rareté" -n 'RARITY_WEIGHTS_PERMILLE *(:|=)' crates/ -g '!**/shop/generator.rs'
           forbid  "critère 6  table de rareté fausse" -n \
                   'WEIGHTS[A-Z_]* *(:[^=]*)?= *\[ *(700|70|650 *, *250 *, *45)' crates/
+          # **Le harnais lit la table, il ne la recopie jamais** — pas même
+          # dans un test « pour vérifier ». La garde ne **compte** pas les
+          # occurrences sur `crates/` entier : le dépôt en porte deux, la
+          # déclaration et le test de l'Étape 6 qui la garde, et exiger un
+          # total de un demanderait de toucher le moteur. Elle porte sur le
+          # seul chemin où une copie serait un défaut.
+          forbid  "critère 6  table de rareté recopiée dans le harnais" -n \
+                  '\[ *650 *, *250 *, *90 *, *10 *\]' crates/sim_harness/
           # Déterminisme de l'offre : ordre d'itération garanti, entiers seuls.
           forbid  "critère 6  table associative dans l'offre" -n 'HashMap|HashSet' "$SHOP"
           forbid  "critère 6  flottant dans l'offre" -n '\bf64\b|\bf32\b' "$SHOP"
