@@ -59,8 +59,16 @@
 
 use crate::policy::{ShopAction, ShopPolicy};
 use crate::view::ShopView;
+use core_engine::blinds::{BlindContext, BlindDefinition, BlindType};
+use core_engine::dice::{Die, DieId};
+use core_engine::evaluator::HandEvaluator;
+use core_engine::hands::{HandGrid, HandLevels};
+use core_engine::relics::effects::effects_for;
+use core_engine::relics::{CATALOG, RelicId, RelicState};
+use core_engine::scoring::{Hook, TriggerCtx};
 use core_engine::shop::ShopItem;
 use core_engine::shop::pricing::price_of;
+use rand::RngExt;
 use rand_chacha::ChaCha8Rng;
 use smallvec::SmallVec;
 
@@ -87,61 +95,328 @@ impl ShopPolicy for BudgetShopPolicy {
     /// Le générateur n'est pas consommé : la politique est déterministe, et
     /// deux visites au même décor rendent la même liste.
     fn decide(&mut self, view: &ShopView<'_>, _rng: &mut ChaCha8Rng) -> SmallVec<[ShopAction; 4]> {
-        // **Le `match` est total.** Ni modificateur de dé ni consommable n'a
-        // d'effet à la fin de l'Étape 6 : les acheter dépenserait de l'or
-        // contre rien de mesurable, ferait chuter le solde donc les intérêts,
-        // et abaisserait le taux de victoire d'un montant qu'aucun test
-        // n'attribuerait. Le jour où ils auront un effet, c'est ce bras-là
-        // qu'on viendra ouvrir — une omission silencieuse, elle, ne se
-        // retrouve pas.
-        let mut candidats: Vec<(usize, u32, bool)> = view
-            .inventory
-            .items
-            .iter()
-            .enumerate()
-            .filter_map(|(rang, item)| match item {
-                ShopItem::RelicCard(_) => Some((rang, price_of(item), true)),
-                ShopItem::GridUpgrade(_) => Some((rang, price_of(item), false)),
-                ShopItem::DieMod(_) | ShopItem::Consumable(_) => None,
-            })
-            .collect();
-        // Tri **stable** : à prix égal, l'ordre de l'étalage départage, et deux
-        // campagnes de même graine rendent la même liste.
-        candidats.sort_by_key(|(_, prix, _)| *prix);
+        retenir(view, |_| false)
+    }
+}
 
-        // La capacité vient de la configuration, jamais d'un littéral : le
-        // Gobelet de Fortune en donne un slot de plus, et l'Étape 9 en ajoutera
-        // d'autres écarts.
-        let mut libres = usize::from(view.config.relic_capacity).saturating_sub(view.relics.len());
-        let mut bourse = view.gold;
-        let mut retenus: Vec<usize> = Vec::new();
-        for (rang, prix, est_relique) in candidats {
-            if est_relique && libres == 0 {
-                continue;
-            }
-            if bourse < prix {
-                continue;
-            }
-            bourse = bourse.saturating_sub(prix);
-            if est_relique {
-                libres = libres.saturating_sub(1);
-            }
-            retenus.push(rang);
+/// La sélection, **commune aux deux politiques d'achat**.
+///
+/// `prioritaire` est la **seule** chose qu'une politique ajoute : les articles
+/// qu'elle désigne passent devant, et le reste suit l'ordre des prix. Écrire
+/// deux sélections au lieu d'une rendrait l'écart entre les deux sondes
+/// ininterprétable — toute différence pourrait alors venir du second barème
+/// plutôt que du plan.
+fn retenir(
+    view: &ShopView<'_>,
+    prioritaire: impl Fn(&ShopItem) -> bool,
+) -> SmallVec<[ShopAction; 4]> {
+    // **Le `match` est total.** Ni modificateur de dé ni consommable n'a
+    // d'effet à la fin de l'Étape 6 : les acheter dépenserait de l'or contre
+    // rien de mesurable, ferait chuter le solde donc les intérêts, et
+    // abaisserait le taux de victoire d'un montant qu'aucun test
+    // n'attribuerait. Le jour où ils auront un effet, c'est ce bras-là qu'on
+    // viendra ouvrir — une omission silencieuse, elle, ne se retrouve pas.
+    let mut candidats: Vec<(usize, bool, u32, bool)> = view
+        .inventory
+        .items
+        .iter()
+        .enumerate()
+        .filter_map(|(rang, item)| match item {
+            ShopItem::RelicCard(_) => Some((rang, !prioritaire(item), price_of(item), true)),
+            ShopItem::GridUpgrade(_) => Some((rang, !prioritaire(item), price_of(item), false)),
+            ShopItem::DieMod(_) | ShopItem::Consumable(_) => None,
+        })
+        .collect();
+    // Tri **stable** : à prix égal, l'ordre de l'étalage départage, et deux
+    // campagnes de même graine rendent la même liste. La priorité passe devant
+    // le prix, et c'est le seul endroit où un plan s'exprime.
+    candidats.sort_by_key(|(_, ordinaire, prix, _)| (*ordinaire, *prix));
+
+    // La capacité vient de la configuration, jamais d'un littéral : le Gobelet
+    // de Fortune en donne un slot de plus, et l'Étape 9 en ajoutera d'autres
+    // écarts.
+    let mut libres = usize::from(view.config.relic_capacity).saturating_sub(view.relics.len());
+    let mut bourse = view.gold;
+    let mut retenus: Vec<usize> = Vec::new();
+    for (rang, _, prix, est_relique) in candidats {
+        if est_relique && libres == 0 {
+            continue;
         }
+        if bourse < prix {
+            continue;
+        }
+        bourse = bourse.saturating_sub(prix);
+        if est_relique {
+            libres = libres.saturating_sub(1);
+        }
+        retenus.push(rang);
+    }
 
-        // **Rangs décroissants.** L'achat retire l'article de l'étalage et
-        // décale les suivants : en ordre croissant, le second achat désignerait
-        // un autre article que celui choisi, la ligne de résultat resterait
-        // plausible, et la contribution mesurée des reliques serait fausse sans
-        // le moindre signal.
-        retenus.sort_unstable_by_key(|rang| core::cmp::Reverse(*rang));
+    // **Rangs décroissants.** L'achat retire l'article de l'étalage et décale
+    // les suivants : en ordre croissant, le second achat désignerait un autre
+    // article que celui choisi, la ligne de résultat resterait plausible, et la
+    // contribution mesurée des reliques serait fausse sans le moindre signal.
+    retenus.sort_unstable_by_key(|rang| core::cmp::Reverse(*rang));
 
-        let mut actions: SmallVec<[ShopAction; 4]> = SmallVec::new();
-        actions.extend(retenus.into_iter().map(ShopAction::Buy));
-        // La visite est finie : ce qui suivrait serait ignoré, et le dire vaut
-        // mieux que de laisser la liste s'arrêter d'elle-même.
-        actions.push(ShopAction::Leave);
-        actions
+    let mut actions: SmallVec<[ShopAction; 4]> = SmallVec::new();
+    actions.extend(retenus.into_iter().map(ShopAction::Buy));
+    // La visite est finie : ce qui suivrait serait ignoré, et le dire vaut
+    // mieux que de laisser la liste s'arrêter d'elle-même.
+    actions.push(ShopAction::Leave);
+    actions
+}
+
+/// Les deux plans que le catalogue de cette étape distingue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Archetype {
+    Sixes,
+    Straights,
+}
+
+/// Les faces des dés témoins. Six, parce que l'un des deux archétypes porte sur
+/// cette valeur : un dé qui ne peut pas la montrer ne sonderait rien.
+const FACES_DU_TEMOIN: u8 = 6;
+
+/// **Les trois témoins séparent ce qu'ils prétendent séparer, et c'est mesuré.**
+///
+/// Le témoin d'un archétype doit exclure les figures des *autres* archétypes,
+/// sinon il mesure la figure et non la valeur. Une main de cinq six n'est pas
+/// « la valeur six » : c'est aussi un Yams, un Carré et un Brelan, et elle
+/// classe dans l'archétype des six deux reliques qui n'y appartiennent pas. Une
+/// grande suite qui va jusqu'au six **contient un six**, et elle en exclut la
+/// seule relique qui y appartienne vraiment.
+///
+/// Mesuré de bout en bout sur mille runs : avec les témoins confondus, la sonde
+/// thématique bat **41 manches de moins** que celle qui n'a pas de plan ; avec
+/// ceux-ci, **43 de plus**.
+const TEMOIN_SIX: [u8; 5] = [6, 6, 1, 2, 4];
+const TEMOIN_SUITE: [u8; 5] = [1, 2, 3, 4, 5];
+/// Le contrôle : ni six, ni suite, ni brelan. Il attrape les inconditionnelles
+/// — les dés impairs, les dés pairs, la somme paire — qui déclencheraient
+/// autrement sur les deux archétypes et paraîtraient thématiques.
+const TEMOIN_NEUTRE: [u8; 5] = [1, 1, 2, 2, 4];
+
+/// Les quatre hooks du balayage.
+const HOOKS: [Hook; 4] = [
+    Hook::OnRoll,
+    Hook::OnScoringDie,
+    Hook::OnHandScored,
+    Hook::OnRoundEnd,
+];
+
+fn temoin(valeurs: [u8; 5]) -> Vec<Die> {
+    valeurs
+        .iter()
+        .enumerate()
+        .map(|(rang, valeur)| {
+            let mut die = Die::new(
+                DieId(u32::try_from(rang).unwrap_or_default()),
+                FACES_DU_TEMOIN,
+            );
+            die.current_value = *valeur;
+            die
+        })
+        .collect()
+}
+
+/// La manche témoin, **identique pour les trois jeux de dés** et sans
+/// modificateur : un modificateur neutraliserait des reliques et les ferait
+/// passer pour neutres. Aucune de ses valeurs n'est lue par un bras d'effet ;
+/// ce qui compte est qu'elles ne varient pas d'un témoin à l'autre.
+fn manche_temoin() -> BlindContext {
+    let blind = BlindDefinition {
+        kind: BlindType::Small,
+        target_score: 1,
+        reward: 0,
+        modifier: None,
+    };
+    BlindContext {
+        blind,
+        target_score: 1,
+        current_score: 0,
+        hands_remaining: 1,
+        used_hands: HandGrid::default(),
+    }
+}
+
+/// Vrai si la relique émet **au moins un** effet sur ce témoin.
+///
+/// Toutes les figures rendues par l'évaluateur sont sondées, sans en
+/// privilégier aucune : choisir « la » figure du témoin serait l'arbitraire que
+/// ce protocole existe pour supprimer.
+fn declenche(def: RelicId, dice: &[Die], blind: &BlindContext, levels: &HandLevels) -> bool {
+    for figure in &HandEvaluator::evaluate(dice) {
+        let base = TriggerCtx {
+            hand: figure,
+            dice,
+            hand_levels: levels,
+            blind,
+            uid: 0,
+            slot: 0,
+            // **L'état d'une relique fraîchement acquise**, qui est ce dont
+            // une décision d'achat parle.
+            //
+            // Le ticket justifiait ce choix par le fait que `Disabled`
+            // viderait la table. **Mesuré au banc, c'est faux** : aucun bras de
+            // la fonction d'effets ne lit cet état — seul l'or de fin de manche
+            // le fait —, et la neutralisation d'une relique se joue au niveau
+            // de l'inventaire, pas ici. Le mutant qui met `Disabled` est donc
+            // équivalent aujourd'hui. Le choix reste le bon pour la raison qui
+            // le rendra vrai demain : une relique de l'Étape 9 dont les effets
+            // dépendraient de son état se classerait autrement.
+            state: RelicState::None,
+            die: None,
+            base_chips: 0,
+            base_mult: 0,
+            // **Vide** : non vide, elle ferait écho à une voisine qui n'existe
+            // pas, et *Miroir Double* classerait selon ce qu'on lui a soufflé.
+            left_effects: &[],
+            roll_index: 0,
+            rerolls_left: 0,
+        };
+        for hook in HOOKS {
+            // Le `match` n'a pas de bras attrape-tout : un cinquième hook fait
+            // échouer la compilation ici plutôt que d'être omis en silence.
+            let par_de = match hook {
+                Hook::OnScoringDie => true,
+                Hook::OnRoll | Hook::OnHandScored | Hook::OnRoundEnd => false,
+            };
+            if par_de {
+                // Sans cette boucle, `ctx.die` reste `None` et aucune relique
+                // conditionnée sur la valeur d'un dé ne se déclencherait :
+                // l'archétype des six serait vide.
+                for id in &figure.scoring_dice {
+                    let valeur = dice
+                        .iter()
+                        .find(|die| die.id == *id)
+                        .map_or(FACES_DU_TEMOIN, |die| die.current_value);
+                    if !effects_for(def, hook, &base.on_scoring_die(*id, valeur)).is_empty() {
+                        return true;
+                    }
+                }
+            } else if !effects_for(def, hook, &base.on_hand_scored()).is_empty() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Le classement, en **trois cas exclusifs**.
+///
+/// Le neutre d'abord, puis l'archétype unique, puis rien. Une relique qui sert
+/// les deux plans n'en distingue aucun : la classer dans les deux ferait
+/// acheter la même chose aux deux tirages, et l'écart entre les deux plans —
+/// la seule chose que cette sonde mesure — s'éroderait sans qu'on sache
+/// pourquoi.
+fn classer(six: bool, suite: bool, neutre: bool) -> Option<Archetype> {
+    if neutre || six == suite {
+        return None;
+    }
+    if six {
+        Some(Archetype::Sixes)
+    } else {
+        Some(Archetype::Straights)
+    }
+}
+
+/// La table, sondée sur **le catalogue** et jamais sur une liste écrite à la
+/// main.
+///
+/// Deux identifiants en dur passeraient tous les tests d'aujourd'hui, et à
+/// l'Étape 9 la sonde ne saurait classer aucune des reliques ajoutées : elle
+/// achèterait au hasard sous un nom qui promet un plan, et le tableau resterait
+/// crédible.
+fn table_de_synergie() -> Vec<(RelicId, Option<Archetype>)> {
+    let levels = HandLevels::default();
+    let blind = manche_temoin();
+    let (six, suite, neutre) = (
+        temoin(TEMOIN_SIX),
+        temoin(TEMOIN_SUITE),
+        temoin(TEMOIN_NEUTRE),
+    );
+    CATALOG
+        .iter()
+        .copied()
+        .map(|def| {
+            let neutre = declenche(def, &neutre, &blind, &levels);
+            (
+                def,
+                classer(
+                    declenche(def, &six, &blind, &levels),
+                    declenche(def, &suite, &blind, &levels),
+                    neutre,
+                ),
+            )
+        })
+        .collect()
+}
+
+/// L'archétype tiré et la table qui va avec.
+#[derive(Debug, Clone)]
+struct Plan {
+    archetype: Archetype,
+    table: Vec<(RelicId, Option<Archetype>)>,
+}
+
+impl Plan {
+    /// **Un seul tirage, sur le flux du harnais.** Un tirage sur un flux de la
+    /// run décalerait la séquence des étalages : les deux politiques d'achat ne
+    /// verraient plus la même boutique pour la même graine, et l'écart entre
+    /// elles — la seule raison d'être de cette sonde — mesurerait la divergence
+    /// du flux, pas la valeur d'un plan.
+    fn tirer(rng: &mut ChaCha8Rng) -> Self {
+        let archetype = if rng.random_range(0..2u32) == 0 {
+            Archetype::Sixes
+        } else {
+            Archetype::Straights
+        };
+        Self {
+            archetype,
+            table: table_de_synergie(),
+        }
+    }
+
+    fn porte(&self, item: &ShopItem) -> bool {
+        let ShopItem::RelicCard(def) = item else {
+            return false;
+        };
+        self.table
+            .iter()
+            .any(|(entree, classe)| entree == def && *classe == Some(self.archetype))
+    }
+}
+
+/// La sonde à plan. **Une instance par run**, jamais partagée : l'archétype
+/// vaut pour un run entier.
+#[derive(Debug, Default)]
+pub struct SynergyShopPolicy {
+    plan: Option<Plan>,
+}
+
+impl SynergyShopPolicy {
+    #[must_use]
+    pub fn new() -> Self {
+        Self { plan: None }
+    }
+}
+
+impl ShopPolicy for SynergyShopPolicy {
+    fn name(&self) -> &'static str {
+        "synergy"
+    }
+
+    /// **Le tirage a lieu au premier appel**, c'est-à-dire à la première entrée
+    /// en boutique et non au lancement du run : c'est le seul moment où la
+    /// politique reçoit un flux. Un run qui meurt avant sa première manche
+    /// battue n'en tire donc aucun — mesuré, 149 runs sur 1 000.
+    ///
+    /// Un tirage par visite ferait vaciller l'archétype d'une boutique à
+    /// l'autre : la politique n'aurait plus de plan, et la sonde ne mesurerait
+    /// plus qu'un bruit thématique.
+    fn decide(&mut self, view: &ShopView<'_>, rng: &mut ChaCha8Rng) -> SmallVec<[ShopAction; 4]> {
+        let plan = self.plan.get_or_insert_with(|| Plan::tirer(rng));
+        retenir(view, |item| plan.porte(item))
     }
 }
 
@@ -158,7 +433,7 @@ mod tests {
     use core_engine::dice::DieModifier;
     use core_engine::economy::INTEREST_TRANCHE;
     use core_engine::hands::YahtzeeHand;
-    use core_engine::relics::{RelicId, RelicInventory};
+    use core_engine::relics::{RelicId, RelicInventory, rarity_of};
     use core_engine::rng::RunRng;
     use core_engine::shop::ShopInventory;
     use rand_chacha::rand_core::{Rng, SeedableRng};
@@ -627,5 +902,413 @@ mod tests {
             );
         }
         let _ = &mut run;
+    }
+
+    // ---------------------------------------------------------------- synergie
+
+    /// Mille runs pilotés par la sonde à plan, l'archétype observé à chaque
+    /// visite.
+    fn campagne_synergie(id: CupId) -> (Vec<Archetype>, u32, usize) {
+        let config = SimConfig {
+            runs: 1,
+            seed_base: 1,
+            cups: vec![id],
+            stakes: vec![1],
+            policy: PolicyKind::GridAware,
+            shop_policy: ShopPolicyKind::Synergy,
+            threads: 1,
+        };
+        let mut archetypes = Vec::new();
+        let mut visites = 0u32;
+        let mut reliques_max = 0usize;
+        for index in 0..1_000u64 {
+            let mut politique = GridAwarePolicy::default();
+            let mut achat = MouchardSynergie::default();
+            let _ = simulate_with(&config, 1_000 + index, &mut politique, &mut achat);
+            visites = visites.saturating_add(achat.visites);
+            reliques_max = reliques_max.max(achat.reliques_max);
+            archetypes.extend(achat.vus);
+        }
+        (archetypes, visites, reliques_max)
+    }
+
+    #[derive(Default)]
+    struct MouchardSynergie {
+        interne: SynergyShopPolicy,
+        vus: Vec<Archetype>,
+        visites: u32,
+        reliques_max: usize,
+        capacite_depassee: u32,
+        reliques_sur_plein: u32,
+    }
+
+    impl ShopPolicy for MouchardSynergie {
+        fn name(&self) -> &'static str {
+            "mouchard-synergie"
+        }
+
+        fn decide(
+            &mut self,
+            view: &ShopView<'_>,
+            rng: &mut ChaCha8Rng,
+        ) -> SmallVec<[ShopAction; 4]> {
+            self.visites = self.visites.saturating_add(1);
+            self.reliques_max = self.reliques_max.max(view.relics.len());
+            let capacite = usize::from(view.config.relic_capacity);
+            if view.relics.len() > capacite {
+                self.capacite_depassee = self.capacite_depassee.saturating_add(1);
+            }
+            let plein = view.relics.len() >= capacite;
+            let actions = self.interne.decide(view, rng);
+            if let Some(plan) = self.interne.plan.as_ref() {
+                self.vus.push(plan.archetype);
+            }
+            for action in &actions {
+                if let ShopAction::Buy(rang) = action
+                    && plein
+                    && matches!(
+                        view.inventory.items.get(*rang),
+                        Some(ShopItem::RelicCard(_))
+                    )
+                {
+                    self.reliques_sur_plein = self.reliques_sur_plein.saturating_add(1);
+                }
+            }
+            actions
+        }
+    }
+
+    /// Compte les mots de trente-deux bits qu'une décision consomme, en
+    /// cherchant de combien un témoin vierge doit avancer pour rendre le même
+    /// mot suivant. **Un tirage se compte en mots de trente-deux bits** : une
+    /// lecture de soixante-quatre en consommerait deux, et mesurer dans la
+    /// mauvaise unité fait échouer un test dont la propriété est vraie.
+    fn mots_consommes(politique: &mut SynergyShopPolicy, flux_courant: &mut ChaCha8Rng) -> u32 {
+        let config = config_de(CupId::Standard);
+        let reliques = RelicInventory::new(config.relic_capacity);
+        let stock = etalage(vec![ShopItem::RelicCard(RelicId::PolishedStone)]);
+        let vue = ShopView {
+            inventory: &stock,
+            gold: 100,
+            relics: &reliques,
+            config: &config,
+        };
+        let mut temoin_flux = flux_courant.clone();
+        let _ = politique.decide(&vue, flux_courant);
+        let suivant = flux_courant.clone().next_u32();
+        for mots in 0..=16u32 {
+            if temoin_flux.next_u32() == suivant {
+                return mots;
+            }
+        }
+        u32::MAX
+    }
+
+    #[test]
+    fn test_synergy_witnesses_are_not_confounded() {
+        // **Le cœur du protocole.** Un témoin d'archétype qui porte la figure
+        // d'un autre archétype mesure la figure et non la valeur : mesuré, cinq
+        // six classent le Maître du Brelan et le Yams Divin dans l'archétype des
+        // six, et une grande suite qui monte au six en exclut la Pyramide.
+        let six = temoin(TEMOIN_SIX);
+        let figures_six: Vec<YahtzeeHand> = HandEvaluator::evaluate(&six)
+            .iter()
+            .map(|f| f.hand)
+            .collect();
+        for interdite in [
+            YahtzeeHand::ThreeOfAKind,
+            YahtzeeHand::FourOfAKind,
+            YahtzeeHand::Yahtzee,
+            YahtzeeHand::SmallStraight,
+            YahtzeeHand::LargeStraight,
+            YahtzeeHand::FullHouse,
+        ] {
+            assert!(
+                !figures_six.contains(&interdite),
+                "le témoin des six porte {interdite:?}"
+            );
+        }
+        assert!(
+            six.iter().any(|die| die.current_value == FACES_DU_TEMOIN),
+            "le témoin des six ne montre aucun six"
+        );
+
+        let suite = temoin(TEMOIN_SUITE);
+        assert!(
+            !suite.iter().any(|die| die.current_value == FACES_DU_TEMOIN),
+            "le témoin des suites contient un six"
+        );
+        let figures_suite: Vec<YahtzeeHand> = HandEvaluator::evaluate(&suite)
+            .iter()
+            .map(|f| f.hand)
+            .collect();
+        assert!(
+            figures_suite.contains(&YahtzeeHand::LargeStraight),
+            "le témoin des suites ne forme pas de suite"
+        );
+
+        // Le contrôle ne porte ni l'un ni l'autre.
+        let neutre = temoin(TEMOIN_NEUTRE);
+        assert!(
+            !neutre
+                .iter()
+                .any(|die| die.current_value == FACES_DU_TEMOIN)
+        );
+        let figures_neutre: Vec<YahtzeeHand> = HandEvaluator::evaluate(&neutre)
+            .iter()
+            .map(|f| f.hand)
+            .collect();
+        for interdite in [
+            YahtzeeHand::ThreeOfAKind,
+            YahtzeeHand::SmallStraight,
+            YahtzeeHand::LargeStraight,
+        ] {
+            assert!(!figures_neutre.contains(&interdite), "{interdite:?}");
+        }
+    }
+
+    #[test]
+    fn test_synergy_classification_has_three_exclusive_cases() {
+        // Les huit combinaisons, sans en oublier une.
+        assert_eq!(classer(true, false, false), Some(Archetype::Sixes));
+        assert_eq!(classer(false, true, false), Some(Archetype::Straights));
+        // Les deux archétypes à la fois : neutre, et non les deux.
+        assert_eq!(classer(true, true, false), None);
+        assert_eq!(classer(false, false, false), None);
+        // Le contrôle l'emporte sur tout le reste.
+        for six in [false, true] {
+            for suite in [false, true] {
+                assert_eq!(classer(six, suite, true), None, "{six} {suite}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_synergy_table_is_not_empty() {
+        let table = table_de_synergie();
+        assert_eq!(
+            table.len(),
+            CATALOG.len(),
+            "la table filtre le catalogue au lieu de l'itérer"
+        );
+        for archetype in [Archetype::Sixes, Archetype::Straights] {
+            assert!(
+                table.iter().any(|(_, classe)| *classe == Some(archetype)),
+                "aucune relique dans {archetype:?} : un témoin est mal construit, \
+                 ce n'est pas un catalogue sans synergie"
+            );
+        }
+        // Et le classement est celui que la prose du corpus annonce.
+        let dans = |def: RelicId| {
+            table
+                .iter()
+                .find(|(entree, _)| *entree == def)
+                .and_then(|(_, classe)| *classe)
+        };
+        assert_eq!(dans(RelicId::PyramidOfSixes), Some(Archetype::Sixes));
+        assert_eq!(dans(RelicId::StellarAlignment), Some(Archetype::Straights));
+        assert_eq!(dans(RelicId::TripletMaster), None);
+        assert_eq!(dans(RelicId::DivineYahtzee), None);
+    }
+
+    #[test]
+    fn test_synergy_probe_sweeps_the_four_hooks() {
+        assert_eq!(HOOKS.len(), 4);
+        for hook in HOOKS {
+            // Sans bras attrape-tout : un cinquième hook fait échouer la
+            // compilation de ce test, et l'auteur voit la liste juste au-dessus.
+            let _: () = match hook {
+                Hook::OnRoll | Hook::OnScoringDie | Hook::OnHandScored | Hook::OnRoundEnd => (),
+            };
+        }
+        for (rang, hook) in HOOKS.iter().enumerate() {
+            assert!(
+                !HOOKS[..rang].contains(hook),
+                "{hook:?} est balayé deux fois"
+            );
+        }
+    }
+
+    #[test]
+    fn test_synergy_prefers_its_archetype() {
+        // Les deux reliques d'archétype et une Commune moins chère : quel que
+        // soit le tirage, la relique du plan passe devant.
+        let config = config_de(CupId::Standard);
+        let reliques = RelicInventory::new(config.relic_capacity);
+        let stock = etalage(vec![
+            ShopItem::RelicCard(RelicId::PolishedStone),
+            ShopItem::RelicCard(RelicId::PyramidOfSixes),
+            ShopItem::RelicCard(RelicId::StellarAlignment),
+        ]);
+        let bourse = price_of(&stock.items[1]);
+        assert!(
+            bourse > price_of(&stock.items[0]),
+            "le décor ne discrimine pas : la Commune est aussi chère"
+        );
+        let vue = ShopView {
+            inventory: &stock,
+            gold: bourse,
+            relics: &reliques,
+            config: &config,
+        };
+
+        let mut politique = SynergyShopPolicy::new();
+        let sortis = articles_sortis(&stock, &politique.decide(&vue, &mut flux()));
+        let attendu = match politique.plan.as_ref().map(|plan| plan.archetype) {
+            Some(Archetype::Sixes) => RelicId::PyramidOfSixes,
+            Some(Archetype::Straights) => RelicId::StellarAlignment,
+            None => panic!("aucun archétype tiré"),
+        };
+        assert_eq!(sortis, vec![ShopItem::RelicCard(attendu)]);
+
+        // Et la sonde sans plan, sur le même étalage, prend la moins chère.
+        assert_eq!(
+            articles_sortis(&stock, &BudgetShopPolicy::new().decide(&vue, &mut flux())),
+            vec![ShopItem::RelicCard(RelicId::PolishedStone)],
+            "l'écart entre les deux sondes a disparu"
+        );
+    }
+
+    #[test]
+    fn test_synergy_falls_back_to_budget_order() {
+        // Aucune relique d'archétype : les deux listes coïncident, à l'article
+        // près.
+        let config = config_de(CupId::Standard);
+        let reliques = RelicInventory::new(config.relic_capacity);
+        let stock = etalage(vec![
+            ShopItem::RelicCard(RelicId::DivineYahtzee),
+            ShopItem::GridUpgrade(YahtzeeHand::Fives),
+            ShopItem::RelicCard(RelicId::PolishedStone),
+        ]);
+        let vue = ShopView {
+            inventory: &stock,
+            gold: 12,
+            relics: &reliques,
+            config: &config,
+        };
+        let synergie = SynergyShopPolicy::new().decide(&vue, &mut flux());
+        let budget = BudgetShopPolicy::new().decide(&vue, &mut flux());
+        assert_eq!(synergie.as_slice(), budget.as_slice());
+        assert!(!rangs(&synergie).is_empty(), "le décor n'achète rien");
+    }
+
+    #[test]
+    fn test_archetype_is_drawn_once_per_run() {
+        let mut politique = SynergyShopPolicy::new();
+        let mut courant = flux();
+        assert_eq!(
+            mots_consommes(&mut politique, &mut courant),
+            1,
+            "le premier appel ne tire pas exactement un mot"
+        );
+        for visite in 2..=3 {
+            assert_eq!(
+                mots_consommes(&mut politique, &mut courant),
+                0,
+                "la visite {visite} a retiré un archétype"
+            );
+        }
+    }
+
+    #[test]
+    fn test_synergy_archetype_is_seed_stable() {
+        // Deux runs de même graine tirent le même plan, et il ne bouge pas
+        // d'une visite à l'autre. **Le nombre de visites est celui du run** :
+        // mesuré, la médiane vaut deux et le maximum quatorze.
+        let (premiers, visites, _) = campagne_synergie(CupId::Standard);
+        let (seconds, _, _) = campagne_synergie(CupId::Standard);
+        assert_eq!(premiers, seconds, "deux campagnes de même graine divergent");
+        assert_eq!(
+            premiers.len(),
+            visites as usize,
+            "un archétype manque à une visite"
+        );
+        assert!(
+            visites > 1_000,
+            "la campagne ne porte pas de run à plusieurs visites"
+        );
+        // Les deux plans sortent : un tirage figé passerait sans cela.
+        for archetype in [Archetype::Sixes, Archetype::Straights] {
+            assert!(premiers.contains(&archetype), "{archetype:?} jamais tiré");
+        }
+    }
+
+    #[test]
+    fn test_synergy_respects_capacity() {
+        // Inventaire plein d'articles hors archétype, étalage entier dans
+        // l'archétype : aucun achat de relique, et aucun littéral de capacité.
+        let config = config_de(CupId::Standard);
+        let mut reliques = RelicInventory::new(config.relic_capacity);
+        for _ in 0..config.relic_capacity {
+            reliques.add_relic(RelicId::PolishedStone);
+        }
+        let stock = etalage(vec![
+            ShopItem::RelicCard(RelicId::PyramidOfSixes),
+            ShopItem::RelicCard(RelicId::StellarAlignment),
+        ]);
+        let vue = ShopView {
+            inventory: &stock,
+            gold: 1_000,
+            relics: &reliques,
+            config: &config,
+        };
+        assert!(
+            rangs(&SynergyShopPolicy::new().decide(&vue, &mut flux())).is_empty(),
+            "une relique a été proposée sans slot libre"
+        );
+
+        for id in [CupId::Standard, CupId::Fortune] {
+            let capacite = usize::from(config_de(id).relic_capacity);
+            let (_, _, reliques_max) = campagne_synergie(id);
+            assert_eq!(reliques_max, capacite, "{id:?}");
+        }
+    }
+
+    #[test]
+    fn test_synergy_uses_sim_rng_only() {
+        let run = RunRng::from_seed(53);
+        let temoin_run = run.clone();
+        let config = config_de(CupId::Standard);
+        let reliques = RelicInventory::new(config.relic_capacity);
+        let stock = etalage(vec![
+            ShopItem::RelicCard(RelicId::PyramidOfSixes),
+            ShopItem::GridUpgrade(YahtzeeHand::Fives),
+        ]);
+        let vue = ShopView {
+            inventory: &stock,
+            gold: 100,
+            relics: &reliques,
+            config: &config,
+        };
+
+        let mut politique = SynergyShopPolicy::new();
+        for _ in 0..50 {
+            let _ = politique.decide(&vue, &mut flux());
+        }
+
+        let (mut apres, mut avant) = (run.clone(), temoin_run.clone());
+        for _ in 0..8 {
+            assert_eq!(apres.dice.next_u32(), avant.dice.next_u32());
+            assert_eq!(apres.shop.next_u32(), avant.shop.next_u32());
+            assert_eq!(apres.boss.next_u32(), avant.boss.next_u32());
+            assert_eq!(
+                apres.relic_effects.next_u32(),
+                avant.relic_effects.next_u32()
+            );
+        }
+    }
+
+    #[test]
+    fn test_synergy_name_matches_the_command_line_value() {
+        use clap::ValueEnum;
+        let libelle = ShopPolicyKind::Synergy
+            .to_possible_value()
+            .map(|valeur| valeur.get_name().to_owned());
+        assert_eq!(libelle.as_deref(), Some(SynergyShopPolicy::new().name()));
+        assert_ne!(
+            SynergyShopPolicy::new().name(),
+            BudgetShopPolicy::new().name()
+        );
+        let _ = rarity_of(RelicId::PyramidOfSixes);
     }
 }

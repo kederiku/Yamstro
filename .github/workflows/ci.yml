@@ -1239,6 +1239,20 @@ jobs:
           # seul chemin où une copie serait un défaut.
           forbid  "critère 6  table de rareté recopiée dans le harnais" -n \
                   '\[ *650 *, *250 *, *90 *, *10 *\]' crates/sim_harness/
+          # **La sonde à plan classe le catalogue, elle ne le récite pas.**
+          # Deux identifiants écrits à la main passeraient tous les tests
+          # d'aujourd'hui ; à l'Étape 9 la sonde ne saurait classer aucune des
+          # reliques ajoutées, achèterait au hasard sous un nom qui promet un
+          # plan, et le tableau resterait crédible. La garde porte sur la
+          # **variante nommée** et non sur le type, dont la table a besoin ; sur
+          # la production seule, les tests devant nommer ce qu'ils vérifient ; et
+          # sur le seul répertoire où une liste en dur serait un défaut. Portée
+          # à `src` entier, elle attrape le doc-test d'en-tête de `view.rs`, qui
+          # doit nommer une relique pour montrer qu'une vue ne mute rien — et
+          # que `forbid_prod` ne coupe pas, un `//!` précédant le premier
+          # `#[cfg(test)]`.
+          forbid_prod "critère 6  liste de reliques écrite à la main dans le harnais" \
+                  'RelicId::' crates/sim_harness/src/policy
           # Déterminisme de l'offre : ordre d'itération garanti, entiers seuls.
           forbid  "critère 6  table associative dans l'offre" -n 'HashMap|HashSet' "$SHOP"
           forbid  "critère 6  flottant dans l'offre" -n '\bf64\b|\bf32\b' "$SHOP"
