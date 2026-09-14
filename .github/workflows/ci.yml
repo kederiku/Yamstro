@@ -1408,6 +1408,27 @@ jobs:
           forbid  "critère 6  récompense recalculée au gain" -n \
                   'reward_for|match [a-z_.]*kind' "$SRC/economy"
 
+          # ---- Étape 6 : audit de clôture (TASK-81) ----
+          # Trois gardes, et trois seulement : les treize autres du § 4.3 sont
+          # déjà posées ci-dessus, ticket par ticket, et dans une forme ancrée
+          # sur l'acte. Les redoubler donnerait deux gardes pour un invariant,
+          # dont l'une casse au premier commentaire qui nomme la règle.
+          #
+          # La table de la v1. **Ancrée sur le littéral de tableau**, jamais sur
+          # la forme « 70/25/5 » : c'est celle qu'emploie la prose pour nommer
+          # la table écartée — le commentaire du bloc TASK-76 a dû l'écrire en
+          # toutes lettres pour y échapper.
+          forbid  "critère 6  table de rareté 70/25/5 de la v1" -n \
+                  '\[\s*700\s*,|\[\s*70\s*,\s*25\s*,\s*5\s*\]' crates/
+          # Le nom rand 0.9 du trait de base : en 0.10 il s'appelle `Rng`, et
+          # l'ancien `Rng` s'appelle `RngExt`.
+          forbid  "critère 6  nom rand 0.9 du trait de base" -n '\bRngCore\b' crates/
+          # L'audio du § 4.3 n'est **pas** ajouté : l'invariant est déjà gardé
+          # deux fois, ligne 335 pour tout le workspace et plus haut dans ce
+          # bloc pour la seule boutique, toutes deux ancrées sur une
+          # déclaration. Mesuré : une dépendance `kira` posée dans le manifeste
+          # de la boutique fait tomber ces deux gardes-là.
+
           exit $status
 
   # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en
