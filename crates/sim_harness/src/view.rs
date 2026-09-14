@@ -134,6 +134,30 @@ impl LockMask {
     }
 }
 
+/// Ce qu'une politique d'achat rend, dans l'ordre où la boucle l'appliquera.
+///
+/// **Déclarée ici, aux côtés de la décision de main.** Le document d'étape la
+/// disait déclarée avec elle ; elle ne l'était pas, et le trait qui la rend
+/// ainsi que la boucle qui l'applique ne pouvaient donc pas s'écrire. Les deux
+/// types de décision vivent ensemble pour la raison qui vaut déjà pour la
+/// décision de main et son masque : deux tickets parallèles les feraient
+/// diverger.
+///
+/// **Aucune variante ne mute quoi que ce soit.** Une politique choisit, la
+/// boucle applique — c'est elle seule qui détient le solde d'or.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShopAction {
+    /// Achète l'article de ce rang dans l'étalage. Le rang se lit par un accès
+    /// **vérifié** : les achats précédents décalent la liste.
+    Buy(usize),
+    /// Revend la relique de ce slot. Un slot vide ou hors bornes ne fait rien.
+    Sell(u8),
+    /// Renouvelle l'étalage. Refusée faute d'or, elle ne fait rien.
+    RerollShop,
+    /// Termine la visite : **le reste de la liste est ignoré**, pas exécuté.
+    Leave,
+}
+
 /// Ce qu'une politique de main rend.
 ///
 /// **Elle est déclarée là où le masque l'est**, faute de quoi les deux
