@@ -438,12 +438,12 @@ mod tests {
         let mesure = |glouton: bool| {
             let mut manches: Vec<u8> = Vec::new();
             for graine in 1..=1_000u64 {
-                let issue = if glouton {
+                let (issue, _) = if glouton {
                     simulate_with(&config, graine, &mut GreedyPolicy::new(), &mut Passive)
                 } else {
                     simulate_with(&config, graine, &mut RandomPolicy::new(), &mut Passive)
                 };
-                manches.push(issue.blinds_cleared);
+                manches.push(issue.blinds_cleared());
             }
             manches.sort_unstable();
             let total: u32 = manches.iter().map(|m| u32::from(*m)).sum();

@@ -1253,6 +1253,21 @@ jobs:
           # `#[cfg(test)]`.
           forbid_prod "critère 6  liste de reliques écrite à la main dans le harnais" \
                   'RelicId::' crates/sim_harness/src/policy
+          # **La ligne du tableau ne se mute pas après construction.** La garde
+          # porte sur **l'acte** — prendre une référence mutable sur la ligne —
+          # et non sur la syntaxe `&mut self`, qui bannirait du même coup les
+          # deux constructeurs des agrégats, lesquels se remplissent *pendant*
+          # le run et doivent donc l'être. Un agrégat qui repasserait sur les
+          # lignes pour « normaliser » une colonne réécrirait après coup ce que
+          # le run a dit.
+          forbid  "critère 6  la ligne de sortie mutée après coup" -n \
+                  '&mut RunOutcome' crates/sim_harness/src
+          # Le vocabulaire v1 sur le seul fichier où il serait naturel : un champ
+          # « argent gagné », un « relances restantes ». Les noms canoniques sont
+          # `gold`, `rerolls_left` et `hands_remaining`.
+          forbid  "critère 6  vocabulaire v1 dans la ligne de sortie" -n \
+                  'rerolls_remaining|hands_left|rolls_remaining|rerolls_per_hand|RollSession|RoundContext|HandEvaluation|evaluate_hand|ScoringDie|défausse|\bf64\b|\bf32\b|HashMap|HashSet' \
+                  crates/sim_harness/src/outcome.rs
           # Déterminisme de l'offre : ordre d'itération garanti, entiers seuls.
           forbid  "critère 6  table associative dans l'offre" -n 'HashMap|HashSet' "$SHOP"
           forbid  "critère 6  flottant dans l'offre" -n '\bf64\b|\bf32\b' "$SHOP"

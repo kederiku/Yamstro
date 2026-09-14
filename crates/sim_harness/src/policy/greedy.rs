@@ -552,14 +552,14 @@ mod tests {
         // dés différents dès la main suivante. La comparaison des sondes est
         // statistique sur N graines, jamais run à run.
         let config = campagne();
-        let gloutonne = simulate_with(&config, 5, &mut GreedyPolicy::new(), &mut Passive);
-        let premiere = simulate_with(&config, 5, &mut Premiere, &mut Passive);
+        let (gloutonne, _) = simulate_with(&config, 5, &mut GreedyPolicy::new(), &mut Passive);
+        let (premiere, _) = simulate_with(&config, 5, &mut Premiere, &mut Passive);
         assert_ne!(gloutonne, premiere, "les deux sondes n'ont pas divergé");
 
         // Et chacune est reproductible à graine égale.
         assert_eq!(
             gloutonne,
-            simulate_with(&config, 5, &mut GreedyPolicy::new(), &mut Passive)
+            simulate_with(&config, 5, &mut GreedyPolicy::new(), &mut Passive).0
         );
     }
 

@@ -578,7 +578,7 @@ mod tests {
         let mut mouchard = Mouchard::default();
         for index in 0..1_000u64 {
             let mut politique = GridAwarePolicy::default();
-            let _ = simulate_with(&config, 1_000 + index, &mut politique, &mut mouchard);
+            let (_, _) = simulate_with(&config, 1_000 + index, &mut politique, &mut mouchard);
         }
         mouchard
     }
@@ -924,7 +924,7 @@ mod tests {
         for index in 0..1_000u64 {
             let mut politique = GridAwarePolicy::default();
             let mut achat = MouchardSynergie::default();
-            let _ = simulate_with(&config, 1_000 + index, &mut politique, &mut achat);
+            let (_, _) = simulate_with(&config, 1_000 + index, &mut politique, &mut achat);
             visites = visites.saturating_add(achat.visites);
             reliques_max = reliques_max.max(achat.reliques_max);
             archetypes.extend(achat.vus);

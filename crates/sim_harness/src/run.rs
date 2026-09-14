@@ -11,7 +11,10 @@
 //! minute.
 
 use crate::blind::{blind_context, blind_definition, draw_boss_for};
-use crate::config::SimConfig;
+use crate::config::{SimConfig, cup_nom};
+use crate::outcome::{
+    DIX_MILLIEMES, RunAggregates, RunOutcome, blind_name, hand_name, relics_cell,
+};
 use crate::policy::{HandDecision, Policy, ShopAction, ShopPolicy};
 use crate::rng::SimRng;
 use crate::state::{SimHand, SimSession};
@@ -21,7 +24,7 @@ use core_engine::config::{RunConfig, effective_rerolls};
 use core_engine::cups::CupId;
 use core_engine::cups::definitions::cup;
 use core_engine::dice::{Die, DieId};
-use core_engine::economy::payout::calculate_payout;
+use core_engine::economy::payout::{Payout, calculate_payout};
 use core_engine::economy::round_end_gold;
 use core_engine::evaluator::{HandEvaluator, HandMatch, rescore_with_levels};
 use core_engine::hands::{HandLevels, YahtzeeHand};
@@ -44,35 +47,50 @@ const BASE_MULT_HORS_PIPELINE: i64 = 0;
 /// À zéro, la garde du *Dé Fantôme* serait vraie hors de tout lancer.
 const ROLL_INDEX_HORS_LANCER: u8 = u8::MAX;
 
-/// Ce qu'un run produit.
+/// Ce que la boucle accumule pendant un run, et qui devient la ligne du tableau
+/// et les agrégats à la fin.
 ///
-/// **Forme minimale : ce que la boucle produit, et rien de plus.** Les colonnes
-/// du tableau de sortie, la sérialisation et le nom des politiques sont arrêtés
-/// par TASK-150, qui **complète cette structure et la déplace** vers son propre
-/// module — une migration, jamais un second type.
-///
-/// La victoire ne s'y stocke pas : elle se lit de `blinds_cleared`, et un champ
-/// redondant divergerait.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunOutcome {
-    pub seed: u64,
-    pub cup: CupId,
-    pub stake_level: u8,
-    pub ante_reached: u8,
-    pub blinds_cleared: u8,
-    pub hands_played: u32,
-    pub final_gold: u32,
-    /// Défauts de politique rencontrés. **Il doit valoir zéro.**
-    pub anomalies: u32,
-    /// Un run abandonné **n'entre pas** dans les agrégats de taux de victoire.
-    pub abandoned: bool,
+/// **Il n'est pas la ligne.** La ligne est construite une fois, à la sortie, et
+/// n'est jamais touchée ensuite : c'est ce qui empêche un agrégat de réécrire
+/// après coup ce que le run a dit.
+struct Journal {
+    /// Compteurs de figures, **indexés par l'ordre de l'énumération**. Les
+    /// treize colonnes se remplissent depuis ce tableau, en un seul endroit.
+    figures: [u16; 13],
+    or_gagne: u32,
+    interets: u32,
+    max_score: u64,
+    max_figure: Option<YahtzeeHand>,
+    anomalies: u32,
+    aggregats: RunAggregates,
 }
 
-impl RunOutcome {
-    /// Nombre de manches d'une run complète : huit antes, trois rangs.
-    #[must_use]
-    pub fn victorieux(&self) -> bool {
-        !self.abandoned && self.blinds_cleared == ANTE_FINAL * RANGS.len() as u8
+impl Journal {
+    fn neuf() -> Self {
+        Self {
+            figures: [0; 13],
+            or_gagne: 0,
+            interets: 0,
+            max_score: 0,
+            max_figure: None,
+            anomalies: 0,
+            aggregats: RunAggregates::neuf(),
+        }
+    }
+
+    /// Une main commise : son compteur, et le score maximum **avec sa figure**.
+    ///
+    /// Les deux se posent **ensemble, au même endroit**, depuis le même score
+    /// commis. Deux écritures en deux endroits divergent au premier remaniement,
+    /// et la colonne dirait alors qu'un Full a produit un score de Yams.
+    fn commettre(&mut self, figure: YahtzeeHand, score: u64) {
+        if let Some(compteur) = self.figures.get_mut(figure as usize) {
+            *compteur = compteur.saturating_add(1);
+        }
+        if score > self.max_score {
+            self.max_score = score;
+            self.max_figure = Some(figure);
+        }
     }
 }
 
@@ -285,6 +303,7 @@ fn appliquer_achats(
     session: &mut SimSession,
     inventory: &mut ShopInventory,
     actions: &[ShopAction],
+    aggregats: &mut RunAggregates,
 ) -> u32 {
     let mut anomalies: u32 = 0;
     for action in actions {
@@ -320,6 +339,7 @@ fn appliquer_achats(
                 match item {
                     ShopItem::RelicCard(def) => {
                         session.relics.add_relic(def);
+                        aggregats.noter(def, false, true);
                     }
                     // `upgrade` est le seul mutateur des niveaux, et il sature.
                     ShopItem::GridUpgrade(hand) => session.hand_levels.upgrade(hand),
@@ -359,7 +379,7 @@ fn encaisser_fin_de_manche(
     session: &mut SimSession,
     manche: &BlindContext,
     derniere: &DerniereMain,
-) {
+) -> Payout {
     let base = contexte_de_base(
         &session.hand_levels,
         manche,
@@ -377,6 +397,7 @@ fn encaisser_fin_de_manche(
         or_des_reliques,
     );
     session.gold = session.gold.saturating_add(gain.total);
+    gain
 }
 
 /// Joue une main jusqu'à la figure commise.
@@ -392,7 +413,7 @@ fn jouer_une_main<P: Policy>(
     sides: &[u8],
     policy: &mut P,
     policy_rng: &mut ChaCha8Rng,
-    resultat: &mut RunOutcome,
+    journal: &mut Journal,
 ) -> Result<DerniereMain, ()> {
     let mut pool = DicePool::new(&session.config, sides);
     let mut main = SimHand::new(relances(
@@ -423,11 +444,11 @@ fn jouer_une_main<P: Policy>(
         match decision {
             HandDecision::Submit(figure) => {
                 if !figure_jouable(manche, figure) {
-                    resultat.anomalies = resultat.anomalies.saturating_add(1);
+                    journal.anomalies = journal.anomalies.saturating_add(1);
                     return Err(());
                 }
                 let Some(choisie) = figures.iter().find(|f| f.hand == figure) else {
-                    resultat.anomalies = resultat.anomalies.saturating_add(1);
+                    journal.anomalies = journal.anomalies.saturating_add(1);
                     return Err(());
                 };
                 let rapport = ScoringPipeline::resolve(
@@ -442,7 +463,11 @@ fn jouer_une_main<P: Policy>(
                 manche.current_score = manche.current_score.saturating_add(rapport.final_score);
                 manche.hands_remaining = manche.hands_remaining.saturating_sub(1);
                 manche.used_hands.mark(figure);
-                resultat.hands_played = resultat.hands_played.saturating_add(1);
+                journal.commettre(figure, rapport.final_score);
+                // **Le journal de score est lu ici et nulle part ailleurs** :
+                // c'est le seul endroit où l'imputation par relique est
+                // disponible, et le rapport d'équilibrage en dépend.
+                journal.aggregats.imputer(&rapport.steps);
 
                 let base = contexte_de_base(
                     &session.hand_levels,
@@ -461,7 +486,7 @@ fn jouer_une_main<P: Policy>(
             }
             HandDecision::Reroll(masque) => {
                 if main.rerolls_left == 0 {
-                    resultat.anomalies = resultat.anomalies.saturating_add(1);
+                    journal.anomalies = journal.anomalies.saturating_add(1);
                     return Err(());
                 }
                 let identifiants: Vec<DieId> = pool.dice().iter().map(|die| die.id).collect();
@@ -495,24 +520,32 @@ pub fn simulate_with<P: Policy, S: ShopPolicy>(
     seed: u64,
     policy: &mut P,
     shop_policy: &mut S,
-) -> RunOutcome {
+) -> (RunOutcome, RunAggregates) {
+    let mut journal = Journal::neuf();
+
     // La ligne de commande remplit toujours les deux vecteurs ; une campagne
     // vide n'est pas un run jouable, et elle se signale plutôt qu'elle ne se
     // devine.
     let (Some(cup_id), Some(stake_level)) =
         (config.cups.first().copied(), config.stakes.first().copied())
     else {
-        return RunOutcome {
-            seed,
-            cup: CupId::Standard,
-            stake_level: 0,
-            ante_reached: 0,
-            blinds_cleared: 0,
-            hands_played: 0,
-            final_gold: 0,
-            anomalies: 1,
-            abandoned: true,
-        };
+        journal.anomalies = 1;
+        return (
+            ligne(
+                seed,
+                CupId::Standard,
+                0,
+                policy.name(),
+                shop_policy.name(),
+                0,
+                Some((0, BlindType::Small)),
+                0,
+                String::new(),
+                true,
+                &journal,
+            ),
+            journal.aggregats,
+        );
     };
 
     let mut session = SimSession::new(cup_id, stake_level, seed);
@@ -522,21 +555,13 @@ pub fn simulate_with<P: Policy, S: ShopPolicy>(
     // diverger la partie selon la stratégie employée, et deux campagnes de
     // même graine ne seraient plus comparables.
     let mut policy_rng = SimRng::from_seed(seed).policy;
-    let mut resultat = RunOutcome {
-        seed,
-        cup: cup_id,
-        stake_level,
-        ante_reached: 1,
-        blinds_cleared: 0,
-        hands_played: 0,
-        final_gold: session.gold,
-        anomalies: 0,
-        abandoned: false,
-    };
+    let mut ante_atteint = 1u8;
+    let mut fatale: Option<(u8, BlindType)> = None;
+    let mut abandonne = false;
 
     'run: for ante in 1..=ANTE_FINAL {
         session.ante = ante;
-        resultat.ante_reached = ante;
+        ante_atteint = ante;
 
         for kind in RANGS {
             let boss = draw_boss_for(kind, session.config.relic_capacity, &mut session.rng.boss);
@@ -556,11 +581,13 @@ pub fn simulate_with<P: Policy, S: ShopPolicy>(
                     &deck.sides,
                     policy,
                     &mut policy_rng,
-                    &mut resultat,
+                    &mut journal,
                 ) {
                     Ok(main) => main,
                     Err(()) => {
-                        resultat.abandoned = true;
+                        abandonne = true;
+                        fatale = Some((ante, kind));
+                        noter_le_rapport(&mut journal, ante, &manche);
                         break 'run;
                     }
                 };
@@ -571,13 +598,28 @@ pub fn simulate_with<P: Policy, S: ShopPolicy>(
                 }
             };
 
+            // **La dernière manche tentée de l'ante**, battue ou non : c'est la
+            // seule des trois qui soit définie dès que l'ante est entré, et
+            // c'est celle sur laquelle le run bute.
+            noter_le_rapport(&mut journal, ante, &manche);
+
             if !battue {
+                fatale = Some((ante, kind));
                 break 'run;
             }
-            resultat.blinds_cleared = resultat.blinds_cleared.saturating_add(1);
-            encaisser_fin_de_manche(&mut session, &manche, &derniere);
+            let gain = encaisser_fin_de_manche(&mut session, &manche, &derniere);
+            journal.or_gagne = journal.or_gagne.saturating_add(gain.total);
+            journal.interets = journal.interets.saturating_add(gain.interest);
 
             let mut etalage = generate_shop(&mut session.rng.shop);
+            // **L'étalage est noté avant d'être touché** : un article acheté en
+            // sort, et le compter après ferait disparaître de la statistique
+            // tout ce qui a été pris.
+            for item in &etalage.items {
+                if let ShopItem::RelicCard(def) = item {
+                    journal.aggregats.noter(*def, true, false);
+                }
+            }
             let actions = {
                 let vue = ShopView {
                     inventory: &etalage,
@@ -587,16 +629,115 @@ pub fn simulate_with<P: Policy, S: ShopPolicy>(
                 };
                 shop_policy.decide(&vue, &mut policy_rng)
             };
-            resultat.anomalies = resultat.anomalies.saturating_add(appliquer_achats(
+            journal.anomalies = journal.anomalies.saturating_add(appliquer_achats(
                 &mut session,
                 &mut etalage,
                 &actions,
+                &mut journal.aggregats,
             ));
         }
     }
 
-    resultat.final_gold = session.gold;
-    resultat
+    // Les reliques de la dernière colonne et l'indicateur de conservation sont
+    // la **même** lecture de l'inventaire final, faite une fois.
+    for (_, inst) in session.relics.iter_slots() {
+        if let Some(entree) = journal
+            .aggregats
+            .relics_seen
+            .iter_mut()
+            .find(|e| e.def == inst.def)
+        {
+            entree.kept = true;
+        }
+    }
+
+    let resultat = ligne(
+        seed,
+        cup_id,
+        stake_level,
+        policy.name(),
+        shop_policy.name(),
+        ante_atteint,
+        fatale,
+        session.gold,
+        relics_cell(&session.relics),
+        abandonne,
+        &journal,
+    );
+    (resultat, journal.aggregats)
+}
+
+/// Pose le rapport score sur cible de l'ante, **en dix-millièmes entiers**.
+///
+/// Aucun flottant : une division entière après multiplication, et une cible
+/// nulle rend zéro plutôt qu'une panique.
+fn noter_le_rapport(journal: &mut Journal, ante: u8, manche: &BlindContext) {
+    let Some(case) = journal
+        .aggregats
+        .score_vs_target_by_ante
+        .get_mut(usize::from(ante).saturating_sub(1))
+    else {
+        return;
+    };
+    // La division vérifiée plutôt qu'un test d'égalité à zéro : une cible nulle
+    // rend zéro, et rien ne panique.
+    *case = manche
+        .current_score
+        .saturating_mul(u64::from(DIX_MILLIEMES))
+        .checked_div(manche.target_score)
+        .map_or(0, |ratio| u32::try_from(ratio).unwrap_or(u32::MAX));
+}
+
+/// Construit la ligne du tableau, **une fois, à la sortie**. Elle n'est jamais
+/// touchée ensuite.
+#[allow(clippy::too_many_arguments)]
+fn ligne(
+    seed: u64,
+    cup_id: CupId,
+    stake: u8,
+    policy: &'static str,
+    shop_policy: &'static str,
+    ante_reached: u8,
+    fatale: Option<(u8, BlindType)>,
+    gold_final: u32,
+    relics_final: String,
+    abandoned: bool,
+    journal: &Journal,
+) -> RunOutcome {
+    let victory = fatale.is_none();
+    let resultat = RunOutcome {
+        seed,
+        cup: cup_nom(cup_id),
+        stake,
+        policy,
+        shop_policy,
+        ante_reached,
+        victory,
+        defeat_ante: fatale.map(|(ante, _)| ante),
+        defeat_blind: fatale.map(|(_, kind)| blind_name(kind)),
+        gold_earned: journal.or_gagne,
+        gold_final,
+        interest_earned: journal.interets,
+        hands_aces: 0,
+        hands_twos: 0,
+        hands_threes: 0,
+        hands_fours: 0,
+        hands_fives: 0,
+        hands_sixes: 0,
+        hands_three_of_a_kind: 0,
+        hands_four_of_a_kind: 0,
+        hands_full_house: 0,
+        hands_small_straight: 0,
+        hands_large_straight: 0,
+        hands_yahtzee: 0,
+        hands_chance: 0,
+        relics_final,
+        max_hand_score: journal.max_score,
+        max_hand_figure: journal.max_figure.map(hand_name),
+        anomalies: journal.anomalies,
+        abandoned,
+    };
+    resultat.with_hand_counts(&journal.figures)
 }
 
 #[cfg(test)]
@@ -725,18 +866,8 @@ mod tests {
         }
     }
 
-    fn issue_vide() -> RunOutcome {
-        RunOutcome {
-            seed: 1,
-            cup: CupId::Standard,
-            stake_level: 1,
-            ante_reached: 1,
-            blinds_cleared: 0,
-            hands_played: 0,
-            final_gold: 0,
-            anomalies: 0,
-            abandoned: false,
-        }
+    fn journal_vide() -> Journal {
+        Journal::neuf()
     }
 
     fn manche_avec(modifier: Option<BlindModifier>) -> BlindDefinition {
@@ -754,7 +885,7 @@ mod tests {
         for index in 0..1_000u64 {
             let mut politique = Scriptee::neuve();
             let mut boutique = BoutiqueScriptee::passive();
-            let issue = simulate_with(&config, 1 + index, &mut politique, &mut boutique);
+            let (issue, _) = simulate_with(&config, 1 + index, &mut politique, &mut boutique);
 
             assert_eq!(issue.anomalies, 0, "graine {index}");
             assert!(!issue.abandoned, "graine {index}");
@@ -782,11 +913,11 @@ mod tests {
         let config = campagne(CupId::Standard, 1);
         let mut politique = Scriptee::neuve();
         let mut boutique = BoutiqueScriptee::passive();
-        let issue = simulate_with(&config, 7, &mut politique, &mut boutique);
+        let (issue, _) = simulate_with(&config, 7, &mut politique, &mut boutique);
         let mains_par_manche = cup(CupId::Standard).hands_per_blind;
 
         assert!(!politique.vues.is_empty(), "la boucle n'a rien joué");
-        assert!(issue.hands_played > 0);
+        assert!(issue.hands_played() > 0);
 
         for vue in &politique.vues {
             if vue.mains == mains_par_manche {
@@ -1037,6 +1168,7 @@ mod tests {
                 ShopAction::Leave,
                 ShopAction::Buy(0),
             ],
+            &mut RunAggregates::neuf(),
         );
 
         assert_eq!(anomalies, 0);
@@ -1059,7 +1191,12 @@ mod tests {
         let mut etalage = generate_shop(&mut session.rng.shop);
         let avant = etalage.items.len();
         assert_eq!(
-            appliquer_achats(&mut session, &mut etalage, &[ShopAction::Buy(0)]),
+            appliquer_achats(
+                &mut session,
+                &mut etalage,
+                &[ShopAction::Buy(0)],
+                &mut RunAggregates::neuf()
+            ),
             0
         );
         assert_eq!(session.gold, 0);
@@ -1082,7 +1219,12 @@ mod tests {
                 items: vec![ShopItem::RelicCard(RelicId::PolishedStone)],
                 reroll_cost: 5,
             };
-            appliquer_achats(&mut session, &mut etalage, &[ShopAction::Buy(0)]);
+            appliquer_achats(
+                &mut session,
+                &mut etalage,
+                &[ShopAction::Buy(0)],
+                &mut RunAggregates::neuf(),
+            );
             assert_eq!(session.relics.len(), usize::from(capacite), "{id:?}");
             assert_eq!(session.gold, 1_000, "{id:?} : débit sur un refus");
         }
@@ -1100,7 +1242,12 @@ mod tests {
             items: vec![ShopItem::RelicCard(RelicId::PolishedStone)],
             reroll_cost: 5,
         };
-        appliquer_achats(&mut session, &mut etalage, &[ShopAction::Buy(0)]);
+        appliquer_achats(
+            &mut session,
+            &mut etalage,
+            &[ShopAction::Buy(0)],
+            &mut RunAggregates::neuf(),
+        );
         assert_eq!(session.relics.len(), 6, "le sixième slot a été refusé");
         assert!(session.gold < 1_000, "le sixième achat n'a pas été payé");
     }
@@ -1120,7 +1267,12 @@ mod tests {
         for _ in 0..3 {
             let avant = session.gold;
             let cout = etalage.reroll_cost;
-            appliquer_achats(&mut session, &mut etalage, &[ShopAction::RerollShop]);
+            appliquer_achats(
+                &mut session,
+                &mut etalage,
+                &[ShopAction::RerollShop],
+                &mut RunAggregates::neuf(),
+            );
             payes.push(avant.saturating_sub(session.gold));
             assert_eq!(
                 payes[payes.len() - 1],
@@ -1163,7 +1315,12 @@ mod tests {
         let avant = etalage.items.clone();
         let cout = etalage.reroll_cost;
 
-        let anomalies = appliquer_achats(&mut session, &mut etalage, &[ShopAction::RerollShop]);
+        let anomalies = appliquer_achats(
+            &mut session,
+            &mut etalage,
+            &[ShopAction::RerollShop],
+            &mut RunAggregates::neuf(),
+        );
 
         assert_eq!(anomalies, 0);
         assert_eq!(
@@ -1186,7 +1343,12 @@ mod tests {
             items: vec![ShopItem::GridUpgrade(YahtzeeHand::FullHouse)],
             reroll_cost: 5,
         };
-        appliquer_achats(&mut session, &mut etalage, &[ShopAction::Buy(0)]);
+        appliquer_achats(
+            &mut session,
+            &mut etalage,
+            &[ShopAction::Buy(0)],
+            &mut RunAggregates::neuf(),
+        );
 
         assert_eq!(session.hand_levels.level(YahtzeeHand::FullHouse), 2);
         for hand in YahtzeeHand::ALL {
@@ -1205,7 +1367,7 @@ mod tests {
             HandDecision::Submit(YahtzeeHand::Chance),
         ]);
         let mut boutique = BoutiqueScriptee::passive();
-        let issue = simulate_with(&config, 11, &mut politique, &mut boutique);
+        let (issue, _) = simulate_with(&config, 11, &mut politique, &mut boutique);
 
         assert!(issue.abandoned, "le run n'est pas marqué");
         assert_eq!(issue.anomalies, 1, "l'anomalie n'est pas comptée");
@@ -1223,7 +1385,7 @@ mod tests {
         let mut manche = blind_context(manche_avec(None), &session.config);
         let mut politique = Scriptee::neuve();
         let mut rng = ChaCha8Rng::seed_from_u64(1);
-        let mut resultat = issue_vide();
+        let mut resultat = journal_vide();
 
         let main = jouer_une_main(
             &mut session,
@@ -1319,7 +1481,7 @@ mod tests {
         );
         let mut politique = Scriptee::avec(vec![HandDecision::Submit(YahtzeeHand::Chance)]);
         let mut rng = ChaCha8Rng::seed_from_u64(1);
-        let mut resultat = issue_vide();
+        let mut resultat = journal_vide();
         let issue = jouer_une_main(
             &mut session,
             &mut manche,

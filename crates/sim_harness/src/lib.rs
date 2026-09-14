@@ -11,6 +11,7 @@
 
 pub mod blind;
 pub mod config;
+pub mod outcome;
 pub mod policy;
 pub mod rng;
 pub mod run;
