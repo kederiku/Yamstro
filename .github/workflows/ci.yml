@@ -1292,6 +1292,31 @@ jobs:
           require "critère 6  le collect de campagne est indexé" -n \
                   'collect\(\); // collect indexé : l.ordre est celui des indices' \
                   crates/sim_harness/src/campaign.rs
+          # **Le rapport ne compte rien en flottant, pas même à l'affichage.**
+          # L'addition flottante n'est pas associative et l'ordre de réduction
+          # d'un agrégat parallèle n'est pas garanti : seule la ligne de résumé
+          # changerait entre deux plateformes, et la comparaison d'empreintes
+          # nocturne signalerait une dérive que personne ne saurait attribuer.
+          # Un invariant à zéro strict se défend mieux qu'un invariant à
+          # exceptions.
+          forbid  "critère 6  flottant ou table non ordonnée dans le rapport" -n \
+                  '\bf64\b|\bf32\b|HashMap|HashSet' crates/sim_harness/src/report.rs
+          # Une seule convention de médiane pour tout le harnais : trois
+          # implémentations en donneraient trois au premier remaniement.
+          require "critère 6  une seule médiane dans le harnais" -n \
+                  '^pub fn median\(values: &mut \[u64\]\) -> u64 \{' \
+                  crates/sim_harness/src/report.rs
+          forbid  "critère 6  seconde médiane" -n 'fn median' crates/sim_harness/src \
+                  -g '!**/report.rs'
+          # Le rapport n'horodate rien : une date lue à l'horloge ferait changer
+          # son empreinte à chaque exécution, et c'est cette empreinte que la
+          # passe nocturne compare.
+          forbid  "critère 6  horodatage dans le rapport" -n \
+                  'SystemTime|Instant::now|chrono|Local::now' crates/sim_harness/src/report.rs
+          # La table des reliques itère le catalogue : douze aujourd'hui,
+          # soixante à l'Étape 9, sans qu'une ligne change.
+          forbid_prod "critère 6  liste de reliques écrite à la main dans le rapport" \
+                  'RelicId::' crates/sim_harness/src/report.rs
           # Déterminisme de l'offre : ordre d'itération garanti, entiers seuls.
           forbid  "critère 6  table associative dans l'offre" -n 'HashMap|HashSet' "$SHOP"
           forbid  "critère 6  flottant dans l'offre" -n '\bf64\b|\bf32\b' "$SHOP"

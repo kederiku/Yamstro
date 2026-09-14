@@ -12,7 +12,7 @@ use sim_harness::campaign::{
 };
 use sim_harness::config::{PolicyKind, ShopPolicyKind, SimConfig, WinRateRange, verdict};
 use sim_harness::outcome::RunOutcome;
-use sim_harness::{Cli, executer};
+use sim_harness::{Cli, executer, executer_avec_sortie};
 
 fn cellule(runs: u32, threads: usize) -> SimConfig {
     SimConfig {
@@ -179,15 +179,59 @@ fn test_binary_reports_its_verdict() {
     let ligne = refus.stderr.unwrap_or_default();
     assert!(ligne.contains("0.25") && ligne.contains("0.4"), "{ligne}");
 
-    // Un drapeau sans effet le dit, plutôt que de laisser croire à un résultat
-    // vide.
+    // Un drapeau **encore** sans effet le dit, plutôt que de laisser croire à
+    // un résultat vide. Le rapport, lui, est livré : il ne s'annonce plus, il
+    // écrit sur la sortie standard.
     let drapeaux = invoquer(&["--runs", "2", "--report", "--trace"]);
     assert_eq!(drapeaux.code, 0);
     let dit = drapeaux.stderr.unwrap_or_default();
+    assert!(dit.contains("TASK-153"), "{dit}");
     assert!(
-        dit.contains("TASK-152") && dit.contains("TASK-153"),
-        "{dit}"
+        !dit.contains("TASK-152"),
+        "le rapport s'annonce encore : {dit}"
     );
+
+    // **Le rapport est écrit, et pas seulement calculé.** Mesuré au banc :
+    // retirer l'écriture survit à toute assertion sur le code de sortie — la
+    // campagne tourne dans les deux cas, et l'affichage est un effet de bord
+    // qu'aucun verdict n'observe.
+    let mut sortie = Vec::new();
+    let verdict = executer_avec_sortie(
+        &Cli::parse_from([
+            "sim_harness",
+            "--cup",
+            "standard",
+            "--stake",
+            "1",
+            "--runs",
+            "5",
+            "--report",
+        ]),
+        &mut sortie,
+    );
+    assert_eq!(verdict.code, 0);
+    let texte = String::from_utf8(sortie).unwrap_or_default();
+    assert!(
+        texte.contains("rapport d'équilibrage"),
+        "aucun rapport écrit"
+    );
+    assert!(texte.contains("ante médian de défaite"), "{texte}");
+
+    // Sans le drapeau, rien n'est écrit sur cette sortie.
+    let mut muette = Vec::new();
+    let _ = executer_avec_sortie(
+        &Cli::parse_from([
+            "sim_harness",
+            "--cup",
+            "standard",
+            "--stake",
+            "1",
+            "--runs",
+            "5",
+        ]),
+        &mut muette,
+    );
+    assert!(muette.is_empty(), "un rapport non demandé a été écrit");
 
     // **Sans chemin de sortie, aucun tableau n'est écrit** : la sortie standard
     // reste libre pour le rapport console.

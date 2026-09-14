@@ -14,6 +14,7 @@ pub mod campaign;
 pub mod config;
 pub mod outcome;
 pub mod policy;
+pub mod report;
 pub mod rng;
 pub mod run;
 pub mod state;
@@ -114,19 +115,36 @@ pub fn run() -> std::process::ExitCode {
 /// éprouvables autrement qu'en lançant un sous-processus.
 #[must_use]
 pub fn executer(cli: &Cli) -> config::Verdict {
+    executer_avec_sortie(cli, &mut std::io::stdout())
+}
+
+/// La même chose, **la sortie standard passée en paramètre**.
+///
+/// Sans elle, rien ne distingue un rapport affiché d'un rapport oublié : le
+/// code de sortie est le même, la campagne tourne dans les deux cas, et
+/// l'affichage est un effet de bord qu'aucun test ne peut observer.
+pub fn executer_avec_sortie(cli: &Cli, sortie: &mut impl std::io::Write) -> config::Verdict {
     let campagne = cli.campagne();
 
     // **Un drapeau sans effet le dit.** Silencieusement ignoré, il fait croire
     // à un rapport vide plutôt qu'à un rapport absent.
     let mut messages: Vec<String> = Vec::new();
-    if cli.report {
-        messages.push("--report : le rapport agrégé est livré par TASK-152.".to_owned());
-    }
     if cli.trace {
         messages.push("--trace : le journal de run est livré par TASK-153.".to_owned());
     }
 
     let resultats = campaign::campagne(&campagne);
+
+    // **Le rapport est une sortie standard**, et le tableau n'en reçoit rien :
+    // une ligne de résumé dans le fichier casserait le tri, le tableau croisé
+    // et la comparaison d'empreintes.
+    if cli.report {
+        let _ = write!(
+            sortie,
+            "{}",
+            report::rendu(&report::agreger(&campagne, &resultats))
+        );
+    }
 
     // **Sans chemin de sortie, aucun tableau n'est écrit** : la campagne tourne,
     // la porte s'applique, et la sortie standard reste libre pour le rapport
