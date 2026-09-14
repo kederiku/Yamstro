@@ -10,6 +10,7 @@
 //! Le binaire, lui, tient en trois lignes : il appelle [`run`].
 
 pub mod blind;
+pub mod campaign;
 pub mod config;
 pub mod outcome;
 pub mod policy;
@@ -91,42 +92,6 @@ impl Cli {
                 .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from)),
         }
     }
-
-    /// Ce que l'invocation aurait fait. **Ce ticket parse, valide et sort** :
-    /// la boucle de manche arrive à TASK-144 et la campagne à TASK-151.
-    fn recapitulatif(&self) -> String {
-        let campagne = self.campagne();
-        let liste = |noms: Vec<String>| noms.join(", ");
-        format!(
-            "campagne non implémentée — rien n'a été simulé.\n  \
-             runs           : {}\n  \
-             graine de base : {}\n  \
-             gobelets       : {}\n  \
-             stakes         : {}\n  \
-             politiques     : {:?} / {:?}\n  \
-             threads        : {}\n  \
-             sortie         : {}\n  \
-             rapport        : {}\n  \
-             journal        : {}\n  \
-             porte          : {}\n\
-             TASK-144 pose la boucle de manche, TASK-151 la campagne et son CSV.",
-            campagne.runs,
-            campagne.seed_base,
-            liste(campagne.cups.into_iter().map(config::cup_nom).collect()),
-            liste(campagne.stakes.iter().map(u8::to_string).collect()),
-            campagne.policy,
-            campagne.shop_policy,
-            campagne.threads,
-            self.out.as_ref().map_or_else(
-                || "aucune".to_owned(),
-                |chemin| chemin.display().to_string()
-            ),
-            if self.report { "demandé" } else { "non" },
-            if self.trace { "demandé" } else { "non" },
-            self.assert_win_rate
-                .map_or_else(|| "aucune".to_owned(), |porte| format!("{porte:?}")),
-        )
-    }
 }
 
 /// **Code de sortie 2, et c'est délibéré.** Sortir à zéro ferait lire un succès
@@ -135,8 +100,64 @@ impl Cli {
 /// test ne bouge : les six tests éprouvent le parseur et le verdict
 /// directement, jamais par le processus.
 pub fn run() -> std::process::ExitCode {
-    eprintln!("{}", Cli::parse().recapitulatif());
-    std::process::ExitCode::from(2)
+    let verdict = executer(&Cli::parse());
+    if let Some(ligne) = verdict.stderr.as_ref() {
+        eprintln!("{ligne}");
+    }
+    std::process::ExitCode::from(verdict.code)
+}
+
+/// Ce que l'invocation fait, **sous une forme qu'un test peut lire**.
+///
+/// Un code de sortie ne se décompose pas : sans ce cœur, ni le code nominal, ni
+/// le refus de la porte, ni l'écriture conditionnelle du tableau ne seraient
+/// éprouvables autrement qu'en lançant un sous-processus.
+#[must_use]
+pub fn executer(cli: &Cli) -> config::Verdict {
+    let campagne = cli.campagne();
+
+    // **Un drapeau sans effet le dit.** Silencieusement ignoré, il fait croire
+    // à un rapport vide plutôt qu'à un rapport absent.
+    let mut messages: Vec<String> = Vec::new();
+    if cli.report {
+        messages.push("--report : le rapport agrégé est livré par TASK-152.".to_owned());
+    }
+    if cli.trace {
+        messages.push("--trace : le journal de run est livré par TASK-153.".to_owned());
+    }
+
+    let resultats = campaign::campagne(&campagne);
+
+    // **Sans chemin de sortie, aucun tableau n'est écrit** : la campagne tourne,
+    // la porte s'applique, et la sortie standard reste libre pour le rapport
+    // console, qui est une sortie standard par nature.
+    if let Some(chemin) = cli.out.as_ref() {
+        let ecriture = std::fs::File::create(chemin)
+            .map_err(|erreur| format!("{} : {erreur}", chemin.display()))
+            .and_then(|fichier| campaign::ecrire_csv(fichier, &resultats));
+        if let Err(message) = ecriture {
+            messages.push(message);
+            return config::Verdict {
+                code: 1,
+                stderr: Some(messages.join("\n")),
+            };
+        }
+    }
+
+    // La porte d'intégration : le code **1** hors fourchette, avec la valeur
+    // mesurée et l'intervalle attendu sur la sortie d'erreur.
+    let Some(fourchette) = cli.assert_win_rate else {
+        return config::Verdict {
+            code: 0,
+            stderr: (!messages.is_empty()).then(|| messages.join("\n")),
+        };
+    };
+    let verdict = campaign::porte(&resultats, fourchette);
+    messages.extend(verdict.stderr);
+    config::Verdict {
+        code: verdict.code,
+        stderr: (!messages.is_empty()).then(|| messages.join("\n")),
+    }
 }
 
 #[cfg(test)]

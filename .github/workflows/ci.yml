@@ -1268,6 +1268,30 @@ jobs:
           forbid  "critère 6  vocabulaire v1 dans la ligne de sortie" -n \
                   'rerolls_remaining|hands_left|rolls_remaining|rerolls_per_hand|RollSession|RoundContext|HandEvaluation|evaluate_hand|ScoringDie|défausse|\bf64\b|\bf32\b|HashMap|HashSet' \
                   crates/sim_harness/src/outcome.rs
+          # **Rien ne s'écrit depuis la section parallèle.** Avec un écrivain
+          # partagé, chaque run resterait juste et le tableau changerait d'ordre
+          # à chaque exécution : l'identité octet pour octet deviendrait
+          # invérifiable *sans qu'aucun run ne soit faux*, et la comparaison
+          # nocturne signalerait une dérive chaque nuit.
+          forbid  "critère 6  écriture depuis la section parallèle" -n \
+                  'Mutex|RwLock|Atomic|par_bridge|par_iter\(\)\.for_each' \
+                  crates/sim_harness/src/campaign.rs
+          # Un flottant ou une table non ordonnée sur le chemin de campagne, et
+          # l'écart ne se voit qu'à la comparaison d'empreintes, une nuit plus
+          # tard, sur une autre machine.
+          forbid  "critère 6  flottant ou table non ordonnée en campagne" -n \
+                  '\bf64\b|\bf32\b|HashMap|HashSet' crates/sim_harness/src/campaign.rs
+          # **Un bras attrape-tout dans l'aiguillage compile et ne prévient de
+          # rien** : il fait tourner une option sur une autre sonde, et l'écart
+          # entre les deux sondes de main devient nul pour une raison de
+          # câblage. Une sixième politique doit être une erreur de compilation.
+          forbid_prod "critère 6  bras attrape-tout dans l'aiguillage" \
+                  '^\s*_ =>' crates/sim_harness/src/campaign.rs
+          # L'ordre indexé **est** la garantie : le commentaire qui le dit est
+          # normatif, et sa disparition annoncerait un remplacement du collect.
+          require "critère 6  le collect de campagne est indexé" -n \
+                  'collect\(\); // collect indexé : l.ordre est celui des indices' \
+                  crates/sim_harness/src/campaign.rs
           # Déterminisme de l'offre : ordre d'itération garanti, entiers seuls.
           forbid  "critère 6  table associative dans l'offre" -n 'HashMap|HashSet' "$SHOP"
           forbid  "critère 6  flottant dans l'offre" -n '\bf64\b|\bf32\b' "$SHOP"
