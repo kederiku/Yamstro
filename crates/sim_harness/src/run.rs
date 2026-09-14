@@ -23,7 +23,7 @@ use core_engine::dice::{Die, DieId};
 use core_engine::economy::payout::calculate_payout;
 use core_engine::economy::round_end_gold;
 use core_engine::evaluator::{HandEvaluator, HandMatch, rescore_with_levels};
-use core_engine::hands::HandLevels;
+use core_engine::hands::{HandLevels, YahtzeeHand};
 use core_engine::pool::DicePool;
 use core_engine::relics::RelicInventory;
 use core_engine::relics::effects::{advance_state, roll_modifier_for};
@@ -114,7 +114,7 @@ fn as_negative_stake_delta(malus: u8) -> i8 {
 }
 
 /// Le plafond de relances de la manche, s'il y en a un.
-fn blind_cap(blind: &BlindDefinition) -> Option<u8> {
+fn plafond_de_manche(blind: &BlindDefinition) -> Option<u8> {
     if let Some(BlindModifier::MaxRerolls(cap)) = blind.modifier {
         Some(cap)
     } else {
@@ -156,7 +156,7 @@ fn relances(
     effective_rerolls(
         config,                                                   // 1. base(gobelet)
         as_negative_stake_delta(stake_reroll_malus(stake_level)), // 2. stake
-        blind_cap(blind),                                         // 3. plafond de manche
+        plafond_de_manche(blind),                                 // 3. plafond de manche
         relic_reroll_malus(relics, blind),                        // 4. reliques, signé
     )
 }
@@ -188,6 +188,33 @@ fn evaluer(dice: &[Die], levels: &HandLevels) -> Vec<HandMatch> {
     let mut figures = HandEvaluator::evaluate(dice);
     rescore_with_levels(&mut figures, dice, levels);
     figures
+}
+
+/// Les figures que *L'Oubli* interdit, vide sous toute autre manche.
+fn figures_interdites(blind: &BlindContext) -> &[YahtzeeHand] {
+    match &blind.blind.modifier {
+        Some(BlindModifier::DebuffHands(figures)) => figures,
+        _ => &[],
+    }
+}
+
+/// Une figure est-elle jouable ?
+///
+/// **Le nom diffère de celui du jeu, délibérément**, comme les noms de types de
+/// l'état de run : trois gardes d'Étape 6 tiennent à ce qu'il n'existe qu'un
+/// seul prédicat de figure, une seule liste de figures interdites et un seul
+/// consommateur du plafond — **dans le jeu**. Le harnais les réimplémente,
+/// nommément autorisé par le raccord C, et les nommer autrement garde les trois
+/// gardes entières plutôt que d'y percer trois exclusions.
+///
+/// **Le prédicat unique du harnais, et il ne se réduit pas à la grille.** Une
+/// figure interdite par la manche n'est pas neutralisée au score — le pipeline
+/// ne connaît pas cette contrainte : elle est tenue par le **refus de la
+/// soumission**, côté jeu comme ici. La boucle refuse, la politique évite, et
+/// les deux lisent la même condition : deux conditions parallèles feraient
+/// qu'une politique évite ce que la boucle accepte, ou l'inverse.
+pub(crate) fn figure_jouable(blind: &BlindContext, hand: YahtzeeHand) -> bool {
+    !blind.used_hands.contains(hand) && !figures_interdites(blind).contains(&hand)
 }
 
 /// L'arbitre de fin de manche. **Il ne recalcule rien et il est idempotent.**
@@ -404,7 +431,7 @@ fn jouer_une_main<P: Policy>(
 
         match decision {
             HandDecision::Submit(figure) => {
-                if manche.used_hands.contains(figure) {
+                if !figure_jouable(manche, figure) {
                     resultat.anomalies = resultat.anomalies.saturating_add(1);
                     return Err(());
                 }
@@ -643,12 +670,20 @@ mod tests {
             if let Some(decision) = self.decisions.pop_front() {
                 return decision;
             }
+            // **Le même prédicat que la boucle**, grille et figures interdites
+            // comprises : un repli qui ne lirait que la grille soumettrait une
+            // figure que *L'Oubli* interdit, et le run serait abandonné. Mesuré
+            // sur mille graines avant que cette ligne n'existe.
             let repli = view
                 .matches
                 .iter()
                 .map(|figure| figure.hand)
-                .find(|hand| !view.blind.used_hands.contains(*hand));
-            HandDecision::Submit(repli.unwrap_or(YahtzeeHand::Chance))
+                .find(|hand| figure_jouable(view.blind, *hand));
+            HandDecision::Submit(
+                repli.unwrap_or_else(|| {
+                    view.matches.first().map_or(YahtzeeHand::Chance, |f| f.hand)
+                }),
+            )
         }
     }
 
@@ -1183,6 +1218,50 @@ mod tests {
             Some(RelicState::Counter(0)),
             "l'état n'a pas été remis à zéro après l'encaissement"
         );
+    }
+
+    #[test]
+    fn test_a_debuffed_hand_is_refused_like_a_used_one() {
+        // **La contrainte n'est pas portée par le score.** Une figure interdite
+        // par *L'Oubli* ne vaut pas zéro : elle ne se joue pas, et c'est le
+        // refus de la soumission qui le tient — côté jeu comme ici.
+        let config = campagne(CupId::Standard, 1);
+        let oubli = manche_avec(Some(BlindModifier::DebuffHands(smallvec![
+            YahtzeeHand::Chance,
+            YahtzeeHand::Yahtzee
+        ])));
+        assert!(!figure_jouable(
+            &blind_context(oubli.clone(), &RunConfig::from_cup(&cup(CupId::Standard))),
+            YahtzeeHand::Chance
+        ));
+        assert!(figure_jouable(
+            &blind_context(oubli, &RunConfig::from_cup(&cup(CupId::Standard))),
+            YahtzeeHand::FullHouse
+        ));
+
+        // Et la boucle la refuse comme une figure consommée.
+        let mut session = SimSession::new(CupId::Standard, 1, 1);
+        let deck = cup(CupId::Standard);
+        let mut manche = blind_context(
+            manche_avec(Some(BlindModifier::DebuffHands(smallvec![
+                YahtzeeHand::Chance
+            ]))),
+            &session.config,
+        );
+        let mut politique = Scriptee::avec(vec![HandDecision::Submit(YahtzeeHand::Chance)]);
+        let mut rng = ChaCha8Rng::seed_from_u64(1);
+        let mut resultat = issue_vide();
+        let issue = jouer_une_main(
+            &mut session,
+            &mut manche,
+            &deck.sides,
+            &mut politique,
+            &mut rng,
+            &mut resultat,
+        );
+        assert!(issue.is_err(), "la figure interdite a été jouée");
+        assert_eq!(resultat.anomalies, 1);
+        let _ = config;
     }
 
     #[test]

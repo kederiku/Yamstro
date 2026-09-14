@@ -5,6 +5,8 @@
 //! module ré-exporte les deux types de décision pour qu'une politique écrive
 //! `use crate::policy::HandDecision;` sans savoir où ils sont déclarés.
 
+pub mod greedy;
+
 pub use crate::view::{HandDecision, ShopAction};
 
 use crate::view::{HandView, ShopView};
