@@ -13,6 +13,7 @@
 use crate::blind::{blind_context, blind_definition, draw_boss_for};
 use crate::config::SimConfig;
 use crate::policy::{HandDecision, Policy, ShopAction, ShopPolicy};
+use crate::rng::SimRng;
 use crate::state::{SimHand, SimSession};
 use crate::view::{HandView, ShopView};
 use core_engine::blinds::{BlindContext, BlindDefinition, BlindModifier, BlindType};
@@ -32,7 +33,6 @@ use core_engine::shop::generator::generate_shop;
 use core_engine::shop::pricing::{bump_reroll_cost, price_of, sell_value};
 use core_engine::shop::{ShopInventory, ShopItem};
 use rand_chacha::ChaCha8Rng;
-use rand_chacha::rand_core::SeedableRng;
 
 const ANTE_FINAL: u8 = 8;
 const RANGS: [BlindType; 3] = [BlindType::Small, BlindType::Big, BlindType::Boss];
@@ -43,15 +43,6 @@ const BASE_CHIPS_HORS_PIPELINE: u64 = 0;
 const BASE_MULT_HORS_PIPELINE: i64 = 0;
 /// À zéro, la garde du *Dé Fantôme* serait vraie hors de tout lancer.
 const ROLL_INDEX_HORS_LANCER: u8 = u8::MAX;
-
-/// Le cinquième flux, celui des politiques. **Provisoire, et il le dit** :
-/// TASK-147 le remplace par le flux dédié, et cette ligne disparaît. Il est
-/// dérivé comme les quatre autres — graine maîtresse contre un mélangeur
-/// public, ici celui de MurmurHash3 — pour qu'aucune politique ne consomme un
-/// flux de la run : une politique qui en consommerait un ferait diverger la
-/// partie selon la stratégie employée, et deux campagnes de même graine ne
-/// seraient plus comparables.
-const STREAM_POLICY: u64 = 0xFF51_AFD7_ED55_8CCD;
 
 /// Ce qu'un run produit.
 ///
@@ -526,7 +517,11 @@ pub fn simulate_with<P: Policy, S: ShopPolicy>(
 
     let mut session = SimSession::new(cup_id, stake_level, seed);
     let deck = cup(cup_id);
-    let mut policy_rng = ChaCha8Rng::seed_from_u64(seed ^ STREAM_POLICY);
+    // **Le cinquième flux, celui des politiques.** Il vient du harnais et non
+    // du moteur : une politique qui consommerait un flux de la run ferait
+    // diverger la partie selon la stratégie employée, et deux campagnes de
+    // même graine ne seraient plus comparables.
+    let mut policy_rng = SimRng::from_seed(seed).policy;
     let mut resultat = RunOutcome {
         seed,
         cup: cup_id,
@@ -613,6 +608,7 @@ mod tests {
     use core_engine::hands::YahtzeeHand;
     use core_engine::relics::{RelicId, RelicState};
     use core_engine::rng::RunRng;
+    use rand_chacha::rand_core::SeedableRng;
     use smallvec::{SmallVec, smallvec};
     use std::collections::VecDeque;
 

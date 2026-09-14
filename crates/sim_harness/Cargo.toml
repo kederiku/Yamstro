@@ -19,6 +19,13 @@ publish = false
 core_engine = { path = "../core_engine", version = "0.1.0" }
 clap = { workspace = true }
 csv = { workspace = true }
+# **Huitième dépendance, et la liste se ferme ici.** Le trait qui porte le
+# tirage dans un intervalle vit dans cette crate et n'est ré-exporté par aucune
+# autre : mesuré, le chemin par le générateur ChaCha n'existe pas. Les deux
+# solutions de rechange étaient pires — réécrire un échantillonnage uniforme
+# sans biais à la main, qui paraît juste et l'est subtilement moins, ou
+# détourner une fonction de manche du moteur, qui marche et ment.
+rand = { workspace = true }
 rand_chacha = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }

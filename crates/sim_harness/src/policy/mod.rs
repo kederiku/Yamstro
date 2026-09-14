@@ -7,6 +7,7 @@
 
 pub mod greedy;
 pub mod grid_aware;
+pub mod random;
 
 pub use crate::view::{HandDecision, ShopAction};
 
