@@ -41,7 +41,7 @@ use core_engine::scoring::{Hook, TriggerCtx};
 
 use crate::resources::{HandContext, RunSession};
 use crate::states::RunPhase;
-use core_engine::blind::BlindContext;
+use core_engine::blinds::BlindContext;
 
 /// Valeurs d'attente des champs que seule la passe de score renseigne.
 ///
@@ -161,12 +161,16 @@ pub fn collect_relic_gold_on_blind_end(
 fn avancer(inventory: &mut RelicInventory, base: &TriggerCtx<'_>, hook: Hook) {
     for (slot, inst) in inventory.slots.iter_mut().enumerate() {
         let Some(inst) = inst else { continue };
-        if !inst.participe() {
+        let slot = u8::try_from(slot).unwrap_or(u8::MAX);
+        // Un slot en cage n'avance pas son état : c'est ce qui garde un
+        // `Counter(3)` intact après la manche, là où poser `Disabled` sur le
+        // slot l'aurait détruit.
+        if !inst.participe(slot, &base.blind.blind) {
             continue;
         }
         let ctx = TriggerCtx {
             uid: inst.uid,
-            slot: slot as u8,
+            slot,
             state: inst.state,
             ..*base
         };
@@ -238,11 +242,11 @@ mod tests {
         deux_frames(app);
         app.world_mut().resource_mut::<HandContext>().rerolls_left = relances_restantes;
 
-        let grille = app.world().resource::<BlindContext>().used_hands;
+        let manche = app.world().resource::<BlindContext>().clone();
         let figure = app.world().resource::<HandContext>().active_evaluations[0].hand;
         {
             let mut main = app.world_mut().resource_mut::<HandContext>();
-            select_hand(&mut main, &grille, figure);
+            select_hand(&mut main, &manche, figure);
         }
         frapper(app, KeyCode::Enter);
         deux_frames(app);
@@ -254,6 +258,103 @@ mod tests {
         // Une frame pour que la transition soit posée, une pour qu'elle
         // s'applique : c'est celle-là qui fait tourner `OnExit(Scoring)`.
         deux_frames(app);
+    }
+
+    // ---- TASK-74 : *La Cage* ----
+
+    /// Met en cage un slot sur la manche vivante.
+    fn mettre_en_cage(app: &mut App, slot: u8) {
+        app.world_mut()
+            .resource_mut::<BlindContext>()
+            .blind
+            .modifier = Some(core_engine::blinds::BlindModifier::DisableRelicSlot(slot));
+    }
+
+    #[test]
+    fn test_cage_leaves_relic_state_untouched() {
+        // Le compteur de la Tirelire accumule les relances non consommées :
+        // c'est **lui** qui rend l'avancement observable. Mesuré : avec zéro
+        // relance à chaque main il stagne à `Counter(0)`, et un test bâti
+        // là-dessus ne distingue pas une cage d'une absence d'avancement.
+        let mut app = app_en_run(CupId::Standard);
+        poser_tirelire(&mut app);
+
+        jouer_une_main(&mut app, 2);
+        jouer_une_main(&mut app, 1);
+        assert_eq!(
+            tirelire(&mut app),
+            RelicState::Counter(3),
+            "le compteur avance"
+        );
+
+        // En cage, la main suivante ne l'avance plus. Sans la cage elle
+        // l'aurait porté à 5 : c'est l'écart que ce test mesure.
+        mettre_en_cage(&mut app, 0);
+        jouer_une_main(&mut app, 2);
+
+        assert_eq!(
+            tirelire(&mut app),
+            RelicState::Counter(3),
+            "l'état a avancé sous la cage"
+        );
+    }
+
+    #[test]
+    fn test_cage_pays_no_gold() {
+        // **Deux causes se confondent, et il faut les séparer.** Une Tirelire
+        // mise en cage dès le départ ne paie rien parce que son compteur n'a
+        // jamais avancé, et non parce que le parcours de l'or l'a sautée :
+        // `gold_for` rend zéro sur l'état `None`. Mesuré, un parcours de l'or
+        // qui ignorerait la cage survit à un tel montage.
+        //
+        // Le compteur est donc rempli **avant** que la cage tombe, et l'or
+        // s'observe à l'entrée de la boutique, seul endroit où il tombe.
+        let gagner = |cage: bool| {
+            let mut app = app_en_run(CupId::Standard);
+            poser_tirelire(&mut app);
+
+            jouer_une_main(&mut app, 2);
+            jouer_une_main(&mut app, 1);
+            assert_eq!(tirelire(&mut app), RelicState::Counter(3));
+
+            let depart = or(&app);
+            if cage {
+                mettre_en_cage(&mut app, 0);
+            }
+
+            app.world_mut().resource_mut::<BlindContext>().current_score = u64::MAX;
+            jouer_une_main(&mut app, 0);
+            deux_frames(&mut app);
+            assert_eq!(phase(&app), Some(RunPhase::Shop));
+            or(&app) - depart
+        };
+
+        let libre = gagner(false);
+        assert!(
+            libre > 0,
+            "la Tirelire ne payait déjà rien : rien à mesurer"
+        );
+        assert_eq!(gagner(true), 0, "le slot en cage a rapporté de l'or");
+    }
+
+    #[test]
+    fn test_cage_does_not_remove_the_relic() {
+        let mut app = app_en_run(CupId::Standard);
+        poser_tirelire(&mut app);
+        let avant = app.world().resource::<RelicInventory>().clone();
+
+        mettre_en_cage(&mut app, 0);
+        jouer_une_main(&mut app, 0);
+
+        let apres = app.world().resource::<RelicInventory>();
+        assert_eq!(apres.slots.len(), avant.slots.len());
+        for (slot, (a, b)) in avant.slots.iter().zip(apres.slots.iter()).enumerate() {
+            assert_eq!(
+                a.map(|i| (i.uid, i.def)),
+                b.map(|i| (i.uid, i.def)),
+                "slot {slot} : l'instance a bougé"
+            );
+        }
     }
 
     #[test]

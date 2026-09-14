@@ -11,7 +11,7 @@
 //! qu'une garde du volet 1 interdit dans ce fichier : une garde large se
 //! contourne par le sens, jamais par une exception de chemin.
 
-use crate::blind::BlindContext;
+use crate::blinds::BlindContext;
 use crate::dice::{Die, DieId};
 use crate::evaluator::HandMatch;
 use crate::hands::HandLevels;
@@ -137,7 +137,7 @@ impl<'a> TriggerCtx<'a> {
 mod tests {
 
     use super::*;
-    use crate::blind::BlindContext;
+    use crate::blinds::BlindContext;
     use crate::dice::{Die, DieId};
     use crate::evaluator::HandMatch;
     use crate::hands::{HandLevels, YahtzeeHand};

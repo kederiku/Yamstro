@@ -154,7 +154,7 @@ mod tests {
     use bevy::input::ButtonState;
     use bevy::input::mouse::MouseButtonInput;
     use bevy::prelude::*;
-    use core_engine::blind::{BlindContext, BlindDefinition};
+    use core_engine::blinds::{BlindContext, BlindDefinition};
     use core_engine::cups::CupId;
     use core_engine::dice::{Die, DieId};
     use core_engine::evaluator::{HandEvaluator, HandMatch};

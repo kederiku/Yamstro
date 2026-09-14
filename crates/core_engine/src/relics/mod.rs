@@ -82,12 +82,23 @@ impl RelicInstance {
     ///
     /// **Site de décision unique de la neutralisation.** Une relique qui ne
     /// participe pas ne produit aucun effet, ne rapporte aucun or, n'avance pas
-    /// son état et n'impose pas son malus de relance. Écrire cette condition à
-    /// quatre endroits la ferait diverger : l'Étape 6 ajoute *La Cage*
-    /// (`DisableRelicSlot`) et l'Étape 9 deux autres formes, et il suffirait
-    /// d'en oublier une pour qu'une relique neutralisée perde ses effets **tout
-    /// en gardant sa contrepartie** — le joueur paierait le prix sans le bonus.
-    /// Chaque forme à venir s'ajoute **ici**, et nulle part ailleurs.
+    /// son état, ne force aucune valeur de dé et n'impose pas son malus de
+    /// relance. **Cinq parcours** le consultent, et c'est le nombre à retenir :
+    /// le score, l'or, l'avancement d'état, les valeurs forcées et la chaîne de
+    /// relances. Écrire la condition à cinq endroits la ferait diverger, et il
+    /// suffirait d'en oublier un pour qu'une relique neutralisée perde ses
+    /// effets **tout en gardant sa contrepartie** : le joueur paierait le prix
+    /// sans le bonus.
+    ///
+    /// Deux formes y vivent déjà : l'état `Disabled`, et le slot mis en cage
+    /// par *La Cage* (Étape 6). `DisableRightmostRelic` et `DisableRarity`
+    /// (Étape 9) s'ajoutent **ici**, et nulle part ailleurs.
+    ///
+    /// **La cage se lit, elle ne s'écrit pas.** Poser `RelicState::Disabled`
+    /// sur le slot ciblé compilerait et donnerait le bon score, mais
+    /// détruirait l'état existant : un `Counter(3)` perdrait son compteur, et
+    /// le restaurer en fin de manche demanderait une sauvegarde parallèle,
+    /// c'est-à-dire un second état.
     ///
     /// **C'est un prédicat, jamais un parcours filtré.** `scan_relics` doit
     /// visiter *tous* les slots, y compris les stériles : c'est sa remise à
@@ -95,8 +106,8 @@ impl RelicInstance {
     /// chaîne du *Miroir Double*, et un itérateur qui les sauterait
     /// restaurerait en silence la règle écartée à TASK-60.
     #[must_use]
-    pub fn participe(&self) -> bool {
-        self.state != RelicState::Disabled
+    pub fn participe(&self, slot: u8, blind: &crate::blinds::BlindDefinition) -> bool {
+        self.state != RelicState::Disabled && blind.disabled_relic_slot() != Some(slot)
     }
 }
 
@@ -129,6 +140,43 @@ mod tests {
 
     fn inst(uid: u32, def: RelicId, state: RelicState) -> RelicInstance {
         RelicInstance { uid, def, state }
+    }
+
+    /// Manche portant la cage sur un slot donné, ou inerte.
+    fn cage(slot: Option<u8>) -> crate::blinds::BlindDefinition {
+        crate::blinds::BlindDefinition {
+            modifier: slot.map(crate::blinds::BlindModifier::DisableRelicSlot),
+            ..crate::blinds::BlindDefinition::default()
+        }
+    }
+
+    #[test]
+    fn test_caged_slot_does_not_participate() {
+        let vivante = inst(1, RelicId::CrackedDie, RelicState::None);
+
+        assert!(vivante.participe(0, &cage(None)), "hors boss");
+        assert!(
+            !vivante.participe(0, &cage(Some(0))),
+            "le slot 0 est en cage"
+        );
+        assert!(
+            vivante.participe(1, &cage(Some(0))),
+            "le slot 1 ne l'est pas"
+        );
+    }
+
+    #[test]
+    fn test_disabled_state_and_cage_are_the_same_decision() {
+        // **Un seul site de décision.** Les deux formes de neutralisation se
+        // lisent au même endroit : c'est ce qui garantit qu'une relique
+        // neutralisée l'est pour tous ses hooks à la fois, et non pour
+        // certains.
+        let eteinte = inst(1, RelicId::CrackedDie, RelicState::Disabled);
+        let vivante = inst(2, RelicId::CrackedDie, RelicState::None);
+
+        assert!(!eteinte.participe(3, &cage(None)));
+        assert!(!vivante.participe(3, &cage(Some(3))));
+        assert!(!eteinte.participe(3, &cage(Some(3))), "les deux à la fois");
     }
 
     #[test]

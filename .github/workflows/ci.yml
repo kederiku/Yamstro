@@ -63,6 +63,43 @@ jobs:
             esac
           }
 
+          # Comme `forbid`, mais sur la **moitié de production** de chaque
+          # fichier : tout ce qui précède le premier `#[cfg(test)]`.
+          #
+          # Remplace le motif `-U '(?s)<motif>.*#\[cfg\(test\)\]'` employé
+          # jusqu'ici, qui est faux dès qu'un fichier porte **deux** modules de
+          # test : une occurrence dans le premier est alors suivie du
+          # `#[cfg(test)]` du second, et la garde se déclenche sur du code de
+          # test. `setup.rs` est dans ce cas.
+          forbid_prod() {
+            label=$1; motif=$2; shift 2
+            exclure=''
+            if [ "${1:-}" = '--exclure' ]; then exclure=$2; shift 2; fi
+            trouve=''
+            for chemin in "$@"; do
+              for f in $(find "$chemin" -name '*.rs' 2>/dev/null || echo "$chemin"); do
+                case "$f" in */tests/*) continue ;; esac
+                saute=0
+                for suffixe in $(printf '%s' "$exclure" | tr '|' ' '); do
+                  case "$f" in *$suffixe) saute=1 ;; esac
+                done
+                [ "$saute" = 1 ] && continue
+                bloc=$(sed -n '1,/^#\[cfg(test)\]/p' "$f")
+                hit=$(printf '%s' "$bloc" | rg -n "$motif" 2>&1) && rc=0 || rc=$?
+                case $rc in
+                  1) ;;
+                  0) trouve="$trouve$f:$hit"$'\n' ;;
+                  *) trouve="$trouve$f: rg a échoué (code $rc)"$'\n' ;;
+                esac
+              done
+            done
+            if [ -z "$trouve" ]; then
+              printf '  ok    %s\n' "$label"
+            else
+              printf '  ECHEC %s\n%s' "$label" "$trouve"; status=1
+            fi
+          }
+
           # Contre-épreuve : le motif DOIT être présent. Garde la saturation
           # contre une suppression silencieuse.
           require() {
@@ -108,7 +145,12 @@ jobs:
           forbid  "critère 5  actions hors des trois"    -n 'MultiplyScore|SetFormula' crates/
           forbid  "critère 5  resolve renommée"          -n 'ScoringPipeline::(execute|run)\b' crates/
           forbid  "critère 7  le pipeline ne commet rien" -n '\.current_score|\.hands_remaining|\.used_hands|advance_state\(' "$SRC/scoring"
-          forbid  "critère 7  aucune source d'aléa"      -n '\brng\b|RunRng|rand::|thread_rng' "$SRC/scoring"
+          # Restreinte au code de production : un test qui construit une manche
+          # depuis `boss_definition` (TASK-71) doit pouvoir instancier un flux,
+          # cette fonction en prenant un par signature — et ne rien en tirer
+          # hors *La Cage*. Le pipeline, lui, n'y touche toujours pas.
+          forbid_prod "critère 7  aucune source d'aléa" \
+                  '\brng\b|RunRng|rand::|thread_rng' "$SRC/scoring"
           forbid  "critère 6  feature test-fixtures"     -n 'test-fixtures"|^\s*test-fixtures\s*=' crates/
           # L'exclusion de animation.rs n'est pas une échappatoire : c'est la
           # distinction que le corpus pose lui-même à TASK-30 — « les flottants
@@ -127,7 +169,8 @@ jobs:
           # écrit pas ; elle est donc ancrée sur un appel.
           SETUP=crates/game_state/src/systems
 
-          forbid  "critère 4  soustraction nue (manche)" -n '\w*(reroll|hand|gold|slot|capacity|count|interest|score|target|ante)\w*\s*(-=|- )' "$SETUP"
+          forbid_prod "critère 4  soustraction nue (manche)" \
+                  '\w*(reroll|hand|gold|slot|capacity|count|interest|score|target|ante)\w*\s*(-=|- )' "$SETUP"
           forbid  "critère 4  aucun flottant (manche)"   -n '\bf32\b|\bf64\b' "$SETUP" -g '!**/animation.rs'
           forbid  "critère 4  combinateurs de 0.18"      -n '\b(run_in|run_after|run_before)\s*\(' crates/
           require "critère 4  stubs de malus marqués"    -n 'Étape 5|Étape 10' "$SETUP/setup.rs"
@@ -139,9 +182,27 @@ jobs:
           # champ public de core_engine. Et la garde « DicePool » vise une
           # instanciation ; nue, elle attrape les commentaires qui expliquent
           # justement qu'on n'en crée pas.
-          forbid  "critère 4  positions fixes de dés"    -U '(?s)(0\.\.5|\[Entity; 5\]|\[Die; 5\]|\b(die_slots?|dice_slots?)\b|slots?\s*\[).*#\[cfg\(test\)\]' "$SETUP"
+          forbid_prod "critère 4  positions fixes de dés" \
+                  '(0\.\.5|\[Entity; 5\]|\[Die; 5\]|\b(die_slots?|dice_slots?)\b|slots?\s*\[)' "$SETUP"
           forbid  "critère 4  littéraux de main"         -n 'rerolls_left\s*=\s*[0-9]|dice_count\s*=\s*[0-9]' "$SETUP"
-          forbid  "critère 4  flux hors des dés"         -n 'rng\.(shop|boss|relic_effects)|thread_rng|from_entropy' "$SETUP"
+          # Production seule : le test de *L'Étau* passe par le catalogue, donc
+          # par `boss_definition`, qui prend le flux des boss sans rien y tirer.
+          #
+          # **Une exception, nommée.** *La Fissure* tire ses dés cachés sur
+          # `rng.boss`, et ce tirage ne peut avoir lieu qu'ici : les dés
+          # n'existent pas avant. Le tirer sur `rng.dice` décalerait la séquence
+          # des lancers selon la présence du boss, ce que
+          # `test_hidden_draw_does_not_shift_the_dice_stream` interdit. La garde
+          # exige donc la forme exacte de cet appel, et refuse toute autre.
+          forbid_prod "critère 4  flux hors des dés" \
+                  'rng\.(shop|relic_effects)|thread_rng|from_entropy' "$SETUP"
+          # `rg` n'a pas de lookahead : le « second tirage » s'interdit par sa
+          # forme réelle, un appel de méthode porté directement sur le flux.
+          forbid_prod "critère 6  tirage direct sur le flux des boss" \
+                  'rng\.boss\.' crates/game_state/src
+          require "critère 6  les dés cachés se tirent sur le flux des boss" -U -n \
+                  'hidden_ranks\(blind\.blind\.hidden_dice\(\), wanted, &mut session\.rng\.boss\)' \
+                  crates/game_state/src/systems/setup.rs
           forbid  "critère 4  pool de dés en parallèle"  -n 'DicePool::new|DicePool\s*\{|:\s*DicePool\b|<DicePool>' crates/game_state/src
           # Aucun test ne peut voir cette relance : après le nettoyage des
           # verrous, force = true et force = false donnent le même résultat.
@@ -187,7 +248,8 @@ jobs:
           # comptée, tandis qu'une ligne de test l'était.
           forbid  "critère 4  commit unique de l'Étape 4" -n 'used_hands\s*\.\s*mark|\.current_score\s*[-+]?=|\.hands_remaining\s*[-+]?=|advance_state\(' "$SETUP/submission.rs"
           forbid  "critère 4  aucun dé retiré à la soumission" -n '\.despawn\(|remove::<Die>|Without<Locked>' "$SETUP/submission.rs"
-          forbid  "critère 4  écriture de la figure choisie" -n 'selected_hand\s*=[^=]' crates/game_state/src -g '!**/input.rs' -g '!**/setup.rs'
+          forbid_prod "critère 4  écriture de la figure choisie" \
+                  'selected_hand\s*=[^=]' --exclure '/input.rs|/setup.rs' crates/game_state/src
 
           # ---- Étape 3 : rapport de score (TASK-37) ----
           # Deux propriétés du § 2.2 de TASK-37 sont **inobservables** par un
@@ -425,7 +487,9 @@ jobs:
           # forme**, pas sur l'affectation : les fixtures de test posent
           # légitimement un score ou une grille, et aucune garde textuelle ne
           # sait distinguer un montage d'un commit. La forme, elle, est unique.
-          forbid  "critère 4  commit dupliqué hors du juice" -n 'current_score\.saturating_add|hands_remaining\.saturating_sub|used_hands\.mark\(' crates/game_state/src crates/core_engine/src
+          forbid_prod "critère 4  commit dupliqué hors du juice" \
+                  'current_score\.saturating_add|hands_remaining\.saturating_sub|used_hands\.mark\(' \
+                  crates/game_state/src crates/core_engine/src
           # La sortie de phase attend le drapeau : sans lui, RoundEnd arbitrerait
           # sur un contexte où rien n'a été ajouté.
           require "critère 4  sortie de phase liée au commit" -n 'steps\.is_empty\(\) && queue\.committed' crates/game_state/src/systems/round_end.rs
@@ -487,7 +551,11 @@ jobs:
           # La capacité vient du gobelet, jamais d'un littéral : une seule
           # fabrique dimensionne les slots, et personne d'autre.
           forbid  "critère 5  capacité en dur"           -n 'max_capacity|MAX_RELICS' crates/
-          forbid  "critère 5  slots dimensionnés hors de la fabrique" -n 'vec!\[None;' crates/ -g '!crates/core_engine/src/relics/**'
+          # Deux fabriques désormais, et deux seulement : celle des reliques et
+          # celle des consommables, toutes deux dimensionnées depuis la
+          # configuration du gobelet.
+          forbid  "critère 5  slots dimensionnés hors d'une fabrique" -n 'vec!\[None;' crates/ \
+                  -g '!crates/core_engine/src/relics/**' -g '!crates/core_engine/src/consumables.rs'
           require "critère 5  fabrique unique de l'inventaire" -n 'pub fn new\(capacity: u8\) -> Self' crates/core_engine/src/relics/inventory.rs
           forbid  "critère 5  inventaire par défaut"     -n 'impl Default for RelicInventory|derive\([^)]*Default[^)]*\)\]\npub struct RelicInventory' -U crates/core_engine/src/relics/inventory.rs
           # Le compteur est monotone : une seule écriture, et c'est l'incrément.
@@ -702,7 +770,8 @@ jobs:
           # Restreinte au code de **production** : un montage de test a le
           # droit d'éteindre une relique pour éprouver ce qui en découle.
           # L'ancrage sur la position relative au marqueur est celui de TASK-64.
-          forbid  "critère 5  état de relique écrit ailleurs qu'ici" -U '(?s)\.state = .*#\[cfg\(test\)\]' crates/game_state/src crates/ui_and_juice/src -g '!**/relics/mod.rs'
+          forbid_prod "critère 5  état de relique écrit ailleurs qu'ici" \
+                  '\.state = ' --exclure '/relics/mod.rs' crates/game_state/src crates/ui_and_juice/src
           # Le corps du commit de TASK-50 reste hors d'atteinte.
           forbid  "critère 5  avancement d'état dans la file de l'Étape 4" -n 'advance_state|round_end_gold' crates/ui_and_juice/src
           # L'or entre par un seul point, et en saturation.
@@ -763,7 +832,7 @@ jobs:
           # test : le motif s'ancre sur la position relative au marqueur, seule
           # façon d'exprimer « hors des tests » avec cet outil.
           forbid  "critère 5  unwrap dans les cartes"       -n 'unwrap\(\)' "$CARTES"
-          forbid  "critère 5  expect en production dans les cartes" -U '(?s)\.expect\(.*#\[cfg\(test\)\]' "$CARTES"
+          forbid_prod "critère 5  expect en production dans les cartes" '\.expect\(' "$CARTES"
           # Ancrée sur la **condition**, jamais sur le nom de méthode :
           # `Option::and` et `Option::or_else` sont légitimes et employés.
           # Seul `SystemCondition::and` est déprécié en 0.19.1, au profit de
@@ -791,7 +860,7 @@ jobs:
           forbid  "critère 5  DragState rendu composant"   -n 'derive\([^)]*Component' "$DRAG"
           forbid  "critère 5  donnée de jeu dans l'état de glissement" -n '(spawn|insert)\(.*Relic(Instance|Id)\b|held: *Option<Entity>|held: *Option<u32>' "$DRAG"
           forbid  "critère 5  unwrap dans le glissement"   -n 'unwrap\(\)' "$DRAG"
-          forbid  "critère 5  expect en production dans le glissement" -U '(?s)\.expect\(.*#\[cfg\(test\)\]' "$DRAG"
+          forbid_prod "critère 5  expect en production dans le glissement" '\.expect\(' "$DRAG"
           # L'action existe hors du système de souris : sans cela l'Étape 11,
           # qui doit rendre la partie jouable sans souris, la réécrirait.
           require "critère 5  prise exposée comme action"  -n 'pub fn begin_hold\(state: &mut DragState, slot: u8\)' "$DRAG"
@@ -821,7 +890,7 @@ jobs:
           SETUP=crates/game_state/src/systems/setup.rs
           # Le bouchon a disparu, et le delta est signé de bout en bout.
           forbid  "critère 5  bouchon de relance resté en place" -nU 'fn relic_reroll_malus[^\n]*\n\s*let _ = inventory;' "$SETUP"
-          require "critère 5  agrégat de relance signé" -n 'fn relic_reroll_malus\(inventory: &RelicInventory\) -> i8' "$SETUP"
+          require "critère 5  agrégat de relance signé" -n 'fn relic_reroll_malus\(inventory: &RelicInventory, blind: &BlindDefinition\) -> i8' "$SETUP"
           forbid  "critère 5  agrégat de relance en u8" -n 'fn relic_reroll_malus[^)]*\) -> u8|as_negative_delta' "$SETUP"
           # Le bouchon des stakes, lui, reste : ce sont les Étapes 10.
           require "critère 5  bouchon des stakes intact" -n 'fn stake_reroll_malus\(stake_level: u8\) -> u8' "$SETUP"
@@ -829,7 +898,7 @@ jobs:
           # parcours filtré : `scan_relics` doit visiter les slots stériles pour
           # remettre `left_effects` à zéro, et un itérateur qui les sauterait
           # restaurerait la règle écartée à TASK-60.
-          require "critère 5  prédicat unique de neutralisation" -n 'pub fn participe\(&self\) -> bool' crates/core_engine/src/relics/mod.rs
+          require "critère 5  prédicat unique de neutralisation" -n 'pub fn participe\(&self, slot: u8, blind: &crate::blinds::BlindDefinition\) -> bool' crates/core_engine/src/relics/mod.rs
           # Exclut le prédicat lui-même : c'est le site de décision, pas un
           # doublon. Tout autre fichier qui compare l'état à `Disabled` en
           # ouvre un second.
@@ -838,6 +907,527 @@ jobs:
           require "critère 5  valeurs forcées adressées par identité" -n 'find\(\|die\| die.id == \*cible\)' "$SETUP"
           forbid  "critère 5  valeurs forcées adressées par position" -n 'forcees\[|dice\[' "$SETUP"
           forbid  "critère 5  aléa tiré à l'application des valeurs forcées" -nU 'fn apply_forced_values[^}]*rng' "$SETUP"
+
+
+          # ---- Étape 6 : contraintes de manche (TASK-68) ----
+          BLINDS=$SRC/blinds/mod.rs
+          # Une seule énumération, à un seul endroit : un second `BlindModifier`
+          # « complet » à côté de l'ancien laisserait le pipeline sur l'un et la
+          # boutique sur l'autre, sans erreur de compilation.
+          require "critère 6  l'énumération des contraintes, à un seul endroit" -n 'pub enum BlindModifier \{' "$BLINDS"
+          # **L'arité inline n'est pas observable** : une `SmallVec` déborde sur
+          # le tas, donc `[T; 1]` porte deux figures aussi bien que `[T; 2]` et
+          # aucun test ne les distingue. Le glossaire impose la forme ; seule
+          # une garde sur la déclaration la tient.
+          require "critère 6  capacité inline des figures affaiblies" -n 'DebuffHands\(SmallVec<\[YahtzeeHand; 2\]>\)' "$BLINDS"
+          require "critère 6  capacité inline des figures imposées" -n 'OnlyHands\(SmallVec<\[YahtzeeHand; 2\]>\)' "$BLINDS"
+          forbid  "critère 6  seconde énumération de contraintes" -n 'enum BlindModifier' crates/ -g '!**/blinds/mod.rs'
+          # L'absence de contrainte est le `None` de l'Option, jamais une
+          # variante ; et le singulier ne pouvait pas exprimer *L'Oubli*.
+          # Ancrée sur l'**acte** : la variante employée en code, jamais son
+          # nom en prose. La note du module doit pouvoir écrire le singulier
+          # écarté pour dire pourquoi il l'est.
+          forbid  "critère 6  variante None ou figure au singulier" -n 'BlindModifier::None\b|BlindModifier::DebuffHand\(' crates/
+          # **Garde retirée à TASK-69, un ticket après l'avoir écrite.** Elle
+          # interdisait tout joker dans un `match` sur une contrainte, et
+          # `boss_mult_permille` en est le premier cas légitime : il pose une
+          # seule question — « est-ce le multiplicateur de cible ? » — et non
+          # « quelle variante est-ce ? ». Une règle généralisée d'avance est une
+          # garde qui mord son premier cas légitime ; celle-ci a mis un ticket.
+          # Le renommage est complet : deux chemins pour un même type feraient
+          # diverger les importateurs.
+          forbid  "critère 6  ancien chemin du module de manche" -n 'core_engine::blind\b|crate::blind\b|mod blind;' crates/
+          # Reflect seul sur les trois types de données ; seul le contexte est
+          # une ressource.
+          forbid  "critère 6  contrainte rendue composant ou ressource" -nU 'reflect\(Resource\)[^\n]*\n(#[^\n]*\n)*pub (enum BlindModifier|enum BlindType|struct BlindDefinition)' "$BLINDS"
+          # Le pipeline n'accède au modificateur de **manche** que par
+          # `has_modifier`. Ancré sur ce champ-là : `die.modifiers` désigne les
+          # modificateurs de dé, sans rapport, et un motif nu les attrape.
+          forbid  "critère 6  le pipeline rouvre le modificateur de manche" -n 'blind\.modifier\b|blind\.blind\.modifier' "$SRC/scoring"
+
+
+          # ---- Étape 6 : courbe de difficulté (TASK-69) ----
+          SCALING=$SRC/blinds/scaling.rs
+          # Une seule courbe dans le dépôt. L'Étape 3 en portait une copie dans
+          # `game_state`, avec un arrondi par étage : elle rendait 5034 et 8054
+          # là où la normative rend 5033 et 8053, et c'était elle que le jeu
+          # employait.
+          require "critère 6  constantes de courbe, à un seul endroit" -n 'const BASE_ANTE_1_MILLI: u64 = 300_000;' "$SCALING"
+          forbid  "critère 6  seconde courbe de difficulté" -n 'BASE_TARGET|ANTE_GROWTH_MILLI|fn base_target|fn scale_milli' crates/
+          forbid  "critère 6  facteur de courbe hors du moteur" -nU 'fn (blind_mult|cup_mult|stake_mult|boss_mult)\b' crates/game_state/src crates/ui_and_juice/src
+          # Aucun plafond sur la cible : l'empilement maximal est le signal de
+          # calibrage remis à l'Étape 6 bis, pas un défaut à corriger.
+          forbid  "critère 6  plafond sur la cible"        -n '\.min\(|\.clamp\(|MAX_TARGET' "$SCALING"
+          # Aucun flottant, et un seul site de multiplication.
+          forbid  "critère 6  flottant dans la courbe"     -n '\bf64\b|\bf32\b' "$SRC/blinds"
+          require "critère 6  site unique de multiplication" -n 'pub\(crate\) fn apply_permille\(value_milli: u64, factor_permille: u32\) -> u64' "$SCALING"
+          # **Quatre applications distinctes, et aucun test ne peut le tenir.**
+          # Les valeurs de rang et de gobelet produisent toutes un multiple
+          # exact de mille : les regrouper ne change rien aujourd'hui, et le
+          # mutant survit. La règle vaut pour les facteurs à venir — un
+          # multiplicateur de boss arbitraire casserait l'exactitude —, donc
+          # c'est une garde qui la tient.
+          require "critère 6  les quatre facteurs, appliqués un à un" -nU 'v = apply_permille\(v, blind_mult_permille\(kind\)\);\n    v = apply_permille\(v, cup_mult_permille\(cup, kind\)\);\n    v = apply_permille\(v, stake_mult_permille\(stake_level, ante\)\);\n    v = apply_permille\(v, boss_mult_permille\(modifier\)\);' "$SCALING"
+          # Le critère « aucune autre expression `/ 1_000` dans le fichier »
+          # est **faux** : trois sites en portent une, tous normatifs — le
+          # facteur lui-même, l'accumulation du stake que le § 2.2 exige
+          # tronquée à chaque pas, et l'arrondi final. Ce qui se garde, c'est
+          # que la cible ne soit multipliée que par `apply_permille`.
+          forbid  "critère 6  cible multipliée hors apply_permille" -nU 'fn target_score\([^)]*\)[^}]*\bv\b\s*\*' "$SCALING"
+          # Le facteur de stake déménagera à l'Étape 10 : un déplacement, jamais
+          # une seconde implémentation.
+          require "critère 6  facteur de stake, à un seul endroit" -n 'fn stake_mult_permille' "$SCALING"
+          forbid  "critère 6  seconde implémentation du facteur de stake" -n 'fn stake_mult_permille' crates/ -g '!**/blinds/scaling.rs'
+
+
+          # ---- Étape 6 : gain de fin de manche (TASK-70) ----
+          PAYOUT=$SRC/economy/payout.rs
+          # Une seule source de vérité pour l'or, et aucune structure qui la
+          # concurrence.
+          forbid  "critère 6  seconde source de vérité de l'or" -n 'RunEconomy|\bmoney\b|RunSaveState\.gold' crates/
+          # **Fonction libre** : un `impl` l'indenterait. Ancré sur la colonne.
+          require "critère 6  le gain est une fonction libre" -n '^pub fn calculate_payout\(' "$PAYOUT"
+          # Deux cinq de nature opposée. La tranche est une constante de règle,
+          # le plafond un paramètre de run : les intervertir ne se voit dans
+          # aucune partie, les cinq gobelets valant tous cinq.
+          require "critère 6  la tranche divise, la configuration plafonne" -n 'let interest = \(gold / INTEREST_TRANCHE\).min\(config.max_interest\);' "$PAYOUT"
+          forbid  "critère 6  plafond d'intérêts en littéral" -n 'min\(5\)|min\(5u32\)|min\(INTEREST_TRANCHE\)|/ config.max_interest' "$SRC/economy"
+          # Ancrée sur l'**usage**, pas sur le nom : la note du module doit
+          # pouvoir écrire que l'or a sa source de vérité dans la session.
+          forbid  "critère 6  le gain connaît la session ou la manche" -n 'use [^;]*(RunSession|BlindContext)|: *&?(RunSession|BlindContext)' "$PAYOUT"
+          forbid  "critère 6  élargissement tronquant dans le gain" -n ' as u32| as u8| as u64' "$PAYOUT"
+          forbid  "critère 6  flottant dans l'économie"     -n '\bf64\b|\bf32\b' "$SRC/economy"
+          # Aucun champ de plus : un drapeau d'application inviterait au double
+          # comptage que l'ADR-010 supprime.
+          forbid  "critère 6  champ de trop dans le gain"   -n '^\s*pub (applied|blind_id|ante)\s*:' "$PAYOUT"
+
+
+          # ---- Étape 6 : catalogue des boss (TASK-71) ----
+          BOSSES=$SRC/blinds/definitions/bosses.rs
+          # **Le catalogue est clos par la CI, l'exhaustivité par le
+          # compilateur.** Aucune enumération de variantes n'existe à
+          # l'exécution sans dérivé : un septième boss ajouté à l'enum mais
+          # oublié de `ALL` ne casserait aucun test. Le bloc est donc exigé au
+          # caractère près, ce qui attrape aussi un renommage et une
+          # permutation ; l'oubli dans `boss_definition`, lui, sort en E0004.
+          require "critère 6  six boss, et pas un de plus" -U -n \
+                  'pub enum BossId \{\n    OneEyed,\n    Cage,\n    Vise,\n    Flint,\n    Oblivion,\n    Rift,\n\}' "$BOSSES"
+          require "critère 6  et la table ALL les porte tous les six" -n 'pub const ALL: \[BossId; 6\]' "$BOSSES"
+          forbid  "critère 6  second catalogue de boss" -n 'enum BossId' crates/ -g '!**/blinds/definitions/bosses.rs'
+          # Ancrée sur l'**acte**, et sur la production seule : le test qui
+          # prouve que les trois autres flux n'ont pas bougé doit pouvoir les
+          # nommer. Le motif exige que l'occurrence précède `#[cfg(test)]`.
+          forbid_prod "critère 6  le boss tire sur un autre flux" \
+                  '(rng\.dice|rng\.shop|rng\.relic_effects)' "$SRC/blinds"
+          forbid  "critère 6  aléa hors flux de session" -n 'thread_rng|rand::rng\(\)|from_entropy' "$SRC/blinds"
+          # Ancrée sur l'acte — une borne littérale — et non sur le chiffre
+          # cinq, que la fixture des tests et la note du module doivent pouvoir
+          # écrire. Le Gobelet de Fortune donne six slots (C18, ADR-007).
+          forbid  "critère 6  capacité en littéral dans le tirage" -n 'random_range\(0\.\.[0-9]' "$BOSSES"
+          require "critère 6  la borne vient de la capacité" -n 'random_range\(0\.\.relic_capacity' "$BOSSES"
+          forbid  "critère 6  slot de relique en usize" -n 'DisableRelicSlot\(.*usize' crates/
+          # Fonction totale : ni bras fourre-tout, ni sortie facultative, ni
+          # valeur par défaut. Un boss sans contrainte est une erreur de
+          # compilation, et c'est ce qui rendra l'Étape 9 sûre à étendre.
+          forbid  "critère 6  la traduction du boss cesse d'être totale" -n 'Option<BossDefinition>|_ *=>|unwrap_or' "$BOSSES"
+          forbid  "critère 6  contrainte fabriquée hors de l'entrée de manche" -n 'impl Default for Boss|lazy_static|OnceLock|static [A-Z_]*: *Boss' "$BOSSES"
+          # Les noms français sont de l'i18n d'Étape 9 (ADR-008), et aucun
+          # effet ne s'implémente ici : ce fichier traduit, il n'exécute pas.
+          forbid  "critère 6  texte joueur dans le catalogue" -n 'String|&str' "$BOSSES"
+          forbid  "critère 6  effet de boss implémenté trop tôt" -n 'evaluate|rerolls_left|active_evaluations|effects_for|Hidden' "$BOSSES"
+          # La manche complète (récompense, score cible) s'assemble à TASK-80.
+          forbid  "critère 6  manche assemblée dans le catalogue" -n 'BlindDefinition|target_score' "$BOSSES"
+
+
+          # ---- Étape 6 : Le Borgne, par filtrage amont (TASK-72) ----
+          EVAL=crates/game_state/src/systems/evaluation.rs
+          # La signature de l'évaluateur est normative au caractère près depuis
+          # TASK-10, et c'est tout l'argument du filtrage amont : la règle
+          # « ni Chips, ni figure » s'obtient en ne transmettant pas le dé,
+          # jamais par une branche ajoutée dans l'évaluateur ou le pipeline.
+          require "critère 6  la signature de l'évaluateur, intacte" -n \
+                  '^    pub fn evaluate\(dice: &\[Die\]\) -> Vec<HandMatch> \{$' crates/core_engine/src/evaluator.rs
+          forbid  "critère 6  évaluateur rouvert pour le boss" -n \
+                  'evaluate_with_blind|fn evaluate\([^)]*blind|fn evaluate\([^)]*Option<u8>' crates/
+          forbid  "critère 6  branche de boss dans le pipeline de score" -n \
+                  'DisableFace' crates/core_engine/src/scoring crates/core_engine/src/relics
+          # Lecteur unique. Le catalogue des boss et la déclaration de la
+          # variante vivent dans blinds/ ; le seul lecteur est le helper.
+          forbid  "critère 6  second lecteur de la face éteinte" -n \
+                  'DisableFace' crates/ -g '!**/blinds/**' -g '!**/systems/evaluation.rs'
+          require "critère 6  le helper de face existe et est unique" -n '^pub fn disabled_face\(' "$EVAL"
+          require "critère 6  la tranche évaluable existe" -n '^pub fn evaluable_dice\(' "$EVAL"
+          # Prédicat unique : un second filtre divergeant d'une face rendrait
+          # deux mains pour le même lancer, et l'écart ne se verrait qu'au score.
+          forbid  "critère 6  second filtre de dés hors du helper" -n \
+                  'filter\([^)]*current_value !=' crates/ -g '!**/systems/evaluation.rs'
+          # Le slice de `resolve` devient `TriggerCtx.dice`, que les reliques
+          # lisent : il reste la main **physique**, entière.
+          forbid  "critère 6  la main du pipeline est filtrée" -n \
+                  'evaluable_dice' crates/game_state/src/systems/submission.rs
+          # Rendu, jamais rangé : un champ portant la main filtrée serait le
+          # second état parallèle que TASK-35 proscrit.
+          forbid  "critère 6  la main filtrée est stockée" -n \
+                  'evaluable|filtered_dice|disabled_face' crates/game_state/src/resources.rs
+          # Les dés éteints restent dans le pool : affichés, verrouillables,
+          # relançables. Les despawner changerait le nombre d'entités-dés.
+          forbid  "critère 6  le boss retire des dés du pool" -n \
+                  'despawn[^(]*\(\)[^;]*Die|remove_die|pool\.remove' "$EVAL"
+
+
+          # ---- Étape 6 : L'Étau et Le Silex, chaînes existantes (TASK-73) ----
+          LEVELS=$SRC/scoring/levels.rs
+          CONFIG=$SRC/config.rs
+          # **Le plafond vit dans config.rs, pas dans setup.rs.** `resolve_rerolls`
+          # délègue à `effective_rerolls` ; la garde est donc ancrée là où l'acte
+          # a lieu. Un `min`, jamais une affectation, jamais une soustraction —
+          # `MaxRerolls(3)` sur un gobelet à deux relances en laisse deux.
+          require "critère 6  le plafond de manche est un minimum" -n \
+                  'let after_blind = blind_cap\.map_or\(after_stake, \|cap\| after_stake\.min\(cap\)\);' "$CONFIG"
+          forbid  "critère 6  le plafond devient soustraction ou affectation" -n \
+                  'after_stake\.saturating_sub\(cap\)|blind_cap\.unwrap_or\(|= *cap;' "$CONFIG"
+          # Un seul consommateur du plafond hors de l'extracteur de setup.rs.
+          forbid  "critère 6  troisième consommateur du plafond" -n \
+                  '\bblind_cap\b' crates/ -g '!**/config.rs' -g '!**/systems/setup.rs'
+          # C10 : le nom v1 du champ. Le canonique est `rerolls_left`.
+          forbid  "critère 6  nom v1 du compteur de relances" -n 'rolls_remaining' crates/
+          # **Un seul site de division de la base.** Un second diviserait deux
+          # fois, et le test qui l'attrape épingle la valeur du palier plutôt que
+          # de la dire « différente » : deux fois divisé diffère tout autant.
+          require "critère 6  la base se divise à l'étape 1" -n \
+                  'if blind.has_modifier\(BlindModifier::HalveBaseScores\)' "$LEVELS"
+          # Ancrée sur l'**affectation**, et non sur la forme de l'arrondi : le
+          # commentaire de `pipeline.rs` qui explique le plancher écrit
+          # `(100 + 1) / 2 = 50` en toutes lettres, et doit pouvoir le faire.
+          # Dix-neuvième ancrage du corpus, et le premier que je m'inflige.
+          forbid  "critère 6  seconde division de la base" -n \
+                  '(chips|mult)[a-z_]* *=[^;=]*(div_ceil\(2\)|\+ 1\) */ *2)' crates/ -g '!**/scoring/levels.rs'
+          # L'arrondi est entier et au plus proche. La troncature nue ferait
+          # tomber les As à 2 au lieu de 3.
+          forbid  "critère 6  troncature à la place de l'arrondi" -n \
+                  'chips / 2|chips /= 2|as f64 / 2' "$LEVELS"
+          forbid  "critère 6  flottant dans la base de figure" -n '\bf32\b|\bf64\b' "$LEVELS"
+          # Le plancher du glossaire § 4, à un seul endroit : `AllMultToOne` doit
+          # pouvoir poser exactement 100 (TASK-22 § 5).
+          require "critère 6  plancher de mult dans la base" -n 'mult = mult.max\(100\);' "$LEVELS"
+          forbid  "critère 6  plancher de mult ailleurs" -n \
+                  '(mult|base_mult)[a-z_]* *=[^;=]*\.max\(100\)' crates/ -g '!**/scoring/levels.rs'
+
+
+          # ---- Étape 6 : L'Oubli et La Cage (TASK-74) ----
+          RELIQUES=$SRC/relics/mod.rs
+          # **Site de décision unique de la neutralisation.** Cinq parcours le
+          # consultent : le score, l'or, l'avancement d'état, les valeurs
+          # forcées et la chaîne de relances. Écrire la condition ailleurs la
+          # ferait diverger, et une relique neutralisée garderait sa
+          # contrepartie sans son bonus.
+          require "critère 6  le prédicat de neutralisation prend la manche" -n \
+                  'pub fn participe\(&self, slot: u8, blind: &crate::blinds::BlindDefinition\)' "$RELIQUES"
+          forbid_prod "critère 6  seconde décision sur l'état désactivé" \
+                  '(!=|==)\s*RelicState::Disabled|RelicState::Disabled\s*(!=|==)' \
+                  --exclure '/relics/mod.rs' crates/
+          forbid_prod "critère 6  seconde lecture du slot en cage" \
+                  'disabled_relic_slot\(\)' --exclure '/blinds/mod.rs|/relics/mod.rs' crates/
+          # La cage se lit, elle ne s'écrit pas : poser `Disabled` sur le slot
+          # détruirait un `Counter(3)` que rien ne restaurerait.
+          forbid_prod "critère 6  la cage écrite dans l'état" \
+                  'state = RelicState::Disabled|state: RelicState::Disabled' crates/
+          # L'accesseur vit sur la définition, où le modificateur réside, et
+          # `resolve_rerolls` ne tient qu'une définition.
+          require "critère 6  l'accesseur de cage est unique" -n \
+                  '^    pub fn disabled_relic_slot\(&self\) -> Option<u8> \{$' "$BLINDS"
+          # La garde précède la construction du contexte, et remet `left` à
+          # zéro : sans cela le voisin de droite hérite d'une tranche non vide
+          # et *Miroir Double* traverse la cage.
+          require "critère 6  le slot neutralisé casse la chaîne" -U -n \
+                  'if !inst\.participe\(slot, &proto\.blind\.blind\) \{\n            left = 0\.\.0;\n            continue;' "$SRC/scoring/pipeline.rs"
+          # Un seul prédicat de figure : le refus de la soumission et le
+          # grisage doivent rester le même énoncé.
+          require "critère 6  prédicat de figure unique" -n \
+                  '^pub fn is_hand_available\(blind: &BlindContext, hand: YahtzeeHand\)' "$EVAL"
+          forbid  "critère 6  seconde définition du prédicat de figure" -n \
+                  'fn is_hand_available' crates/ -g '!**/systems/evaluation.rs'
+          forbid_prod "critère 6  seconde liste de figures interdites" \
+                  'Vec<YahtzeeHand>|HashSet<YahtzeeHand>|debuffed|forbidden_hands' --exclure '/systems/evaluation.rs' crates/
+          # Le type est au pluriel : le singulier ne pouvait pas exprimer ce
+          # boss, qui interdit deux figures (C22).
+          # Ancrée sur une **déclaration ou une construction**, non sur le nom :
+          # deux commentaires doivent pouvoir écrire que le singulier est
+          # proscrit, ce qui est précisément la raison de la règle.
+          forbid  "critère 6  modificateur de figure au singulier" -n \
+                  'BlindModifier::DebuffHand\(|^\s{4}DebuffHand\(' crates/
+          # Le pipeline n'atteint jamais le champ : il passe par les accesseurs.
+          forbid_prod "critère 6  le pipeline lit le modificateur à nu" \
+                  'blind\.modifier|\.blind\.modifier' "$SRC/scoring"
+
+
+          # ---- Étape 6 : La Fissure (TASK-75) ----
+          # **Ancré sur l'acte, non sur le nom.** `Hidden` apparaît vingt-deux
+          # fois dans la crate d'états : sa déclaration, sa ré-exportation, les
+          # en-têtes qui expliquent la règle, et les tests. Ce qui doit rester
+          # unique, c'est l'endroit où il est **posé** et celui où il est
+          # **retiré**.
+          require "critère 7  le masque se pose à la mise en place" -n \
+                  'commands\.entity\(\*entity\)\.insert\(Hidden\)' \
+                  crates/game_state/src/systems/setup.rs
+          forbid_prod "critère 7  masque posé ailleurs qu'à la mise en place" \
+                  'insert\(Hidden\)|insert\(\(Hidden|, Hidden\)' --exclure '/systems/setup.rs' crates/
+          require "critère 7  le masque se retire à la soumission" -n \
+                  'remove::<Hidden>\(\)' crates/game_state/src/systems/submission.rs
+          forbid_prod "critère 7  masque retiré ailleurs qu'à la soumission" \
+                  'remove::<Hidden>' --exclure '/systems/submission.rs|/systems/setup.rs' crates/
+          # Chemin de calcul unique : l'évaluation temps réel et la révélation
+          # passent par la même fonction, sans quoi elles divergeraient.
+          forbid_prod "critère 7  second chemin d'évaluation" \
+                  'HandEvaluator::evaluate' --exclure '/systems/evaluation.rs' crates/game_state/src
+          require "critère 7  le remplissage est partagé" -n '^pub fn remplir\(' "$EVAL"
+          # La garde d'occultation ne descend pas dans le remplissage : le
+          # retrait par `Commands` est différé, et elle y verrait encore les
+          # marqueurs. Elle reste dans le système.
+          forbid_prod "critère 7  garde d'occultation descendue dans le remplissage" \
+                  'fn remplir\([^)]*Hidden' crates/
+          # Aucune évaluation partielle : elle divulguerait par différence (C23).
+          forbid_prod "critère 7  évaluation partielle des dés visibles" \
+                  'Without<Hidden>|hidden_ui|visible_dice|partial_eval' crates/
+
+
+          # ---- Étape 6 : étalage et rareté (TASK-76) ----
+          SHOP=$SRC/shop
+          GEN=$SHOP/generator.rs
+          # **Table unique du projet.** Une table à soixante-dix pour cent de
+          # Communes a circulé dans un document plus ancien ; elle est fausse.
+          # La garde porte sur une **déclaration** de poids, non sur le chiffre :
+          # la prose doit pouvoir nommer la table écartée, ce qui est même
+          # demandé par le ticket.
+          require "critère 6  la table de rareté, au pour-mille" -n \
+                  'pub const RARITY_WEIGHTS_PERMILLE: \[u32; 4\] = \[650, 250, 90, 10\];' "$GEN"
+          forbid  "critère 6  seconde table de rareté" -n 'RARITY_WEIGHTS_PERMILLE *(:|=)' crates/ -g '!**/shop/generator.rs'
+          forbid  "critère 6  table de rareté fausse" -n \
+                  'WEIGHTS[A-Z_]* *(:[^=]*)?= *\[ *(700|70|650 *, *250 *, *45)' crates/
+          # Déterminisme de l'offre : ordre d'itération garanti, entiers seuls.
+          forbid  "critère 6  table associative dans l'offre" -n 'HashMap|HashSet' "$SHOP"
+          forbid  "critère 6  flottant dans l'offre" -n '\bf64\b|\bf32\b' "$SHOP"
+          forbid  "critère 6  aléa hors du flux de boutique" -n \
+                  'thread_rng|rand::random|OsRng|from_entropy|rng\.dice|rng\.boss|rng\.relic_effects' "$SHOP"
+          # Aucune panique dans la génération : le vivier vide s'écrit en
+          # `let Some(..) else`, et rend un étalage amputé.
+          forbid  "critère 6  panique dans la génération" -n 'unwrap\(\)|expect\(|panic!|\[0\]' "$GEN"
+          # Le nom v1 de la variante. Ancrée sur une **déclaration ou une
+          # construction**, non sur le nom : le commentaire qui explique que ce
+          # nom est proscrit doit pouvoir l'écrire, et le ticket l'exige même.
+          forbid  "critère 6  nom v1 du modificateur de dé" -n \
+                  'DiceMod\(|::DiceMod\b|^\s{4}DiceMod' crates/
+          # L'étalage est une ressource, jamais un composant.
+          forbid  "critère 6  l'étalage dérive Component" -n 'derive\([^)]*\bComponent\b|component::Component' "$SHOP"
+          # Le coût de relance initial, déclaré une fois et posé par le
+          # générateur : c'est ce qui rend la remise à zéro vraie par visite.
+          require "critère 6  le coût de relance initial est unique" -n \
+                  '^pub const INITIAL_REROLL_COST: u32 = 5;' "$SHOP/mod.rs"
+          forbid  "critère 6  seconde déclaration du coût de relance" -n \
+                  'const INITIAL_REROLL_COST' crates/ -g '!**/shop/mod.rs'
+          # La correspondance seuil vers rareté est séparée du tirage : c'est
+          # elle qui rend les frontières éprouvables valeur par valeur.
+          require "critère 6  la correspondance est séparée du tirage" -n \
+                  '^pub fn rarity_for_permille\(seuil: u32\) -> RelicRarity \{' "$GEN"
+          # Aucun retirage : il décalerait le flux dès qu'une Légendaire sort.
+          forbid  "critère 6  boucle de retirage dans le repli" -n \
+                  'while[^{]*is_empty|loop *\{' "$GEN"
+
+
+          # ---- Étape 6 : prix, revente et relance (TASK-77) ----
+          PRIX=$SHOP/pricing.rs
+          # **Le prix de la Rune du Destin tombe du palier Rare.** Codé en dur,
+          # il rendrait la même valeur aujourd'hui — aucun test ne peut le
+          # distinguer — et survivrait à un recalibrage de la table en donnant
+          # deux prix pour une même rareté. C'est donc ici que ça se garde.
+          forbid  "critère 6  prix littéral sur un article" -n \
+                  'ShopItem::[A-Za-z]+\([^)]*\) *=> *[0-9]' "$PRIX"
+          forbid  "critère 6  la rareté du consommable décidée au barème" -n \
+                  'ConsumableId::[A-Za-z]+' "$PRIX"
+          require "critère 6  la rareté du consommable vit avec son identité" -n \
+                  '^pub fn rarity_of\(id: ConsumableId\) -> RelicRarity \{' $SRC/consumables.rs
+          # Fonction totale : une variante ajoutée doit produire un E0004.
+          forbid  "critère 6  bras attrape-tout dans le barème" -n '_ *=>|unwrap_or' "$PRIX"
+          # Les trois règles sont des fonctions libres, hors de tout `impl`.
+          require "critère 6  le prix est une fonction libre" -n '^pub fn price_of\(item: &ShopItem\) -> u32 \{' "$PRIX"
+          require "critère 6  la revente est une fonction libre" -n '^pub fn sell_value\(price: u32\) -> u32 \{' "$PRIX"
+          require "critère 6  l.incrément est une fonction libre" -n '^pub fn bump_reroll_cost\(cost: u32\) -> u32 \{' "$PRIX"
+          forbid  "critère 6  seconde règle de prix" -n \
+                  'fn price_of|fn sell_value|fn bump_reroll_cost|fn price_of_rarity' crates/ -g '!**/shop/pricing.rs'
+          forbid  "critère 6  second pas de relance" -n 'const REROLL_COST_STEP' crates/ -g '!**/shop/pricing.rs'
+          # La tarification ne connaît que ses arguments.
+          forbid  "critère 6  le barème connaît la session" -n \
+                  'RunSession|RelicInventory|RunConfig|\bgold\b' "$PRIX"
+          # Ancrée sur l'**acte** : une soustraction portant sur un prix ou un
+          # coût. Le motif nu ' - ' attrape une puce de commentaire — la
+          # séquence espace-tiret-espace y figure — et un `len() - 1` légitime.
+          forbid  "critère 6  soustraction nue sur un prix" -n \
+                  '(price|cost|prix|cout)[a-z_]* *-[^>=]|- *(price|cost)\b' "$PRIX"
+          # Le plancher de revente, et le zéro qui ne fabrique pas d'or.
+          require "critère 6  plancher de revente à un" -n '\(price / 2\).max\(1\)' "$PRIX"
+          require "critère 6  un article gratuit se revend zéro" -U -n \
+                  'if price == 0 \{\n        return 0;\n    \}' "$PRIX"
+
+
+          # ---- Étape 6 : crate de boutique (TASK-78) ----
+          BOUTIQUE=crates/shop_system
+          # **Le sens des dépendances, et il ne se négocie pas.** Une seule
+          # ligne inverse ferme un cycle et le workspace cesse de compiler ;
+          # la garde le dit avant le compilateur.
+          forbid  "critère 6  dépendance inverse vers la boutique" -n \
+                  'shop_system' crates/game_state crates/core_engine crates/ui_and_juice
+          # Aucun son ici : l'audio est l'affaire de l'Étape 8, par une autre
+          # bibliothèque. Une feature absente l'est sans erreur de compilation.
+          # Ancrée sur une **entrée de liste**, entre guillemets, et non sur le
+          # nom : le commentaire qui dit que ces features sont exclues est le
+          # contrat, et il doit pouvoir les nommer.
+          forbid  "critère 6  audio ou tweening dans la boutique" -n \
+                  '"(bevy_audio|vorbis|kira|rodio|symphonia)"|^ *(kira|rodio|symphonia|bevy_tweening) *=' \
+                  "$BOUTIQUE/Cargo.toml"
+          # `cargo deny` compte une crate publiable comme non licenciée, et une
+          # dépendance de chemin nue comme un joker.
+          require "critère 6  la crate de boutique n'est pas publiable" -n \
+                  '^publish = false$' "$BOUTIQUE/Cargo.toml"
+          forbid  "critère 6  dépendance de chemin sans version" -n \
+                  '\{ path = "\.\./[a-z_]+" \}' "$BOUTIQUE/Cargo.toml"
+          # Combinateurs supprimés en 0.19.
+          forbid  "critère 6  combinateur d'ordonnancement supprimé" -n \
+                  '\brun_in\b|\brun_after\b|\brun_before\b' "$BOUTIQUE"
+          # Aucun type de cette crate n'est une ressource : une dérivation posée
+          # par erreur sur la carte compilerait et n'en laisserait qu'une.
+          forbid  "critère 6  ressource dans la crate de boutique" -n \
+                  'derive\([^)]*\bResource\b|resource::Resource' "$BOUTIQUE/src"
+          # Aucune donnée de jeu sur une carte : l'étalage est la source unique.
+          forbid  "critère 6  donnée de jeu portée par une carte" -n \
+                  'struct Shop[A-Za-z]*\([^)]*(ShopItem|RelicId|RelicInstance|RelicRarity)' "$BOUTIQUE/src"
+          # Le skip de blind est retiré de la v1.0. **Ancrée sur l'acte** : le
+          # motif nu `skip` attrape `.skip(`, méthode d'itérateur sans rapport.
+          forbid  "critère 6  bouton de skip ou tag bonus" -n \
+                  'SkipButton|skip_blind|BonusTag|SkipBlind|bouton .?Passer' "$BOUTIQUE/src"
+          # Le placement passe par `Node` : la passe d'interface calcule sa
+          # propre transformation, et y écrire n'aurait aucun effet.
+          forbid  "critère 6  Transform dans la boutique" -n \
+                  'Query<[^>]*&mut Transform' "$BOUTIQUE/src"
+          # Un seul compteur animé dans le projet, et il vit ailleurs.
+          forbid  "critère 6  second compteur animé" -n \
+                  'struct [A-Za-z]*Number|struct [A-Za-z]*Counter|lerp' "$BOUTIQUE/src"
+          require "critère 6  le solde emploie le compteur de la mise en scène" -n \
+                  'ui_and_juice::animation::AnimatedNumber' "$BOUTIQUE/src/ui.rs"
+          # Le fichier de systèmes appartient au ticket aval : un `pub mod` sans
+          # fichier ne compile pas et bloquerait celui-ci.
+          # `systems` est livré par TASK-79 ; `audio` reste l'affaire de
+          # l'Étape 8, et un `pub mod` sans fichier ne compile pas.
+          forbid  "critère 6  module audio en avance" -n 'pub mod audio' "$BOUTIQUE/src/lib.rs"
+
+
+          # ---- Étape 6 : transactions de boutique (TASK-79) ----
+          TRANS=$BOUTIQUE/src/systems.rs
+          # Une seule règle de capacité, et elle vient de la configuration du
+          # gobelet : le Gobelet de Fortune donne six slots là où le standard en
+          # donne cinq.
+          require "critère 6  la règle de capacité est écrite une fois" -n \
+                  '^pub fn has_free_slot\(occupied: usize, capacity: u8\) -> bool \{' "$TRANS"
+          forbid  "critère 6  seconde règle de capacité" -n 'fn has_free_slot' crates/ -g '!**/shop_system/src/systems.rs'
+          forbid  "critère 6  plafond de capacité en littéral" -n \
+                  '(relics|slots|items|inventory)[a-z_]*\.len\(\) *< *[0-9]|max_capacity|MAX_RELICS' crates/
+          # Aucune dette : l'or est non signé, et sature des deux côtés.
+          forbid  "critère 6  or muté sans saturation" -n \
+                  'gold *[-+]=|gold *= *[a-z_.]*gold *[-+][^=]' crates/
+          forbid  "critère 6  seconde source de vérité de l'or" -n 'RunEconomy|\bmoney\b' crates/
+          forbid  "critère 6  or signé dans les transactions" -n '\bi64\b|\bi32\b|\bf64\b|\bf32\b' "$TRANS"
+          # Le seul flux de la boutique.
+          forbid  "critère 6  aléa hors du flux de boutique" -n \
+                  'thread_rng|rand::random|rng\.dice|rng\.boss|rng\.relic_effects' "$BOUTIQUE/src"
+          # **L'ordre de la relance est normatif, et il porte un piège.** Le
+          # générateur rend un étalage entier, coût compris et remis à sa valeur
+          # initiale : lui affecter la ressource replacerait ce coût, et les
+          # relances successives coûteraient toutes le même prix.
+          require "critère 6  la relance ne remplace que les articles" -U -n \
+                  'session\.gold = session\.gold\.saturating_sub\(shop\.reroll_cost\);\n        shop\.items = generate_shop\(&mut session\.rng\.shop\)\.items;\n        shop\.reroll_cost = bump_reroll_cost\(shop\.reroll_cost\);' "$TRANS"
+          forbid  "critère 6  la relance remplace l'étalage entier" -n \
+                  '\*shop = generate_shop|\*inventory = generate_shop' "$TRANS"
+          # Le pas d'incrément et le prix de reprise ont un seul site.
+          forbid  "critère 6  incrément de relance recopié" -n \
+                  'reroll_cost *= *[a-z_.]*saturating_add|reroll_cost *\+' "$TRANS"
+          # **Ancrée positivement**, et c'est plus sûr qu'une interdiction : le
+          # motif nu de la division attrape la numérotation d'un commentaire,
+          # « 2. Le prix se lit », et manque la forme réelle du recalcul, où la
+          # division suit une parenthèse fermante. Exiger l'appel à la
+          # tarification tombe dès que quelqu'un le remplace.
+          require "critère 6  la reprise passe par la tarification" -n \
+                  'let reprise = sell_value\(price_of\(' "$TRANS"
+          # L'or se vérifie avant de partir, et la comparaison est stricte.
+          require "critère 6  l'or est vérifié avant le débit d'achat" -n \
+                  '^        if session\.gold < prix \{$' "$TRANS"
+          require "critère 6  l'or est vérifié avant le débit de relance" -n \
+                  '^        if session\.gold < shop\.reroll_cost \{$' "$TRANS"
+          # Les trois systèmes sont des clics : ils habitent l'ensemble
+          # d'interaction, que le plugin garde par la phase de boutique.
+          require "critère 6  les transactions habitent l'ensemble d'interaction" -U -n \
+                  'handle_purchases,\n            handle_sales,\n            handle_rerolls,\n            shop_continue,\n        \)\n            \.chain\(\)\n            \.in_set\(ShopSet::Interact\)' "$TRANS"
+          # Aucune transition d'état ici : la sortie de boutique est TASK-80.
+          # **La transition de sortie a migré ici à TASK-80**, et elle y est
+          # légitime. Ce qui reste interdit est toute **autre** écriture d'état,
+          # et les gardes de la sortie de boutique s'en chargent : pas de
+          # raccourci vers le lancer, pas de `set` nu, pas d'état d'application.
+          forbid_prod "critère 6  seconde transition dans les transactions" \
+                  'RunPhase::(Roll|Scoring|RoundEnd)\b' "$TRANS"
+
+
+          # ---- Étape 6 : sortie de boutique et progression (TASK-80) ----
+          # **Il n'existe pas de transition vers le lancer.** Ancrée sur l'acte
+          # et sur la production : un test qui sort de la boutique pour vérifier
+          # qu'on n'y transige plus doit pouvoir nommer la phase de lancer.
+          forbid_prod "critère 6  raccourci de la boutique vers le lancer" \
+                  'set_if_neq\([^)]*RunPhase::Roll|set\(RunPhase::Roll\)' "$BOUTIQUE/src"
+          # `set_if_neq` sans exception : un `set` redondant rejouerait l'entrée
+          # en boutique, où l'or des reliques est encaissé.
+          forbid_prod "critère 6  transition posée sans set_if_neq" \
+                  '(phase|next|suivante)[a-z_]*\.set\(' "$BOUTIQUE/src"
+          require "critère 6  la transition de sortie est celle de l'Étape 3" -n \
+                  'NextState::set_if_neq\(&mut phase, RunPhase::BlindSelect\);' "$TRANS"
+          # La boutique n'arbitre ni victoire ni défaite. Production seule : le
+          # montage des tests doit pouvoir entrer dans la run.
+          forbid_prod "critère 6  la boutique arbitre l'issue" \
+                  'AppState|current_score *>=|VictoryScreen' "$BOUTIQUE/src"
+          forbid  "critère 6  écran de victoire inventé" -n '\bVictoryScreen\b' crates/
+          # Le skip de manche est retiré de la v1.0. **Ancrée sur l'acte** : le
+          # motif nu, insensible à la casse, attrape le verbe français *passer*
+          # conjugué — « un doublon non écarté passerait le test ».
+          forbid  "critère 6  bouton de skip ou tag bonus" -n \
+                  'SkipButton|SkipBlind|skip_blind|BonusTag|BlindTag|bouton .?Passer' crates/
+          # Le déclencheur a migré : il n'existe qu'une fois.
+          forbid  "critère 6  déclencheur de sortie dupliqué" -n 'fn shop_continue' crates/ -g '!**/shop_system/src/systems.rs'
+          forbid  "critère 6  test de sortie dupliqué" -n 'fn test_shop_continue' crates/game_state
+          # La progression de manche vit à un seul endroit, et après l'arbitre.
+          require "critère 6  la progression avance après l'arbitre" -U -n \
+                  'check_run_completion,\n            advance_blind_progression' "$SETUP"
+          forbid  "critère 6  seconde progression de manche" -n 'fn advance_blind_progression' crates/ -g '!**/systems/setup.rs'
+          # La récompense s'écrit avec la manche et se lit au gain.
+          require "critère 6  la récompense suit le rang" -n '^fn reward_for\(kind: BlindType\) -> u32 \{' "$SETUP"
+          forbid  "critère 6  récompense recalculée au gain" -n \
+                  'reward_for|match [a-z_.]*kind' "$SRC/economy"
+
+          # ---- Étape 6 : audit de clôture (TASK-81) ----
+          # Trois gardes, et trois seulement : les treize autres du § 4.3 sont
+          # déjà posées ci-dessus, ticket par ticket, et dans une forme ancrée
+          # sur l'acte. Les redoubler donnerait deux gardes pour un invariant,
+          # dont l'une casse au premier commentaire qui nomme la règle.
+          #
+          # La table de la v1. **Ancrée sur le littéral de tableau**, jamais sur
+          # la forme « 70/25/5 » : c'est celle qu'emploie la prose pour nommer
+          # la table écartée — le commentaire du bloc TASK-76 a dû l'écrire en
+          # toutes lettres pour y échapper.
+          forbid  "critère 6  table de rareté 70/25/5 de la v1" -n \
+                  '\[\s*700\s*,|\[\s*70\s*,\s*25\s*,\s*5\s*\]' crates/
+          # Le nom rand 0.9 du trait de base : en 0.10 il s'appelle `Rng`, et
+          # l'ancien `Rng` s'appelle `RngExt`.
+          forbid  "critère 6  nom rand 0.9 du trait de base" -n '\bRngCore\b' crates/
+          # L'audio du § 4.3 n'est **pas** ajouté : l'invariant est déjà gardé
+          # deux fois, ligne 335 pour tout le workspace et plus haut dans ce
+          # bloc pour la seule boutique, toutes deux ancrées sur une
+          # déclaration. Mesuré : une dépendance `kira` posée dans le manifeste
+          # de la boutique fait tomber ces deux gardes-là.
 
           exit $status
 

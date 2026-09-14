@@ -7,7 +7,7 @@
 
 use smallvec::SmallVec;
 
-use crate::blind::BlindContext;
+use crate::blinds::BlindContext;
 use crate::dice::{Die, DieId, DieModifier, DieSeal};
 use crate::evaluator::HandMatch;
 use crate::hands::{HandLevels, YahtzeeHand};
@@ -112,16 +112,20 @@ fn scan_relics<O: FnMut(Hook, &TriggerCtx<'_>)>(
             left = 0..0;
             continue;
         };
-        // Un slot désactivé est sauté avant même la construction du contexte :
-        // le boss qui éteint une relique s'appuie exclusivement là-dessus. Les
-        // autres états passent tels quels, et c'est `effects_for` qui décide ;
-        // le pipeline ne fait avancer aucun état.
-        if !inst.participe() {
+        let slot = u8::try_from(slot).unwrap_or(u8::MAX);
+
+        // Un slot neutralisé est sauté avant même la construction du contexte :
+        // les boss qui éteignent une relique s'appuient exclusivement
+        // là-dessus. Les autres états passent tels quels, et c'est
+        // `effects_for` qui décide ; le pipeline ne fait avancer aucun état.
+        //
+        // La remise à zéro de `left` est le point : le voisin de droite reçoit
+        // une tranche vide, et *Miroir Double* placé derrière une relique en
+        // cage n'hérite de rien.
+        if !inst.participe(slot, &proto.blind.blind) {
             left = 0..0;
             continue;
         }
-
-        let slot = u8::try_from(slot).unwrap_or(u8::MAX);
 
         // L'emprunt partagé de `effects` s'achève au retour de `effects_for`,
         // ce qui autorise l'extension qui suit. Ne jamais garder cette tranche
@@ -378,7 +382,7 @@ impl ScoringPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blind::BlindModifier;
+    use crate::blinds::BlindModifier;
     use crate::dice::{Die, DieId, DieModifier, DieSeal};
     use crate::evaluator::HandMatch;
     use crate::relics::{RelicId, RelicInstance, RelicInventory, RelicState};
@@ -734,7 +738,7 @@ mod tests {
         assert!(!suite.iter().any(|e| e.action == ScoreAction::AddChips(10)));
     }
 
-    use crate::blind::BlindContext;
+    use crate::blinds::BlindContext;
     use crate::hands::{HandLevels, YahtzeeHand};
     use crate::scoring::{ScoreAction, StepSource};
 

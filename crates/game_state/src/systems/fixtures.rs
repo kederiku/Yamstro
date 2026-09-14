@@ -18,6 +18,7 @@ use bevy::input::keyboard::{Key, KeyboardInput, NativeKey};
 use bevy::input::{ButtonState, keyboard::KeyCode};
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
+use core_engine::blinds::BlindType;
 use core_engine::config::RunConfig;
 use core_engine::cups::definitions::cup;
 use core_engine::cups::{CupDeck, CupId};
@@ -36,6 +37,7 @@ pub(crate) fn session(id: CupId, stake_level: u8) -> RunSession {
     RunSession {
         config: RunConfig::from_cup(&deck),
         ante: 1,
+        blind_kind: BlindType::Small,
         gold: deck.starting_gold,
         cup_id: id,
         stake_level,

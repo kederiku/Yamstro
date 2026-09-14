@@ -61,7 +61,7 @@
 //! battue donc pas de victoire possible.
 
 use bevy::prelude::*;
-use core_engine::blind::{BlindContext, BlindDefinition, BlindModifier, BlindType};
+use core_engine::blinds::{BlindContext, BlindDefinition, BlindModifier, BlindType};
 use core_engine::config::effective_rerolls;
 use core_engine::cups::definitions::cup;
 use core_engine::dice::{Die, DieId};
@@ -69,23 +69,9 @@ use core_engine::hands::HandGrid;
 use core_engine::relics::RelicInventory;
 use core_engine::relics::effects::roll_modifier_for;
 
-use crate::components::{DieView, Locked, Scoring};
+use crate::components::{DieView, Hidden, Locked, Scoring};
 use crate::resources::{HandContext, RunSession};
 use crate::states::{AppState, RunPhase};
-
-/// Dénominateur des facteurs en pour-mille. Aucun flottant n'entre dans la
-/// courbe : `1.6` s'écrit `1_600`.
-const MILLI: u64 = 1_000;
-
-/// Cible de l'ante 1, avant tout multiplicateur.
-// Étape 6 bis : à calibrer par le harnais de simulation.
-const BASE_TARGET: u64 = 300;
-
-/// Croissance d'un ante au suivant, en pour-mille : `1.6` s'écrit `1_600`.
-/// Le suffixe `_MILLI` ne se met que là où l'unité est réellement le
-/// pour-mille, ce qui n'est pas le cas de `BASE_TARGET`, qui est un score.
-// Étape 6 bis : à calibrer par le harnais de simulation.
-const ANTE_GROWTH_MILLI: u64 = 1_600;
 
 /// Ante dont la Mise Boss clôt la run.
 // Étape 6 : la progression complète des antes.
@@ -114,11 +100,11 @@ fn stake_reroll_malus(stake_level: u8) -> u8 {
 ///
 /// Une relique qui ne participe pas ne contribue rien — même prédicat que le
 /// parcours du score, l'or et l'avancement d'état.
-fn relic_reroll_malus(inventory: &RelicInventory) -> i8 {
+fn relic_reroll_malus(inventory: &RelicInventory, blind: &BlindDefinition) -> i8 {
     agreger_deltas(
         inventory
             .iter_slots()
-            .filter(|(_, instance)| instance.participe())
+            .filter(|(slot, instance)| instance.participe(*slot, blind))
             .map(|(_, instance)| {
                 roll_modifier_for(instance.def, &[], ROLL_INDEX_HORS_LANCER).reroll_delta
             }),
@@ -185,85 +171,105 @@ pub fn resolve_rerolls(
         &session.config,                                                  // 1. base(cup)
         as_negative_stake_delta(stake_reroll_malus(session.stake_level)), // 2. stake
         blind_cap(blind),                                                 // 3. blind_modifier
-        relic_reroll_malus(inventory),                                    // 4. relic_modifier
+        relic_reroll_malus(inventory, blind),                             // 4. relic_modifier
     )
 }
 
-/// Multiplie par un facteur en pour-mille, arrondi au plus proche, en entiers.
-fn scale_milli(value: u64, factor_milli: u64) -> u64 {
-    value
-        .saturating_mul(factor_milli)
-        .saturating_add(MILLI / 2)
-        .saturating_div(MILLI)
-}
-
-/// `base_target(ante) = BASE_TARGET × (ANTE_GROWTH_MILLI ÷ 1000)^(ante moins un)`,
-/// écrite comme une boucle de multiplications entières avec arrondi au plus
-/// proche à chaque étage. La borne s'écrit `1..ante` pour que l'ante 1 ne
-/// franchisse aucun étage sans jamais soustraire.
-fn base_target(ante: u8) -> u64 {
-    let mut target = BASE_TARGET;
-    for _ in 1..ante {
-        target = scale_milli(target, ANTE_GROWTH_MILLI);
-    }
-    target
-}
-
-/// Rang de la blind : petit 1000‰, gros 1500‰, boss 2000‰.
-fn blind_mult(kind: BlindType) -> u64 {
-    match kind {
-        BlindType::Small => 1_000,
-        BlindType::Big => 1_500,
-        BlindType::Boss => 2_000,
-    }
-}
-
-/// Étape 6 — Gobelets. Neutre tant qu'aucun gobelet ne module la cible.
-/// À REMPLACER par la table des gobelets, jamais à contourner.
-fn cup_mult(session: &RunSession) -> u64 {
-    let _ = session;
-    MILLI
-}
-
-/// Étape 10 — Stakes. Neutre tant que la table des Stakes n'existe pas.
-/// À REMPLACER par la table des Stakes, jamais à contourner.
-fn stake_mult(stake_level: u8) -> u64 {
-    let _ = stake_level;
-    MILLI
-}
-
-/// Étape 6 — Boss. Neutre tant qu'aucun boss ne module la cible.
-/// À REMPLACER par la définition du boss, jamais à contourner.
-fn boss_mult(blind: &BlindDefinition) -> u64 {
-    let _ = blind;
-    MILLI
-}
-
-/// Cible **effective** de la manche : la courbe du § 4.4 du glossaire, puis les
-/// quatre multiplicateurs dans cet ordre exact.
-fn target_score(session: &RunSession, blind: &BlindDefinition) -> u64 {
-    let mut target = base_target(session.ante);
-    target = scale_milli(target, blind_mult(blind.kind));
-    target = scale_milli(target, cup_mult(session));
-    target = scale_milli(target, stake_mult(session.stake_level));
-    scale_milli(target, boss_mult(blind))
-}
-
-/// Étape 6 — la progression à trois blinds par ante, et le catalogue des boss.
-/// À REMPLACER par la lecture du catalogue, jamais à contourner : `RunSession`
-/// ne porte aujourd'hui que l'ante, et savoir si l'on entame la petite, la
-/// grosse ou la Mise Boss suppose un compteur qui appartient à cette étape-là.
+/// Cible **effective** de la manche.
 ///
-/// `target_score` est ici la cible **nominale** de la définition, c'est-à-dire
-/// la base de l'ante ; la cible effective de la manche applique par-dessus les
-/// quatre multiplicateurs.
-fn current_blind_definition(session: &RunSession) -> BlindDefinition {
-    BlindDefinition {
-        kind: BlindType::Small,
-        target_score: base_target(session.ante),
-        reward: 0,
-        modifier: None,
+/// **Adaptateur, jamais une seconde courbe.** L'arithmétique vit dans
+/// `core_engine::blinds::scaling`, seule à porter les constantes et les quatre
+/// facteurs. L'Étape 3 en avait écrit une copie ici, avec ses trois bouchons et
+/// un arrondi à chaque étage : elle rendait 5034 et 8054 aux antes 7 et 8, là où
+/// la courbe normative rend 5033 et 8053. Deux courbes pour une difficulté, et
+/// celle que le jeu employait était la fausse.
+fn target_score(session: &RunSession, blind: &BlindDefinition) -> u64 {
+    core_engine::blinds::target_score(
+        session.ante,
+        blind.kind,
+        session.cup_id,
+        session.stake_level,
+        blind.modifier.as_ref(),
+    )
+}
+
+/// La récompense d'une manche, par son rang.
+///
+/// **Écrite ici, lue par le gain de fin de manche**, qui ne la recalcule
+/// jamais : le champ fait foi, et l'Étape 10 le prouvera en faisant varier la
+/// récompense par le stake sans toucher au calcul du gain.
+///
+/// Valeurs de départ, à calibrer par le harnais de l'Étape 6 bis.
+fn reward_for(kind: BlindType) -> u32 {
+    match kind {
+        BlindType::Small => 3,
+        BlindType::Big => 4,
+        BlindType::Boss => 5,
     }
+}
+
+/// La manche courante, telle que le rang de la session la décide.
+///
+/// **Seule la Mise Boss consomme de l'aléa**, et sur le flux des boss : le
+/// catalogue tire son identité, puis sa contrainte. Les deux autres rangs n'en
+/// tirent rien, et le flux ressort au même point qu'il y est entré.
+fn current_blind_definition(session: &mut RunSession) -> BlindDefinition {
+    let kind = session.blind_kind;
+    let modifier = if kind == BlindType::Boss {
+        let capacite = session.config.relic_capacity;
+        let id = core_engine::blinds::definitions::draw_boss(&mut session.rng.boss);
+        Some(
+            core_engine::blinds::definitions::boss_definition(id, &mut session.rng.boss, capacite)
+                .modifier,
+        )
+    } else {
+        None
+    };
+
+    BlindDefinition {
+        kind,
+        target_score: core_engine::blinds::target_score(
+            session.ante,
+            kind,
+            session.cup_id,
+            session.stake_level,
+            modifier.as_ref(),
+        ),
+        reward: reward_for(kind),
+        modifier,
+    }
+}
+
+/// `OnEnter(RunPhase::BlindSelect)` : passe à la manche suivante.
+///
+/// **Ordonné après l'arbitre de fin de run et avant la mise en place.**
+/// L'arbitre lit l'ante et la manche **précédentes** pour décider de la
+/// victoire ; avancer avant lui rendrait la Mise Boss de l'ante final
+/// invisible, et la run ne pourrait jamais être gagnée.
+///
+/// **Il n'avance qu'à partir de la seconde entrée.** La première manche d'une
+/// run est la Petite Mise de l'ante un, posée par la construction de la
+/// session ; l'absence de contexte de manche est ce qui distingue les deux cas,
+/// et c'est le seul témoin disponible.
+///
+/// Petite, Grosse, Boss, puis l'ante suivante. L'ante sature : une run qui
+/// dépasserait l'ante final est déjà gagnée, l'arbitre ayant tranché avant.
+fn advance_blind_progression(
+    session: Option<ResMut<RunSession>>,
+    blind: Option<Res<BlindContext>>,
+) {
+    let (Some(mut session), Some(_)) = (session, blind) else {
+        return;
+    };
+
+    session.blind_kind = match session.blind_kind {
+        BlindType::Small => BlindType::Big,
+        BlindType::Big => BlindType::Boss,
+        BlindType::Boss => {
+            session.ante = session.ante.saturating_add(1);
+            BlindType::Small
+        }
+    };
 }
 
 /// Vrai si une bascule vers `AppState::Victory` est déjà en attente.
@@ -282,12 +288,12 @@ pub(crate) fn victory_is_pending(next: Res<NextState<AppState>>) -> bool {
 ///
 /// N'écrit **que** le contexte de blind : ni score commis (ADR-010), ni
 /// relances, ni transition.
-fn setup_blind(mut commands: Commands, session: Option<Res<RunSession>>) {
-    let Some(session) = session else {
+fn setup_blind(mut commands: Commands, session: Option<ResMut<RunSession>>) {
+    let Some(mut session) = session else {
         return;
     };
 
-    let blind = current_blind_definition(&session);
+    let blind = current_blind_definition(&mut session);
     commands.insert_resource(BlindContext {
         target_score: target_score(&session, &blind),
         blind,
@@ -364,7 +370,12 @@ fn rank_of(index: usize) -> u8 {
 ///
 /// Calcule les relances, réinitialise le contexte de main, ajuste le nombre de
 /// dés à la configuration puis les roule. N'écrit rien dans le contexte de
-/// blind, ne décrémente aucune relance, ne consomme que le flux `rng.dice`.
+/// blind et ne décrémente aucune relance.
+///
+/// **Deux flux, et deux seulement.** `rng.dice` pour les lancers, et `rng.boss`
+/// pour les dés que *La Fissure* cache : ceux-ci ne peuvent se tirer qu'ici,
+/// les dés n'existant pas avant, et les tirer sur `rng.dice` décalerait la
+/// séquence des lancers selon la présence du boss.
 fn setup_round(
     mut commands: Commands,
     session: Option<ResMut<RunSession>>,
@@ -406,12 +417,28 @@ fn setup_round(
         commands.entity(entity).despawn();
     }
 
+    // *La Fissure* cache ses dés **au lancer**, et le tirage porte sur les
+    // rangs : les dés manquants naissent plus bas, par `Commands`, et ne sont
+    // donc pas encore visibles ici. Un tirage sur les entités présentes
+    // laisserait la première manche d'une run sans aucun dé caché.
+    //
+    // Le marqueur est retiré de tous les dés avant d'être reposé : survivant à
+    // une manche sans boss, il laisserait la liste des figures vide sans
+    // raison visible.
+    let masques =
+        core_engine::blinds::hidden_ranks(blind.blind.hidden_dice(), wanted, &mut session.rng.boss);
+
     // 4 et 5 sur les dés conservés, dans l'ordre des identifiants.
     for (index, (entity, _)) in present.iter().enumerate() {
         // Le marqueur et le champ se retirent ensemble : c'est `Die.locked`
         // que `Die::roll` consulte, et une divergence rendrait le verrouillage
         // inopérant sans erreur de compilation.
-        commands.entity(*entity).remove::<(Locked, Scoring)>();
+        commands
+            .entity(*entity)
+            .remove::<(Locked, Scoring, Hidden)>();
+        if masques.contains(&index) {
+            commands.entity(*entity).insert(Hidden);
+        }
 
         let Ok((_, mut die, mut view)) = dice.get_mut(*entity) else {
             continue;
@@ -427,13 +454,16 @@ fn setup_round(
         next = next.saturating_add(1);
         die.roll(&mut session.rng.dice, false);
 
-        commands.spawn((
+        let mut neuf = commands.spawn((
             die,
             DieView {
                 order: rank_of(index),
             },
             DespawnOnExit(AppState::InRun),
         ));
+        if masques.contains(&index) {
+            neuf.insert(Hidden);
+        }
     }
 
     commands.insert_resource(NextDieId(next));
@@ -457,15 +487,19 @@ fn setup_round(
 /// **Aucun aléatoire n'est consommé ici** : forcer une valeur est déterministe,
 /// et un tirage décalerait le flux de dés, faisant diverger deux runs de même
 /// graine (ADR-003).
-pub fn apply_forced_values(inventory: Option<Res<RelicInventory>>, mut dice: Query<&mut Die>) {
-    let Some(inventory) = inventory else {
+pub fn apply_forced_values(
+    inventory: Option<Res<RelicInventory>>,
+    blind: Option<Res<BlindContext>>,
+    mut dice: Query<&mut Die>,
+) {
+    let (Some(inventory), Some(blind)) = (inventory, blind) else {
         return;
     };
 
     let tombes: Vec<Die> = dice.iter().cloned().collect();
     let forcees: Vec<(DieId, u8)> = inventory
         .iter_slots()
-        .filter(|(_, instance)| instance.participe())
+        .filter(|(slot, instance)| instance.participe(*slot, &blind.blind))
         .flat_map(|(_, instance)| {
             roll_modifier_for(instance.def, &tombes, PREMIER_LANCER).force_values
         })
@@ -502,6 +536,7 @@ pub(crate) fn register(app: &mut App) {
         OnEnter(RunPhase::BlindSelect),
         (
             check_run_completion,
+            advance_blind_progression.run_if(not(victory_is_pending)),
             setup_blind.run_if(not(victory_is_pending)),
         )
             .chain(),
@@ -851,6 +886,64 @@ mod tests {
         );
     }
 
+    // ---- TASK-73 : *L'Étau*, depuis le catalogue ----
+
+    /// Définition portant la contrainte d'un boss, telle que le catalogue la
+    /// rend. **C'est l'angle neuf de ces deux tests** : les tests de TASK-32
+    /// construisent leur plafond à la main et ne verraient pas *L'Étau* changer
+    /// de contrainte dans `boss_definition`.
+    fn manche_du_boss(id: core_engine::blinds::definitions::BossId) -> BlindDefinition {
+        let mut rng = core_engine::rng::RunRng::from_seed(0);
+        BlindDefinition {
+            modifier: Some(
+                core_engine::blinds::definitions::boss_definition(id, &mut rng.boss, 5).modifier,
+            ),
+            ..BlindDefinition::default()
+        }
+    }
+
+    #[test]
+    fn test_vise_forces_one_reroll() {
+        use core_engine::blinds::definitions::BossId;
+
+        // Gobelet standard : deux relances, plafonnées à une. Le nombre est
+        // asséré en clair, là où `test_reroll_chain_matches_core_engine` se
+        // déclare tautologique et ne peut rien ancrer.
+        let partie = session(CupId::Standard, 0);
+        let stock = inventaire(&partie.config);
+        assert_eq!(cup(CupId::Standard).base_rerolls, 2, "le gobelet a changé");
+        assert_eq!(
+            resolve_rerolls(&partie, &manche_du_boss(BossId::Vise), &stock),
+            1
+        );
+
+        // Gobelet Abandonné (0) + Stake 4 (−1) + L'Étau : zéro, jamais 255.
+        // Sans saturation le compteur `u8` repasserait par le haut en release
+        // et paniquerait en debug.
+        let creux = session(CupId::Abandoned, 4);
+        let stock = inventaire(&creux.config);
+        assert_eq!(
+            resolve_rerolls(&creux, &manche_du_boss(BossId::Vise), &stock),
+            0
+        );
+    }
+
+    #[test]
+    fn test_cap_never_raises_rerolls() {
+        // Le plafond est un `min`, jamais une affectation : un gobelet à deux
+        // relances en garde **deux** sous `MaxRerolls(3)`. Le cas jumeau de
+        // TASK-32 part d'un gobelet à zéro, où un plafond qui élève et un
+        // plafond qui plafonne rendent la même chose : c'est la capacité
+        // intermédiaire qui les sépare.
+        let partie = session(CupId::Standard, 0);
+        let stock = inventaire(&partie.config);
+
+        assert_eq!(partie.config.base_rerolls, 2);
+        assert_eq!(resolve_rerolls(&partie, &blind(Some(3)), &stock), 2);
+        // Et il mord quand il est plus bas.
+        assert_eq!(resolve_rerolls(&partie, &blind(Some(1)), &stock), 1);
+    }
+
     #[test]
     fn test_blind_cap_never_raises_rerolls() {
         // Le plafond est un `min`, jamais une affectation : sur un gobelet sans
@@ -885,7 +978,7 @@ mod tests {
                         &partie.config,
                         as_negative_stake_delta(stake_reroll_malus(stake_level)),
                         cap,
-                        relic_reroll_malus(&stock),
+                        relic_reroll_malus(&stock, &blind(cap)),
                     );
 
                     assert_eq!(
@@ -962,25 +1055,46 @@ mod tests {
 
     #[test]
     fn test_target_follows_the_ante_curve() {
-        // Ante 1 : la cible est la base, sans aucun étage de croissance. Une
-        // boucle comptant un tour de trop la ferait croître.
+        // **La courbe vit désormais dans le moteur.** Ce test ne la recalcule
+        // plus : il vérifie que la manche montée en porte la valeur, ce qui est
+        // la seule chose que cette crate décide encore.
+        //
+        // Le commentaire d'origine disait : « Arrondi au plus proche, jamais
+        // troncature. Aucune valeur de la table actuelle ne le met en évidence
+        // — 300 x 1,6 tombe juste à chaque étage. » **C'était faux** : à
+        // l'ante 7, 5033,6 ne tombe pas juste, et c'est précisément là que la
+        // courbe locale divergeait de la normative. La phrase avait été écrite
+        // quand la table n'était vérifiée que jusqu'à l'ante 2.
         let mut app = app_en_run(CupId::Standard);
-        assert_eq!(
-            app.world().resource::<BlindContext>().target_score,
-            BASE_TARGET
-        );
+        assert_eq!(app.world().resource::<BlindContext>().target_score, 300);
 
-        app.world_mut().resource_mut::<RunSession>().ante = 2;
-        rentrer_dans_une_blind(&mut app);
-        assert_eq!(
-            app.world().resource::<BlindContext>().target_score,
-            scale_milli(BASE_TARGET, ANTE_GROWTH_MILLI)
-        );
+        // **La progression avance à chaque entrée : on pose l'état d'avant.**
+        // Boss suivi de l'ante moins un donne, après avancement, une Petite
+        // Mise à l'ante voulu. Sans cela la boucle éprouverait la courbe de
+        // rang autant que celle d'ante, et l'ante 2 rendrait 720.
+        // **La progression avance à chaque entrée en sélection de manche : on
+        // pose donc l'état d'AVANT.** Une Mise Boss à l'ante précédent donne,
+        // après avancement, une Petite Mise à l'ante voulu. Sans cela la
+        // boucle éprouverait la courbe de rang autant que celle d'ante.
+        for (ante, attendu) in [(2u8, 480u64), (7, 5033), (8, 8053)] {
+            {
+                let mut partie = app.world_mut().resource_mut::<RunSession>();
+                partie.ante = ante - 1;
+                partie.blind_kind = BlindType::Boss;
+            }
+            rentrer_dans_une_blind(&mut app);
 
-        // Arrondi au plus proche, jamais troncature. Aucune valeur de la table
-        // actuelle ne le met en évidence — 300 × 1,6 tombe juste à chaque
-        // étage — donc l'arrondi se vérifie sur la fonction d'échelle elle-même.
-        assert_eq!(scale_milli(1, 1_500), 2);
+            // Témoin : sans lui, une progression changée ferait dire au test
+            // autre chose que ce qu'il croit mesurer.
+            let partie = app.world().resource::<RunSession>();
+            assert_eq!((partie.ante, partie.blind_kind), (ante, BlindType::Small));
+
+            assert_eq!(
+                app.world().resource::<BlindContext>().target_score,
+                attendu,
+                "ante {ante}"
+            );
+        }
 
         // Le rang de la blind multiplie la cible. `current_blind_definition`
         // ne rend qu'un petit blind à cette étape : la comparaison passe donc
@@ -998,6 +1112,156 @@ mod tests {
             target_score(&partie, &boss),
             target_score(&partie, &petit).saturating_mul(2)
         );
+    }
+
+    // ---- TASK-80 : la manche suivante ----
+
+    #[test]
+    fn test_next_blind_target_is_correct() {
+        // Les deux cibles du corpus, atteintes par le chemin réel : on pose
+        // l'état d'avant l'avancement, et la sortie de manche fait le reste.
+        let cible = |ante_avant: u8, kind_avant: BlindType| {
+            let mut app = app_en_run(CupId::Standard);
+            {
+                let mut partie = app.world_mut().resource_mut::<RunSession>();
+                partie.ante = ante_avant;
+                partie.blind_kind = kind_avant;
+            }
+            rentrer_dans_une_blind(&mut app);
+            let manche = app.world().resource::<BlindContext>();
+            (
+                app.world().resource::<RunSession>().ante,
+                manche.blind.kind,
+                manche.target_score,
+            )
+        };
+
+        // Ante 2 Grosse Mise : la Petite de l'ante 2 vient d'être battue.
+        assert_eq!(cible(2, BlindType::Small), (2, BlindType::Big, 720));
+        // Ante 8 Mise Boss : la Grosse de l'ante 8 vient d'être battue.
+        assert_eq!(cible(8, BlindType::Big), (8, BlindType::Boss, 16_106));
+    }
+
+    #[test]
+    fn test_next_blind_reward_follows_kind() {
+        // Trois rangs, trois récompenses, **écrites dans la manche**. Le gain de
+        // fin de manche lit le champ et ne le recalcule jamais.
+        for (avant, attendu_kind, attendu_reward) in [
+            (BlindType::Boss, BlindType::Small, 3u32),
+            (BlindType::Small, BlindType::Big, 4),
+            (BlindType::Big, BlindType::Boss, 5),
+        ] {
+            let mut app = app_en_run(CupId::Standard);
+            app.world_mut().resource_mut::<RunSession>().blind_kind = avant;
+            rentrer_dans_une_blind(&mut app);
+
+            let manche = app.world().resource::<BlindContext>();
+            assert_eq!(manche.blind.kind, attendu_kind, "depuis {avant:?}");
+            assert_eq!(manche.blind.reward, attendu_reward, "depuis {avant:?}");
+        }
+    }
+
+    #[test]
+    fn test_progression_cycles_through_the_three_ranks() {
+        // Petite, Grosse, Boss, puis l'ante suivante. Sans ce cycle, la run
+        // reste figée sur la première manche et la victoire est inatteignable.
+        let mut app = app_en_run(CupId::Standard);
+        let mut vus = Vec::new();
+        for _ in 0..4 {
+            let partie = app.world().resource::<RunSession>();
+            vus.push((partie.ante, partie.blind_kind));
+            rentrer_dans_une_blind(&mut app);
+        }
+        let partie = app.world().resource::<RunSession>();
+        vus.push((partie.ante, partie.blind_kind));
+
+        assert_eq!(
+            vus,
+            vec![
+                (1, BlindType::Small),
+                (1, BlindType::Big),
+                (1, BlindType::Boss),
+                (2, BlindType::Small),
+                (2, BlindType::Big),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_boss_blind_carries_a_modifier() {
+        // Seule la Mise Boss porte une contrainte, et elle la tire du
+        // catalogue. Les deux autres rangs n'en portent aucune.
+        let mut app = app_en_run(CupId::Standard);
+        app.world_mut().resource_mut::<RunSession>().blind_kind = BlindType::Big;
+        rentrer_dans_une_blind(&mut app);
+
+        let manche = app.world().resource::<BlindContext>();
+        assert_eq!(manche.blind.kind, BlindType::Boss);
+        assert!(
+            manche.blind.modifier.is_some(),
+            "la Mise Boss est sans contrainte"
+        );
+
+        let mut sans = app_en_run(CupId::Standard);
+        sans.world_mut().resource_mut::<RunSession>().blind_kind = BlindType::Small;
+        rentrer_dans_une_blind(&mut sans);
+        assert!(
+            sans.world()
+                .resource::<BlindContext>()
+                .blind
+                .modifier
+                .is_none(),
+            "une Grosse Mise porte une contrainte"
+        );
+    }
+
+    #[test]
+    fn test_progression_advances_after_the_arbiter() {
+        // **L'ordre des deux systèmes décide de la victoire.** L'arbitre lit
+        // l'ante et le rang **précédents** ; avancer avant lui ferait passer
+        // l'ante final à neuf, la Mise Boss deviendrait invisible, et la run ne
+        // pourrait jamais être gagnée.
+        //
+        // Le rang de la **session** doit être posé, et pas seulement celui du
+        // contexte : c'est lui que la progression lit, et c'est son passage de
+        // Boss à Petite qui incrémente l'ante. Mesuré, un montage qui ne pose
+        // que le contexte laisse le mutant survivre.
+        let mut app = app_en_run(CupId::Standard);
+        {
+            let mut partie = app.world_mut().resource_mut::<RunSession>();
+            partie.ante = FINAL_ANTE;
+            partie.blind_kind = BlindType::Boss;
+        }
+        {
+            let mut manche = app.world_mut().resource_mut::<BlindContext>();
+            manche.blind.kind = BlindType::Boss;
+            manche.current_score = manche.target_score;
+        }
+
+        rentrer_dans_une_blind(&mut app);
+
+        assert!(
+            matches!(
+                *app.world().resource::<NextState<AppState>>(),
+                NextState::PendingIfNeq(AppState::Victory) | NextState::Pending(AppState::Victory)
+            ) || *app.world().resource::<State<AppState>>().get() == AppState::Victory,
+            "la Mise Boss de l'ante final n'a pas été vue par l'arbitre"
+        );
+    }
+
+    #[test]
+    fn test_used_hands_empty_on_new_blind() {
+        let mut app = app_en_run(CupId::Standard);
+        {
+            let mut manche = app.world_mut().resource_mut::<BlindContext>();
+            for figure in [YahtzeeHand::Chance, YahtzeeHand::Yahtzee, YahtzeeHand::Aces] {
+                manche.used_hands.mark(figure);
+            }
+        }
+        assert!(!app.world().resource::<BlindContext>().used_hands.is_empty());
+
+        rentrer_dans_une_blind(&mut app);
+        assert!(app.world().resource::<BlindContext>().used_hands.is_empty());
     }
 
     #[test]
@@ -1074,7 +1338,7 @@ mod tests_relances_et_valeurs_forcees {
     use core_engine::relics::{RelicId, RelicState};
 
     use crate::systems::fixtures::{
-        app_a_la_graine, des_tries, entrer_dans_roll, inventaire, session,
+        app_a_la_graine, des_tries, entrer_dans_roll, frapper, inventaire, session, valeurs_des,
     };
 
     fn blind_nue() -> BlindDefinition {
@@ -1161,8 +1425,224 @@ mod tests_relances_et_valeurs_forcees {
 
         // Et la relique réelle traverse bien l'inventaire.
         assert_eq!(
-            relic_reroll_malus(&stock(CupId::Standard, &[RelicId::UnstableObsidian])),
+            relic_reroll_malus(
+                &stock(CupId::Standard, &[RelicId::UnstableObsidian]),
+                &BlindDefinition::default(),
+            ),
             -1
+        );
+    }
+
+    // ---- TASK-75 : *La Fissure* ----
+
+    /// Manche cachant `n` dés.
+    fn manche_fissuree(n: u8) -> BlindDefinition {
+        BlindDefinition {
+            modifier: Some(BlindModifier::HideDice(n)),
+            ..BlindDefinition::default()
+        }
+    }
+
+    fn masques(app: &mut App) -> Vec<DieId> {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&Die, With<crate::components::Hidden>>();
+        let mut v: Vec<DieId> = q.iter(app.world()).map(|die| die.id).collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// Entre dans une main sous la manche donnée.
+    fn main_sous(app: &mut App, blind: BlindDefinition) {
+        app.world_mut().resource_mut::<BlindContext>().blind = blind;
+        entrer_dans_roll(app);
+        app.update();
+    }
+
+    #[test]
+    fn test_hidden_dice_are_reproducible() {
+        let cacher = |graine: u64| {
+            let mut app = app_a_la_graine(CupId::Standard, graine);
+            main_sous(&mut app, manche_fissuree(2));
+            masques(&mut app)
+        };
+
+        let gauche = cacher(11);
+        assert_eq!(gauche.len(), 2, "deux dés cachés, distincts");
+        assert_eq!(gauche, cacher(11), "même graine, mêmes dés");
+        // **Graine fixée, assertion sur ce qu'elle produit.** Sans les valeurs
+        // en clair, un mélange changé de forme rend d'autres dés et reste
+        // reproductible : le test passerait sans rien garder.
+        assert_eq!(gauche, vec![DieId(2), DieId(4)]);
+
+        // Contre-épreuve : sans elle, un tirage constant passerait.
+        let mut autre = (12..40).map(cacher).filter(|v| *v != gauche);
+        assert!(
+            autre.next().is_some(),
+            "aucune graine ne cache d'autres dés : le tirage est constant"
+        );
+    }
+
+    #[test]
+    fn test_hidden_draw_does_not_shift_the_dice_stream() {
+        // **Le motif du flux séparé.** Tirer les dés cachés sur `rng.dice`
+        // décalerait la séquence des lancers selon la présence du boss : deux
+        // joueurs de même graine n'auraient plus les mêmes dés dès la première
+        // Mise Boss. Sans ce test, un tirage sur le mauvais flux passe au vert.
+        let valeurs = |blind: BlindDefinition| {
+            let mut app = app_a_la_graine(CupId::Standard, 11);
+            main_sous(&mut app, blind);
+            valeurs_des(&mut app)
+        };
+
+        assert_eq!(
+            valeurs(manche_fissuree(2)),
+            valeurs(BlindDefinition::default()),
+            "le boss a décalé la séquence des dés"
+        );
+    }
+
+    #[test]
+    fn test_reroll_keeps_hidden_markers() {
+        let mut app = app_a_la_graine(CupId::Standard, 11);
+        main_sous(&mut app, manche_fissuree(2));
+        let avant = masques(&mut app);
+        assert_eq!(avant.len(), 2);
+
+        // Une relance : les valeurs changent, les marqueurs restent.
+        let valeurs = valeurs_des(&mut app);
+        frapper(&mut app, KeyCode::Space);
+        app.update();
+        assert_ne!(valeurs_des(&mut app), valeurs, "la relance n'a rien roulé");
+
+        assert_eq!(masques(&mut app), avant, "un marqueur a bougé à la relance");
+    }
+
+    #[test]
+    fn test_hidden_cleared_between_blinds() {
+        let mut app = app_a_la_graine(CupId::Standard, 11);
+        main_sous(&mut app, manche_fissuree(2));
+        assert_eq!(masques(&mut app).len(), 2);
+
+        // Manche suivante, sans boss : aucun marqueur ne survit.
+        main_sous(&mut app, BlindDefinition::default());
+        assert!(
+            masques(&mut app).is_empty(),
+            "un marqueur a survécu au boss"
+        );
+        assert!(
+            !app.world()
+                .resource::<HandContext>()
+                .active_evaluations
+                .is_empty(),
+            "la liste est restée vide sans raison visible"
+        );
+    }
+
+    #[test]
+    fn test_hidden_ranks_draw_without_replacement() {
+        // Le tirage est pur : il s'éprouve sans monde Bevy.
+        let mut rng = core_engine::rng::RunRng::from_seed(3);
+
+        for (demande, total, attendu) in [(2_u8, 5_usize, 2_usize), (9, 5, 5), (2, 0, 0), (0, 5, 0)]
+        {
+            let rangs = core_engine::blinds::hidden_ranks(demande, total, &mut rng.boss);
+            assert_eq!(rangs.len(), attendu, "{demande} sur {total}");
+            assert!(rangs.iter().all(|r| *r < total), "rang hors bornes");
+
+            let mut uniques = rangs.clone();
+            uniques.dedup();
+            assert_eq!(uniques, rangs, "un rang est tiré deux fois");
+        }
+
+        // **Une graine qui sépare les deux formes de mélange.** Un mélange
+        // partiel et un mélange avec remise rendent tous deux des rangs
+        // distincts, le tableau restant une permutation : seule la valeur
+        // tirée les distingue. Mesuré, la graine 11 les confond et la 4 les
+        // sépare ; c'est donc celle-ci qu'il faut épingler.
+        let mut graine_4 = core_engine::rng::RunRng::from_seed(4);
+        assert_eq!(
+            core_engine::blinds::hidden_ranks(2, 5, &mut graine_4.boss),
+            vec![2, 4]
+        );
+    }
+
+    // ---- TASK-74 : la cage vaut pour tous les hooks ----
+
+    /// Définition mettant un slot en cage.
+    fn manche_en_cage(slot: u8) -> BlindDefinition {
+        BlindDefinition {
+            modifier: Some(BlindModifier::DisableRelicSlot(slot)),
+            ..BlindDefinition::default()
+        }
+    }
+
+    #[test]
+    fn test_caged_relic_loses_all_hooks() {
+        // **Le point du ticket.** Sans cette règle, une *Obsidienne Instable*
+        // en cage perdrait son `MultiplyMult(200)` tout en gardant son
+        // `reroll_delta: -1` : le joueur subirait la contrepartie sans le
+        // bonus, sur un boss dont le contrat est de neutraliser la relique.
+        let partie = session(CupId::Standard, 0);
+        let stock = stock(CupId::Standard, &[RelicId::UnstableObsidian]);
+
+        assert_eq!(
+            relic_reroll_malus(&stock, &BlindDefinition::default()),
+            -1,
+            "l'Obsidienne n'imposait déjà rien : le montage ne prouve rien"
+        );
+        assert_eq!(
+            resolve_rerolls(&partie, &BlindDefinition::default(), &stock),
+            1,
+            "deux relances moins celle de l'Obsidienne"
+        );
+
+        // En cage, le malus disparaît avec le bonus.
+        assert_eq!(relic_reroll_malus(&stock, &manche_en_cage(0)), 0);
+        assert_eq!(resolve_rerolls(&partie, &manche_en_cage(0), &stock), 2);
+
+        // Et une cage sur un autre slot ne la touche pas.
+        assert_eq!(resolve_rerolls(&partie, &manche_en_cage(1), &stock), 1);
+    }
+
+    #[test]
+    fn test_caged_ghost_die_does_not_force() {
+        // **Le cinquième parcours, que le ticket ne nommait pas.**
+        // `apply_forced_values` consultait la neutralisation sans connaître la
+        // manche : un *Dé Fantôme* en cage forçait encore son six.
+        let mut app = app_a_la_graine(CupId::Standard, GRAINE_SANS_UN);
+        app.world_mut()
+            .resource_mut::<RelicInventory>()
+            .add_relic(RelicId::GhostDie)
+            .expect("slot libre");
+        entrer_dans_roll(&mut app);
+        app.update();
+
+        let force: Vec<u8> = valeurs_des(&mut app);
+        assert!(
+            force.contains(&6),
+            "le Dé Fantôme ne forçait déjà rien : le montage ne prouve rien"
+        );
+
+        // La même graine, la même relique, mais le slot en cage.
+        let mut en_cage = app_a_la_graine(CupId::Standard, GRAINE_SANS_UN);
+        en_cage
+            .world_mut()
+            .resource_mut::<RelicInventory>()
+            .add_relic(RelicId::GhostDie)
+            .expect("slot libre");
+        en_cage
+            .world_mut()
+            .resource_mut::<BlindContext>()
+            .blind
+            .modifier = Some(BlindModifier::DisableRelicSlot(0));
+        entrer_dans_roll(&mut en_cage);
+        en_cage.update();
+
+        assert_ne!(
+            valeurs_des(&mut en_cage),
+            force,
+            "le Dé Fantôme en cage a quand même forcé sa valeur"
         );
     }
 

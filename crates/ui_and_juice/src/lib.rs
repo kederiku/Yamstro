@@ -161,8 +161,8 @@ mod tests {
         app.init_state::<AppState>();
         app.add_sub_state::<RunPhase>();
         app.insert_resource(game_state::ScoringStepQueue::default());
-        app.insert_resource(core_engine::blind::BlindContext {
-            blind: core_engine::blind::BlindDefinition::default(),
+        app.insert_resource(core_engine::blinds::BlindContext {
+            blind: core_engine::blinds::BlindDefinition::default(),
             target_score: 0,
             current_score: 0,
             hands_remaining: 0,

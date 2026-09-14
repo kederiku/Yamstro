@@ -58,7 +58,7 @@
 //! vit à TASK-29, sur une transition vers l'état courant.
 
 use bevy::prelude::*;
-use core_engine::blind::BlindContext;
+use core_engine::blinds::BlindContext;
 
 use crate::plugin::{GameSet, InputSet};
 use crate::resources::ScoringStepQueue;
@@ -159,14 +159,6 @@ fn blind_select_start(keys: Res<ButtonInput<KeyCode>>, mut phase: ResMut<NextSta
     }
 }
 
-/// Déclencheur **provisoire** du bouton « Continuer » de la boutique
-/// (Étape 6).
-fn shop_continue(keys: Res<ButtonInput<KeyCode>>, mut phase: ResMut<NextState<RunPhase>>) {
-    if keys.just_pressed(KeyCode::Enter) {
-        NextState::set_if_neq(&mut phase, RunPhase::BlindSelect);
-    }
-}
-
 /// Branche l'arbitre et les déclencheurs de transition.
 pub(crate) fn register(app: &mut App) {
     app.add_systems(
@@ -185,14 +177,15 @@ pub(crate) fn register(app: &mut App) {
 
     // Les deux déclencheurs sont des **entrées** : ils rejoignent l'ensemble
     // gelé par l'overlay, comme la relance et la soumission.
+    // **Le déclencheur de sortie de boutique a migré.** Il vit désormais dans
+    // la crate de boutique, sur l'interaction du bouton « Continuer » : le sens
+    // des dépendances interdit à cette crate de lire un bouton de celle-là. La
+    // **transition**, elle, n'a pas changé d'un caractère.
     app.add_systems(
         Update,
-        (
-            blind_select_start
-                .run_if(in_state(RunPhase::BlindSelect))
-                .run_if(not(crate::systems::setup::victory_is_pending)),
-            shop_continue.run_if(in_state(RunPhase::Shop)),
-        )
+        blind_select_start
+            .run_if(in_state(RunPhase::BlindSelect))
+            .run_if(not(crate::systems::setup::victory_is_pending))
             .in_set(InputSet::FrozenByOverlay),
     );
 }
@@ -204,7 +197,7 @@ mod tests {
     use crate::resources::{HandContext, RunSession, ScoringStepQueue};
     use crate::systems::fixtures::{app_en_run, entrer_dans_roll, frapper};
     use crate::systems::input::select_hand;
-    use core_engine::blind::{BlindContext, BlindType};
+    use core_engine::blinds::{BlindContext, BlindType};
     use core_engine::cups::CupId;
 
     type Paire = (Option<RunPhase>, Option<RunPhase>);
@@ -304,11 +297,11 @@ mod tests {
     /// Choisit la première figure évaluée et la soumet, depuis la phase de
     /// lancer.
     fn soumettre_une_figure(app: &mut App) {
-        let grille = app.world().resource::<BlindContext>().used_hands;
+        let manche = app.world().resource::<BlindContext>().clone();
         let figure = app.world().resource::<HandContext>().active_evaluations[0].hand;
         {
             let mut main = app.world_mut().resource_mut::<HandContext>();
-            select_hand(&mut main, &grille, figure);
+            select_hand(&mut main, &manche, figure);
         }
         frapper(app, KeyCode::Enter);
         deux_frames(app);
@@ -342,9 +335,17 @@ mod tests {
         deux_frames(app);
     }
 
+    /// **Le déclencheur a migré, la transition non.** Le bouton « Continuer »
+    /// vit dans la crate de boutique, que celle-ci ne peut pas connaître : la
+    /// transition se pilote donc directement, ce qui est bien ce que ce test
+    /// mesure — qu'elle est **déclarée et atteignable**, non qu'une touche la
+    /// provoque. Le déclencheur, lui, est éprouvé là où il vit.
     fn cas_shop_vers_blind_select(app: &mut App) {
         entrer_dans(app, RunPhase::Shop);
-        frapper(app, KeyCode::Enter);
+        {
+            let mut phase = app.world_mut().resource_mut::<NextState<RunPhase>>();
+            NextState::set_if_neq(&mut phase, RunPhase::BlindSelect);
+        }
         deux_frames(app);
     }
 
@@ -434,17 +435,6 @@ mod tests {
         deux_frames(&mut app);
 
         assert_eq!(phase(&app), Some(RunPhase::Shop));
-    }
-
-    #[test]
-    fn test_shop_continue_returns_to_blind_select() {
-        let mut app = app_en_run(CupId::Standard);
-        entrer_dans(&mut app, RunPhase::Shop);
-
-        frapper(&mut app, KeyCode::Enter);
-        deux_frames(&mut app);
-
-        assert_eq!(phase(&app), Some(RunPhase::BlindSelect));
     }
 
     #[test]
@@ -640,7 +630,12 @@ mod tests {
         deux_frames(&mut app);
         assert_eq!(phase(&app), Some(RunPhase::Shop), "blind battue");
 
-        frapper(&mut app, KeyCode::Enter);
+        // Même motif : la transition se pilote, son déclencheur vivant dans la
+        // crate de boutique.
+        {
+            let mut phase = app.world_mut().resource_mut::<NextState<RunPhase>>();
+            NextState::set_if_neq(&mut phase, RunPhase::BlindSelect);
+        }
         deux_frames(&mut app);
         assert_eq!(phase(&app), Some(RunPhase::BlindSelect), "continuer");
 

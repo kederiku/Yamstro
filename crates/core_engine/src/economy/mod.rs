@@ -5,6 +5,10 @@
 //! reliques a besoin, et elle est posée à sa place définitive plutôt que
 //! rangée provisoirement dans le module des reliques.
 
+pub mod payout;
+
+pub use payout::{INTEREST_TRANCHE, Payout, calculate_payout};
+
 use crate::relics::RelicInventory;
 use crate::relics::effects::gold_for;
 use crate::scoring::TriggerCtx;
@@ -24,7 +28,7 @@ use crate::scoring::TriggerCtx;
 pub fn round_end_gold(inventory: &RelicInventory, base: &TriggerCtx<'_>) -> u32 {
     inventory
         .iter_slots()
-        .filter(|(_, inst)| inst.participe())
+        .filter(|(slot, inst)| inst.participe(*slot, &base.blind.blind))
         .fold(0u32, |total, (slot, inst)| {
             let ctx = TriggerCtx {
                 uid: inst.uid,
@@ -39,7 +43,7 @@ pub fn round_end_gold(inventory: &RelicInventory, base: &TriggerCtx<'_>) -> u32 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blind::{BlindContext, BlindDefinition};
+    use crate::blinds::{BlindContext, BlindDefinition};
     use crate::dice::{Die, DieId};
     use crate::evaluator::HandMatch;
     use crate::hands::{HandGrid, HandLevels, YahtzeeHand};

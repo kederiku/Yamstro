@@ -257,7 +257,7 @@ mod tests {
     use smallvec::SmallVec;
 
     use super::*;
-    use crate::blind::BlindContext;
+    use crate::blinds::BlindContext;
     use crate::dice::{Die, DieId};
     use crate::evaluator::HandMatch;
     use crate::hands::{HandLevels, YahtzeeHand};
