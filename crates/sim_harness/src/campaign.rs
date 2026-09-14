@@ -49,7 +49,8 @@ use crate::policy::greedy::GreedyPolicy;
 use crate::policy::grid_aware::GridAwarePolicy;
 use crate::policy::random::RandomPolicy;
 use crate::policy::shop::{BudgetShopPolicy, SynergyShopPolicy};
-use crate::run::simulate_with;
+use crate::run::{simulate_with, simulate_with_obs};
+use crate::trace::RunTrace;
 use rayon::prelude::*;
 
 /// L'unité des taux : **aucun flottant**. Une comparaison flottante fait
@@ -77,6 +78,45 @@ pub fn simulate_one(config: &SimConfig, seed: u64) -> (RunOutcome, RunAggregates
     match config.shop_policy {
         ShopPolicyKind::Budget => avec_sonde_de_main(config, seed, &mut BudgetShopPolicy::new()),
         ShopPolicyKind::Synergy => avec_sonde_de_main(config, seed, &mut SynergyShopPolicy::new()),
+    }
+}
+
+/// Le run unique du mode de journal.
+///
+/// **Il ne passe pas par la section parallèle**, et ce n'est pas un choix : un
+/// journal se remplit par emprunt mutable, que la fermeture parallèle ne peut
+/// pas capturer. Le mode implique donc un run unique par construction, en plus
+/// de l'impliquer par la ligne de commande.
+#[must_use]
+pub fn simulate_one_traced(config: &SimConfig, seed: u64) -> (RunOutcome, RunAggregates, RunTrace) {
+    let mut journal = RunTrace::default();
+    let (resultat, agregats) = match config.shop_policy {
+        ShopPolicyKind::Budget => {
+            trace_avec_sonde(config, seed, &mut BudgetShopPolicy::new(), &mut journal)
+        }
+        ShopPolicyKind::Synergy => {
+            trace_avec_sonde(config, seed, &mut SynergyShopPolicy::new(), &mut journal)
+        }
+    };
+    (resultat, agregats, journal)
+}
+
+fn trace_avec_sonde<S: crate::policy::ShopPolicy>(
+    config: &SimConfig,
+    seed: u64,
+    achat: &mut S,
+    journal: &mut RunTrace,
+) -> (RunOutcome, RunAggregates) {
+    match config.policy {
+        PolicyKind::Greedy => {
+            simulate_with_obs(config, seed, &mut GreedyPolicy::new(), achat, journal)
+        }
+        PolicyKind::GridAware => {
+            simulate_with_obs(config, seed, &mut GridAwarePolicy::new(), achat, journal)
+        }
+        PolicyKind::Random => {
+            simulate_with_obs(config, seed, &mut RandomPolicy::new(), achat, journal)
+        }
     }
 }
 

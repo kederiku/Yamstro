@@ -18,6 +18,7 @@ use crate::outcome::{
 use crate::policy::{HandDecision, Policy, ShopAction, ShopPolicy};
 use crate::rng::SimRng;
 use crate::state::{SimHand, SimSession};
+use crate::trace::{Muet, Observateur, libelle_des, libelle_verrous, ligne_de_pas};
 use crate::view::{HandView, ShopView};
 use core_engine::blinds::{BlindContext, BlindDefinition, BlindModifier, BlindType};
 use core_engine::config::{RunConfig, effective_rerolls};
@@ -304,6 +305,7 @@ fn appliquer_achats(
     inventory: &mut ShopInventory,
     actions: &[ShopAction],
     aggregats: &mut RunAggregates,
+    obs: &mut impl Observateur,
 ) -> u32 {
     let mut anomalies: u32 = 0;
     for action in actions {
@@ -334,6 +336,7 @@ fn appliquer_achats(
                 {
                     continue;
                 }
+                obs.note(|| format!("    achat {item:?}  prix={prix}  or={}", session.gold));
                 session.gold = session.gold.saturating_sub(prix);
                 inventory.items.remove(rang);
                 match item {
@@ -407,13 +410,14 @@ fn encaisser_fin_de_manche(
 /// transformerait un bug de politique en biais de mesure invisible — le run
 /// continuerait, la ligne de sortie paraîtrait normale, et la comparaison des
 /// politiques mesurerait la qualité du rattrapage.
-fn jouer_une_main<P: Policy>(
+fn jouer_une_main<P: Policy, O: Observateur>(
     session: &mut SimSession,
     manche: &mut BlindContext,
     sides: &[u8],
     policy: &mut P,
     policy_rng: &mut ChaCha8Rng,
     journal: &mut Journal,
+    obs: &mut O,
 ) -> Result<DerniereMain, ()> {
     let mut pool = DicePool::new(&session.config, sides);
     let mut main = SimHand::new(relances(
@@ -423,6 +427,13 @@ fn jouer_une_main<P: Policy>(
         &session.relics,
     ));
     pool.roll_all(&mut session.rng.dice, true);
+    obs.note(|| {
+        format!(
+            "    main  relances={}  score={}  cible={}  restantes={}",
+            main.rerolls_left, manche.current_score, manche.target_score, manche.hands_remaining
+        )
+    });
+    obs.note(|| format!("      jet   {}", libelle_des(&des_tries(&pool))));
 
     loop {
         let des = des_tries(&pool);
@@ -463,6 +474,16 @@ fn jouer_une_main<P: Policy>(
                 manche.current_score = manche.current_score.saturating_add(rapport.final_score);
                 manche.hands_remaining = manche.hands_remaining.saturating_sub(1);
                 manche.used_hands.mark(figure);
+                obs.note(|| format!("      soumet {figure:?}"));
+                for step in &rapport.steps {
+                    obs.note(|| ligne_de_pas(step));
+                }
+                obs.note(|| {
+                    format!(
+                        "      commit score={}  cumul={}  restantes={}",
+                        rapport.final_score, manche.current_score, manche.hands_remaining
+                    )
+                });
                 journal.commettre(figure, rapport.final_score);
                 // **Le journal de score est lu ici et nulle part ailleurs** :
                 // c'est le seul endroit où l'imputation par relique est
@@ -500,8 +521,16 @@ fn jouer_une_main<P: Policy>(
                         pool.toggle_lock(id);
                     }
                 }
+                obs.note(|| format!("      garde {}", libelle_verrous(masque.iter())));
                 pool.roll_all(&mut session.rng.dice, false);
                 main.rerolls_left = main.rerolls_left.saturating_sub(1);
+                obs.note(|| {
+                    format!(
+                        "      jet   {}  relances={}",
+                        libelle_des(&des_tries(&pool)),
+                        main.rerolls_left
+                    )
+                });
             }
         }
     }
@@ -520,6 +549,23 @@ pub fn simulate_with<P: Policy, S: ShopPolicy>(
     seed: u64,
     policy: &mut P,
     shop_policy: &mut S,
+) -> (RunOutcome, RunAggregates) {
+    simulate_with_obs(config, seed, policy, shop_policy, &mut Muet)
+}
+
+/// La même boucle, **avec un observateur**.
+///
+/// La forme sans observateur lui délègue tout : il n'y a **qu'une** boucle, et
+/// les deux modes ne peuvent donc pas diverger. L'observateur muet est un type
+/// vide dont la méthode n'appelle jamais la fermeture qu'on lui passe : hors du
+/// mode de journal, **aucune chaîne n'est construite**, et c'est le compilateur
+/// qui l'assure, pas une convention de relecture.
+pub fn simulate_with_obs<P: Policy, S: ShopPolicy, O: Observateur>(
+    config: &SimConfig,
+    seed: u64,
+    policy: &mut P,
+    shop_policy: &mut S,
+    obs: &mut O,
 ) -> (RunOutcome, RunAggregates) {
     let mut journal = Journal::neuf();
 
@@ -549,6 +595,14 @@ pub fn simulate_with<P: Policy, S: ShopPolicy>(
     };
 
     let mut session = SimSession::new(cup_id, stake_level, seed);
+    obs.note(|| {
+        format!(
+            "run   graine={seed}  gobelet={}  mise={stake_level}  politiques={}/{}",
+            cup_nom(cup_id),
+            policy.name(),
+            shop_policy.name()
+        )
+    });
     let deck = cup(cup_id);
     // **Le cinquième flux, celui des politiques.** Il vient du harnais et non
     // du moteur : une politique qui consommerait un flux de la run ferait
@@ -570,6 +624,14 @@ pub fn simulate_with<P: Policy, S: ShopPolicy>(
             // deux mains : sans elle, chaque main redevient indépendante et la
             // décision que l'étape mesure disparaît.
             let mut manche = blind_context(definition, &session.config);
+            obs.note(|| {
+                format!(
+                    "  manche ante={ante}  rang={}  cible={}  or={}",
+                    blind_name(kind),
+                    manche.target_score,
+                    session.gold
+                )
+            });
 
             // L'arbitrage suit **chaque** main, jamais l'inverse : la manche
             // rend sa dernière main avec son issue, sans passer par un état
@@ -582,6 +644,7 @@ pub fn simulate_with<P: Policy, S: ShopPolicy>(
                     policy,
                     &mut policy_rng,
                     &mut journal,
+                    obs,
                 ) {
                     Ok(main) => main,
                     Err(()) => {
@@ -607,7 +670,19 @@ pub fn simulate_with<P: Policy, S: ShopPolicy>(
                 fatale = Some((ante, kind));
                 break 'run;
             }
+            obs.note(|| format!("  battue score={}", manche.current_score));
             let gain = encaisser_fin_de_manche(&mut session, &manche, &derniere);
+            obs.note(|| {
+                format!(
+                    "  gain  rang={}  mains={}  interets={}  reliques={}  total={}  or={}",
+                    gain.blind_reward,
+                    gain.unused_hands,
+                    gain.interest,
+                    gain.relic_gold,
+                    gain.total,
+                    session.gold
+                )
+            });
             journal.or_gagne = journal.or_gagne.saturating_add(gain.total);
             journal.interets = journal.interets.saturating_add(gain.interest);
 
@@ -616,6 +691,7 @@ pub fn simulate_with<P: Policy, S: ShopPolicy>(
             // sort, et le compter après ferait disparaître de la statistique
             // tout ce qui a été pris.
             for item in &etalage.items {
+                obs.note(|| format!("    offre {item:?}"));
                 if let ShopItem::RelicCard(def) = item {
                     journal.aggregats.noter(*def, true, false);
                 }
@@ -634,6 +710,7 @@ pub fn simulate_with<P: Policy, S: ShopPolicy>(
                 &mut etalage,
                 &actions,
                 &mut journal.aggregats,
+                obs,
             ));
         }
     }
@@ -650,6 +727,13 @@ pub fn simulate_with<P: Policy, S: ShopPolicy>(
             entree.kept = true;
         }
     }
+
+    obs.note(|| {
+        format!(
+            "fin   ante={ante_atteint}  abandon={abandonne}  or={}",
+            session.gold
+        )
+    });
 
     let resultat = ligne(
         seed,
@@ -1169,6 +1253,7 @@ mod tests {
                 ShopAction::Buy(0),
             ],
             &mut RunAggregates::neuf(),
+            &mut Muet,
         );
 
         assert_eq!(anomalies, 0);
@@ -1195,7 +1280,8 @@ mod tests {
                 &mut session,
                 &mut etalage,
                 &[ShopAction::Buy(0)],
-                &mut RunAggregates::neuf()
+                &mut RunAggregates::neuf(),
+                &mut Muet
             ),
             0
         );
@@ -1224,6 +1310,7 @@ mod tests {
                 &mut etalage,
                 &[ShopAction::Buy(0)],
                 &mut RunAggregates::neuf(),
+                &mut Muet,
             );
             assert_eq!(session.relics.len(), usize::from(capacite), "{id:?}");
             assert_eq!(session.gold, 1_000, "{id:?} : débit sur un refus");
@@ -1247,6 +1334,7 @@ mod tests {
             &mut etalage,
             &[ShopAction::Buy(0)],
             &mut RunAggregates::neuf(),
+            &mut Muet,
         );
         assert_eq!(session.relics.len(), 6, "le sixième slot a été refusé");
         assert!(session.gold < 1_000, "le sixième achat n'a pas été payé");
@@ -1272,6 +1360,7 @@ mod tests {
                 &mut etalage,
                 &[ShopAction::RerollShop],
                 &mut RunAggregates::neuf(),
+                &mut Muet,
             );
             payes.push(avant.saturating_sub(session.gold));
             assert_eq!(
@@ -1320,6 +1409,7 @@ mod tests {
             &mut etalage,
             &[ShopAction::RerollShop],
             &mut RunAggregates::neuf(),
+            &mut Muet,
         );
 
         assert_eq!(anomalies, 0);
@@ -1348,6 +1438,7 @@ mod tests {
             &mut etalage,
             &[ShopAction::Buy(0)],
             &mut RunAggregates::neuf(),
+            &mut Muet,
         );
 
         assert_eq!(session.hand_levels.level(YahtzeeHand::FullHouse), 2);
@@ -1394,6 +1485,7 @@ mod tests {
             &mut politique,
             &mut rng,
             &mut resultat,
+            &mut Muet,
         )
         .expect("une main jouable");
 
@@ -1489,6 +1581,7 @@ mod tests {
             &mut politique,
             &mut rng,
             &mut resultat,
+            &mut Muet,
         );
         assert!(issue.is_err(), "la figure interdite a été jouée");
         assert_eq!(resultat.anomalies, 1);

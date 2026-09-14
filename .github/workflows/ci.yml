@@ -1317,6 +1317,28 @@ jobs:
           # soixante à l'Étape 9, sans qu'une ligne change.
           forbid_prod "critère 6  liste de reliques écrite à la main dans le rapport" \
                   'RelicId::' crates/sim_harness/src/report.rs
+          # **Le journal ne porte rien de volatil.** Un horodatage, une durée,
+          # une adresse ou un numéro de fil fait diverger deux journaux
+          # identiques et rend la comparaison inutilisable dès la première
+          # ligne — c'est-à-dire supprime la seule chose que ce mode apporte.
+          forbid  "critère 6  valeur volatile dans le journal" -n \
+                  'Instant::now|SystemTime|thread::current|\{:p\}|elapsed\(' \
+                  crates/sim_harness/src/trace.rs
+          # Un journal dont deux plateformes n'arrondiraient pas la dernière
+          # décimale de la même façon échouerait au critère de reproductibilité
+          # **en imprimant des chiffres justes** — le cas le plus difficile à
+          # diagnostiquer de l'étape. Quotient et reste, en entiers.
+          forbid  "critère 6  flottant ou table non ordonnée dans le journal" -n \
+                  '\bf64\b|\bf32\b|HashMap|HashSet' crates/sim_harness/src/trace.rs
+          # **La forme tronquée du score est le piège central du journal.**
+          # Mesurée, elle ne diffère de l'arrondi que sur 2,3 % des pas quand
+          # trois reliques multiplient, et sur aucun quand aucune ne multiplie :
+          # elle passerait donc presque toujours, et le défaut dormirait jusqu'à
+          # la première relique multiplicative.
+          forbid  "critère 6  score reconstitué sans son arrondi" -n \
+                  'chips[a-z_]* *\* *mult[a-z_]* */ *100' crates/sim_harness/src
+          require "critère 6  le score reconstitué porte l'arrondi et le plancher" -n \
+                  'mult.max\(0\).unsigned_abs\(\)' crates/sim_harness/src/trace.rs
           # Déterminisme de l'offre : ordre d'itération garanti, entiers seuls.
           forbid  "critère 6  table associative dans l'offre" -n 'HashMap|HashSet' "$SHOP"
           forbid  "critère 6  flottant dans l'offre" -n '\bf64\b|\bf32\b' "$SHOP"

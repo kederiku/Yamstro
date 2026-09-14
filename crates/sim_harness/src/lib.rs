@@ -18,6 +18,7 @@ pub mod report;
 pub mod rng;
 pub mod run;
 pub mod state;
+pub mod trace;
 pub mod view;
 
 use clap::Parser;
@@ -51,7 +52,17 @@ pub struct Cli {
     assert_win_rate: Option<WinRateRange>,
     #[arg(long)]
     seed: Option<u64>,
-    #[arg(long)]
+    // **Le mode de journal exige une graine et exclut les deux sorties de
+    // campagne.** L'exigence de graine passe par l'incompatibilité avec le
+    // nombre de runs, et non par une clause de dépendance : celle-ci ne se
+    // déclenche pas sur un drapeau booléen, mesuré — l'invocation passait et
+    // journalisait la graine par défaut. Le nombre de runs étant déjà requis
+    // sauf en présence d'une graine, l'incompatibilité suffit et se vérifie. Il répond à « pourquoi *ce* run a fait ce score » : il n'a
+    // pas d'échantillon, et un rapport agrégé sur une observation afficherait
+    // des médianes valant la valeur unique et des marqueurs partout — un
+    // résultat produit par l'absence d'échantillon, qu'un lecteur prendrait
+    // pour une mesure. L'erreur arrive **avant** que le run ne tourne.
+    #[arg(long, conflicts_with_all = ["out", "report", "runs"])]
     trace: bool,
 }
 
@@ -129,8 +140,17 @@ pub fn executer_avec_sortie(cli: &Cli, sortie: &mut impl std::io::Write) -> conf
     // **Un drapeau sans effet le dit.** Silencieusement ignoré, il fait croire
     // à un rapport vide plutôt qu'à un rapport absent.
     let mut messages: Vec<String> = Vec::new();
+
+    // **Le journal court avant tout le reste, et sort seul.** Le mode implique
+    // un run unique : la section parallèle est contournée, et les deux autres
+    // sorties sont exclues par la ligne de commande.
     if cli.trace {
-        messages.push("--trace : le journal de run est livré par TASK-153.".to_owned());
+        let (_, _, journal) = campaign::simulate_one_traced(&campagne, campagne.seed_base);
+        let _ = write!(sortie, "{}", journal.rendu());
+        return config::Verdict {
+            code: 0,
+            stderr: None,
+        };
     }
 
     let resultats = campaign::campagne(&campagne);
