@@ -1650,25 +1650,41 @@ jobs:
           forbid  "critère 6  paquet graphique dans l'arbre normal du harnais" -n 'bevy' arbre.txt
           rm -f arbre.txt
 
-          # **La règle n°1, sous la seule forme qui puisse échouer.** Un
-          # `git diff` nu sur un checkout frais est vide par construction : un
-          # contrôle incapable d'échouer, qui donne l'illusion que la règle est
-          # gardée. Et la base de la PR ne convient pas davantage : ce workflow
+          # **La règle n°1, sous la forme qui garde sans bloquer.** Jusqu'à la
+          # clôture de l'Étape 6 bis elle se lisait « le moteur n'a pas bougé
+          # depuis qu'on a branché », et c'était juste : aucun ticket de
+          # l'étape n'avait le droit d'y toucher. Gardée telle quelle après la
+          # clôture, elle interdisait tout changement du moteur sur n'importe
+          # quelle PR, Étape 9 comprise, et la passe `rand` 0.10 du
+          # 15 septembre 2026 s'y est heurtée la première. Or la règle dit
+          # autre chose : **le harnais ne modifie jamais le moteur.** Elle
+          # s'écrit donc au commit : depuis le point de branchement, aucun
+          # commit dont le sujet porte le périmètre `(sim_harness)` ne touche
+          # `crates/core_engine/`. Le moteur reste modifiable, sous son propre
+          # périmètre, dans son propre commit, revu comme tel.
+          #
+          # Le point de branchement plutôt que la base de la PR : ce workflow
           # se déclenche aussi sur un push, où elle est vide — mesuré,
           # `git diff origin/` rend « bad revision », code 128, à chaque
-          # exécution. Un rouge permanent ne se diagnostique pas, il se
-          # contourne, et le contournement évident est le `git diff` nu.
-          #
-          # Le point de branchement, lui, énonce la règle elle-même : le moteur
-          # n'a pas bougé depuis qu'on a branché.
+          # exécution. Sur `main`, la liste des commits est vide et la règle
+          # passe à vide : c'est le cas nominal, il n'y a rien à garder.
           git fetch --no-tags --depth=0 origin main 2>/dev/null || git fetch --no-tags origin main
           base=$(git merge-base origin/main HEAD)
-          if git diff --exit-code "$base" -- crates/core_engine/ > moteur.diff; then
-            printf '  ok    critère 6  le moteur n'"'"'a pas bougé depuis %s\n' "$base"
+          fautifs=''
+          for sha in $(git rev-list "$base..HEAD"); do
+            sujet=$(git log -1 --format=%s "$sha")
+            case "$sujet" in
+              *'(sim_harness)'*)
+                if git diff-tree --no-commit-id --name-only -r "$sha" | grep -q '^crates/core_engine/'; then
+                  fautifs="$fautifs$sha $sujet"$'\n'
+                fi ;;
+            esac
+          done
+          if [ -z "$fautifs" ]; then
+            printf '  ok    critère 6  aucun commit du harnais ne touche le moteur depuis %s\n' "$base"
           else
-            printf '  ECHEC critère 6  le moteur a bougé\n'; cat moteur.diff; status=1
+            printf '  ECHEC critère 6  un commit du harnais touche le moteur\n%s' "$fautifs"; status=1
           fi
-          rm -f moteur.diff
 
           # **Contre-épreuve de présence.** Les paniques se mécanisent par un
           # lint et non par une recherche textuelle : les tests unitaires du
@@ -1832,6 +1848,35 @@ jobs:
           # l'omettrait mesurerait un binaire amputé, et l'écart jouerait à la
           # baisse, sans déclencher la porte de taille.
           require "critère 8  plugin monté dans la cible" -n '^\s+VisualEffectsPlugin,$' "$JUICE/src/bin/wasm_size.rs"
+
+          exit $status
+
+      # ---- Passe rand 0.10 et Default (15 septembre 2026) ----
+      #
+      # Deux défauts du corpus, corrigés dans vingt tickets le 15 septembre
+      # 2026 : la double borne sur le générateur, que le corpus imposait
+      # verbatim et que clippy refuse sous `-D warnings`, et une méthode qui
+      # n'existe plus en `rand` 0.10. Le dépôt portait la première en treize
+      # signatures, sous treize attributs de complaisance. Les gardes sont
+      # ancrées sur la signature et sur l'attribut, jamais sur le nom nu : la
+      # prose garde le droit de dire « la double borne ».
+      - name: Invariants de la passe rand 0.10
+        run: |
+          set -euo pipefail
+          status=0
+          forbid() {
+            label=$1; shift
+            out=$(rg "$@" 2>&1) && rc=0 || rc=$?
+            case $rc in
+              1) printf '  ok    %s\n' "$label" ;;
+              0) printf '  ECHEC %s\n%s\n' "$label" "$out"; status=1 ;;
+              *) printf '  ECHEC %s : rg a échoué (code %s)\n%s\n' "$label" "$rc" "$out"; status=1 ;;
+            esac
+          }
+
+          forbid  "passe rand  double borne sur le générateur"  -n 'impl Rng \+ RngExt' crates/
+          forbid  "passe rand  attribut de complaisance"         -n 'allow\(clippy::implied_bounds_in_impls\)' crates/
+          forbid  "passe rand  méthode disparue de rand 0.10"    -n '\bgen_range\(' crates/
 
           exit $status
 

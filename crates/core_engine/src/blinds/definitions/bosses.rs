@@ -31,7 +31,7 @@
 //! griser. **Décision de Lead, à réexaminer par l'Étape 6 bis si le boss se
 //! révèle sans mordant.**
 
-use rand::{Rng, RngExt};
+use rand::RngExt;
 use smallvec::smallvec;
 
 use crate::blinds::BlindModifier;
@@ -83,17 +83,9 @@ pub struct BossDefinition {
 /// Le flux et la capacité entrent dans la signature pour qu'aucun appelant ne
 /// puisse tirer sur le mauvais flux ni borner sur le mauvais nombre. **Seul le
 /// bras de *La Cage* consomme quoi que ce soit.**
-// La borne `Rng + RngExt` est redondante — `RngExt` a `Rng` pour supertrait —
-// mais elle est imposée verbatim par le § 2.3 du ticket et par la check-list
-// § 12 des Contraintes Bevy 0.19.1, comme pour `Die::roll` et
-// `DicePool::roll_all`. L'attribut lève le refus de clippy sans modifier la
-// signature d'un seul caractère.
-#[allow(clippy::implied_bounds_in_impls)]
-pub fn boss_definition(
-    id: BossId,
-    rng: &mut (impl Rng + RngExt),
-    relic_capacity: u8,
-) -> BossDefinition {
+// Borne simple `impl RngExt`, comme `Die::roll` : voir le commentaire qui
+// l'explique là-bas.
+pub fn boss_definition(id: BossId, rng: &mut impl RngExt, relic_capacity: u8) -> BossDefinition {
     let modifier = match id {
         // Les cinq qui ne tirent rien : leur contrainte est constante, et le
         // flux ressort au même point qu'il y est entré.
@@ -117,13 +109,7 @@ pub fn boss_definition(
 }
 
 /// Tire un boss uniformément parmi les six, **sur le flux des boss**.
-// La borne `Rng + RngExt` est redondante — `RngExt` a `Rng` pour supertrait —
-// mais elle est imposée verbatim par le § 2.3 du ticket et par la check-list
-// § 12 des Contraintes Bevy 0.19.1, comme pour `Die::roll` et
-// `DicePool::roll_all`. L'attribut lève le refus de clippy sans modifier la
-// signature d'un seul caractère.
-#[allow(clippy::implied_bounds_in_impls)]
-pub fn draw_boss(rng: &mut (impl Rng + RngExt)) -> BossId {
+pub fn draw_boss(rng: &mut impl RngExt) -> BossId {
     BossId::ALL[rng.random_range(0..BossId::ALL.len())]
 }
 

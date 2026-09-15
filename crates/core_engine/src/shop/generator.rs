@@ -17,7 +17,7 @@
 //! Aucune table associative non plus : son ordre d'itération n'est pas garanti,
 //! et deux runs de même graine rendraient deux étalages.
 
-use rand::{Rng, RngExt};
+use rand::RngExt;
 
 use crate::consumables::ConsumableId;
 use crate::dice::DieModifier;
@@ -111,11 +111,9 @@ pub fn rarity_for_permille(seuil: u32) -> RelicRarity {
 }
 
 /// La rareté tirée : **un** seuil, et la correspondance ci-dessus.
-// La borne `Rng + RngExt` est redondante, `RngExt` ayant `Rng` pour supertrait,
-// mais elle est imposée verbatim par le corpus. L'attribut lève le refus de
-// clippy sans modifier la signature, comme pour `Die::roll` depuis TASK-02.
-#[allow(clippy::implied_bounds_in_impls)]
-fn tirer_rarete(rng: &mut (impl Rng + RngExt)) -> RelicRarity {
+// Borne simple `impl RngExt`, comme `Die::roll` : voir le commentaire qui
+// l'explique là-bas.
+fn tirer_rarete(rng: &mut impl RngExt) -> RelicRarity {
     rarity_for_permille(rng.random_range(0..TOTAL_PERMILLE))
 }
 
@@ -124,11 +122,7 @@ fn tirer_rarete(rng: &mut (impl Rng + RngExt)) -> RelicRarity {
 ///
 /// La borne est `Clone` et non `Copy` : `DieModifier` ne l'est pas, et l'y
 /// ajouter pour la commodité d'un générateur toucherait un type de l'Étape 1.
-// La borne `Rng + RngExt` est redondante, `RngExt` ayant `Rng` pour supertrait,
-// mais elle est imposée verbatim par le corpus. L'attribut lève le refus de
-// clippy sans modifier la signature, comme pour `Die::roll` depuis TASK-02.
-#[allow(clippy::implied_bounds_in_impls)]
-fn tirer_dans<T: Clone>(tranche: &[T], rng: &mut (impl Rng + RngExt)) -> Option<T> {
+fn tirer_dans<T: Clone>(tranche: &[T], rng: &mut impl RngExt) -> Option<T> {
     if tranche.is_empty() {
         return None;
     }
@@ -150,8 +144,7 @@ fn tirer_dans<T: Clone>(tranche: &[T], rng: &mut (impl Rng + RngExt)) -> Option<
 /// courants : le générateur reste **pur et sans session**, ce qui est ce qui le
 /// rend reproductible. Il peut donc proposer une figure déjà au plafond, ce qui
 /// demande neuf parchemins sur la même case et ne se produit pas en huit antes.
-#[allow(clippy::implied_bounds_in_impls)]
-pub fn generate_shop(rng: &mut (impl Rng + RngExt)) -> ShopInventory {
+pub fn generate_shop(rng: &mut impl RngExt) -> ShopInventory {
     let mut items = Vec::with_capacity(4);
 
     for _ in 0..2 {

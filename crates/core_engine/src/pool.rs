@@ -2,7 +2,7 @@
 
 use crate::config::RunConfig;
 use crate::dice::{Die, DieId};
-use rand::{Rng, RngExt};
+use rand::RngExt;
 
 /// La main active, de taille variable, adressée exclusivement par identifiant.
 ///
@@ -81,17 +81,14 @@ impl DicePool {
         }
     }
 
-    // La borne `Rng + RngExt` est redondante, `RngExt` ayant `Rng` pour
-    // supertrait, mais elle est imposée verbatim par le document source et par
-    // la check-list § 12 des Contraintes Bevy 0.19.1. L'attribut lève le refus
-    // de clippy sans modifier la signature.
-    #[allow(clippy::implied_bounds_in_impls)]
+    // Borne simple `impl RngExt`, comme `Die::roll` : voir le commentaire qui
+    // l'explique là-bas.
     /// Relance la main et rend les identifiants effectivement relancés, soit
     /// ceux dont le dé n'était pas verrouillé, ou tous si `force`.
     ///
     /// Un dé relancé qui retombe sur la même face figure quand même dans la
     /// liste : ce qui est rendu, ce sont les dés relancés, pas les dés modifiés.
-    pub fn roll_all(&mut self, rng: &mut (impl Rng + RngExt), force: bool) -> Vec<DieId> {
+    pub fn roll_all(&mut self, rng: &mut impl RngExt, force: bool) -> Vec<DieId> {
         let mut rolled = Vec::new();
 
         for die in &mut self.dice {
