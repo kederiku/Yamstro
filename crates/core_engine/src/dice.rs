@@ -3,7 +3,7 @@
 #[cfg(feature = "bevy")]
 use bevy_ecs::reflect::ReflectComponent;
 
-use rand::{Rng, RngExt};
+use rand::RngExt;
 
 /// Nombre de faces maximal accepté par le moteur. Borne technique et non
 /// valeur de gameplay : le nombre de faces réel vient du gobelet.
@@ -66,15 +66,15 @@ impl Die {
         }
     }
 
-    // La borne `Rng + RngExt` est redondante — `RngExt` a `Rng` pour supertrait
-    // — mais elle est imposée verbatim par le § 2.3 du ticket et par la
-    // check-list § 12 des Contraintes Bevy 0.19.1. L'attribut lève le refus de
-    // clippy sans modifier la signature d'un seul caractère.
-    #[allow(clippy::implied_bounds_in_impls)]
+    // **La borne est `impl RngExt`, seule.** `RngExt` a `Rng` pour supertrait :
+    // la double borne que le corpus imposait verbatim était redondante, et
+    // clippy la refuse sous `-D warnings`. Treize signatures la portaient sous
+    // un attribut de complaisance ; la passe `rand` 0.10 du 15 septembre 2026
+    // a fait de la borne simple la forme canonique du corpus.
     /// Relance le dé. Sans `force`, un dé verrouillé n'est jamais modifié.
     /// `force = true` est réservé aux effets qui relancent explicitement un dé
     /// verrouillé (Rune de Mutation, reliques de manipulation — Étape 9).
-    pub fn roll(&mut self, rng: &mut (impl Rng + RngExt), force: bool) {
+    pub fn roll(&mut self, rng: &mut impl RngExt, force: bool) {
         if self.locked && !force {
             return;
         }

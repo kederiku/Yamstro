@@ -580,7 +580,24 @@ fn test_engine_diff_is_compared_to_the_merge_base() {
         bloc.contains("git merge-base origin/main HEAD"),
         "la base de comparaison n'est pas le point de branchement"
     );
-    assert!(bloc.contains("--exit-code"), "l'écart ne fait rien échouer");
+    // **Depuis la passe `rand` 0.10 du 15 septembre 2026, la règle porte sur
+    // les commits du harnais, pas sur l'arbre entier.** « Le moteur n'a pas
+    // bougé depuis qu'on a branché » était la forme de l'étape ; gardée après
+    // la clôture, elle interdisait tout changement du moteur sur n'importe
+    // quelle PR. La règle n°1 dit que le harnais ne modifie jamais le moteur :
+    // aucun commit au périmètre `(sim_harness)` ne touche `crates/core_engine/`.
+    assert!(
+        bloc.contains("git rev-list \"$base..HEAD\""),
+        "les commits depuis le point de branchement ne sont pas parcourus"
+    );
+    assert!(
+        bloc.contains("*'(sim_harness)'*"),
+        "le périmètre du harnais n'est pas ce qui déclenche la règle"
+    );
+    assert!(
+        bloc.contains("grep -q '^crates/core_engine/'"),
+        "l'écart ne fait rien échouer"
+    );
     assert!(
         !bloc.contains("origin/${{ github.base_ref }}"),
         "la base de la PR est vide sur un push : `git diff origin/` rend \
@@ -609,23 +626,31 @@ fn test_engine_diff_is_compared_to_the_merge_base() {
         "l'option n'est pas commentée : on l'« optimisera » un jour de CI lente"
     );
 
-    // Et la commande rend bien vide **ici**, sur l'arbre courant.
-    let base = Command::new("git")
-        .args(["merge-base", "origin/main", "HEAD"])
-        .current_dir(racine())
-        .output()
-        .expect("git merge-base");
-    let base = String::from_utf8_lossy(&base.stdout).trim().to_string();
-    let diff = Command::new("git")
-        .args(["diff", "--exit-code", &base, "--", "crates/core_engine/"])
-        .current_dir(racine())
-        .output()
-        .expect("git diff");
-    assert!(
-        diff.status.success(),
-        "le moteur a bougé depuis le point de branchement :\n{}",
-        String::from_utf8_lossy(&diff.stdout)
-    );
+    // Et la règle tient **ici**, sur l'arbre courant : aucun commit du harnais
+    // depuis le point de branchement ne touche le moteur.
+    let git = |args: &[&str]| {
+        let sortie = Command::new("git")
+            .args(args)
+            .current_dir(racine())
+            .output()
+            .expect("git");
+        String::from_utf8_lossy(&sortie.stdout).trim().to_string()
+    };
+    let base = git(&["merge-base", "origin/main", "HEAD"]);
+    let plage = format!("{base}..HEAD");
+    for sha in git(&["rev-list", &plage]).lines() {
+        let sujet = git(&["log", "-1", "--format=%s", sha]);
+        if !sujet.contains("(sim_harness)") {
+            continue;
+        }
+        let fichiers = git(&["diff-tree", "--no-commit-id", "--name-only", "-r", sha]);
+        assert!(
+            !fichiers
+                .lines()
+                .any(|fichier| fichier.starts_with("crates/core_engine/")),
+            "le commit du harnais {sha} touche le moteur :\n{fichiers}"
+        );
+    }
 }
 
 #[test]
