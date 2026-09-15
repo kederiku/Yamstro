@@ -1687,6 +1687,79 @@ jobs:
 
           exit $status
 
+      # ---- Étape 6 bis : clôture (TASK-157) ----
+      #
+      # **Contre-épreuves de présence.** Ces lignes doivent remonter quelque
+      # chose : un invariant dont la cible a disparu est vide de sens, et rien
+      # ne le dit. Elles complètent le bloc de TASK-154, qui interdit ; ici on
+      # exige.
+      - name: Clôture Étape 6 bis
+        run: |
+          set -euo pipefail
+          status=0
+          exiger() {
+            label=$1; shift
+            if rg -q "$@" 2>/dev/null; then
+              printf '  ok    %s\n' "$label"
+            else
+              printf '  ECHEC %s : attendu présent\n' "$label"; status=1
+            fi
+          }
+          interdire() {
+            label=$1; shift
+            out=$(rg "$@" 2>&1) && rc=0 || rc=$?
+            case $rc in
+              1) printf '  ok    %s\n' "$label" ;;
+              0) printf '  ECHEC %s\n%s\n' "$label" "$out"; status=1 ;;
+              *) printf '  ECHEC %s : rg a échoué (code %s)\n%s\n' "$label" "$rc" "$out"; status=1 ;;
+            esac
+          }
+
+          # Le fichier des API absentes existe **et n'est pas vide**. Un fichier
+          # vide obtenu en élargissant une visibilité serait un échec de
+          # l'étape : le manque disparaîtrait du seul document qui le porte.
+          test -s crates/sim_harness/MISSING_API.md
+          printf '  ok    critère 6  le fichier des API absentes est non vide\n'
+          exiger "critère 6  la décomposition de la courbe reste hors d'atteinte" \
+                 -n 'pub\(crate\) fn apply_permille' crates/core_engine/src/blinds/scaling.rs
+
+          # **La cible web du harnais, et elle seule — sur sa production.**
+          # Deux bornes, et chacune a sa raison. La cible historique apparaît
+          # trois fois sous le répertoire des workflows : c'est le job qui
+          # mesure le binaire du **jeu**, et l'exiger absente de là demanderait
+          # de le supprimer. Et l'audit de clôture doit pouvoir **nommer** la
+          # cible qu'il interdit : portée sur le répertoire entier, la garde se
+          # déclenche sur le test qui la vérifie — mesuré.
+          interdire "critère 4  cible web historique dans le harnais" -n \
+                    'wasm32-unknown-unknown' \
+                    crates/sim_harness/src crates/sim_harness/Cargo.toml
+
+          # Le harnais ne remonte dans aucune crate de jeu, à une exception près
+          # — la dépendance de développement du test d'accord, qui vit dans la
+          # crate d'interface et n'entre pas dans l'arbre normal.
+          interdire "critère 6  le harnais remonte dans une crate de jeu" -n \
+                    'sim_harness' crates/game_state/ crates/core_engine/ crates/shop_system/
+
+          # **Six types, une déclaration chacun.** Une migration mal faite laisse
+          # deux déclarations homonymes que le compilateur distingue et que le
+          # lecteur confond ; c'est le seul contrôle qui l'attrape.
+          compte=$(rg -c --no-filename 'struct RunOutcome|enum HandDecision|trait Policy\b|trait ShopPolicy|struct LockMask|struct SimRng' \
+                   crates/ -g '!**/tests/**' | paste -sd+ - | bc)
+          if [ "$compte" = "6" ]; then
+            printf '  ok    critère 6  les six types migrés sont déclarés une fois\n'
+          else
+            printf '  ECHEC critère 6  %s déclarations au lieu de six\n' "$compte"; status=1
+          fi
+
+          # Le bloc de glossaire est livré et nomme les vingt types. Le
+          # glossaire lui-même vit sur le corpus : aucun contrôle d'ici ne peut
+          # le lire, et ce qui se vérifie est la correspondance entre le code et
+          # le bloc.
+          exiger "critère 6  le bloc de glossaire est livré" -n \
+                 'Types du harnais de simulation' reports/glossaire-sim-harness.md
+
+          exit $status
+
       # ---- Étape 6 bis : la porte d'équilibrage (TASK-154) ----
       #
       # **Ce ne sont pas cinq cents tirages, c'est toujours les mêmes cinq cents
