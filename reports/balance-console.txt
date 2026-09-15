@@ -1,0 +1,69 @@
+== rapport d'équilibrage ==
+  runs           : 150000   retenus : 149944   abandons : 56
+  anomalies      : 56<<
+
+-- taux de victoire par cellule --
+  standard     mise 1      0,00 %<<
+  standard     mise 3      0,00 %<<
+  standard     mise 4      0,00 %<<
+  abandoned    mise 1      0,00 %<<
+  abandoned    mise 3      0,00 %<<
+  abandoned    mise 4      0,00 %<<
+  polyhedron   mise 1      0,00 %<<
+  polyhedron   mise 3      0,00 %<<
+  polyhedron   mise 4      0,00 %<<
+  cheater      mise 1      0,00 %<<
+  cheater      mise 3      0,00 %<<
+  cheater      mise 4      0,00 %<<
+  fortune      mise 1      0,00 %<<
+  fortune      mise 3      0,00 %<<
+  fortune      mise 4      0,00 %<<
+
+-- taux de victoire par gobelet, à mise 1 --
+  standard        0,00 %
+  abandoned       0,00 %
+  polyhedron      0,00 %
+  cheater         0,00 %
+  fortune         0,00 %
+  écart          : non mesurable (aucune victoire)
+
+-- taux de victoire par mise --
+  mise 1            0,00 %
+  mise 3            0,00 %
+  mise 4            0,00 %
+  progression des six mises : non mesurable avant l'Étape 10
+
+-- ante médian de défaite : 1<< --
+
+-- rapport score / cible par ante --
+  ante 1           94,66 %   sur 149944 runs
+  ante 2          100,00 %   sur 48985 runs
+  ante 3           87,32 %   sur 24512 runs
+  ante 4           81,10 %   sur 7414 runs
+  ante 5           77,51 %   sur 1084 runs
+  ante 6           75,96 %   sur 57 runs
+  ante 7           71,54 %   sur 1 runs
+  ante 8         non mesurable (aucun run n'y parvient)
+  premier ante sous 1,00 : 1   (le mur de la run)
+
+-- reliques : apparition / achat / conservation --
+  (la conservation se rapporte aux runs qui l'ont VUE, pas achetée)
+  CrackedDie              42,38 %  84,60 %  84,60 %<<  contrib   1326 sur 53775 achats
+  PolishedStone           43,33 %  84,79 %  84,79 %<<  contrib   1230 sur 55094 achats
+  TripletMaster           49,14 %  83,29 %  83,29 %<<  contrib    352 sur 61387 achats
+  FullHouseArchitect      26,52 %  12,76 %  12,76 %    contrib    814 sur 5076 achats
+  StellarAlignment        26,28 %  12,84 %  12,84 %    contrib   1265 sur 5062 achats
+  PyramidOfSixes          25,93 %  12,74 %  12,74 %    contrib    559 sur 4957 achats
+  Pendulum                12,53 %   7,87 %   7,87 %<<  contrib   1523 sur 1481 achats
+  UnstableObsidian        12,50 %   7,97 %   7,97 %<<  contrib   4570 sur 1495 achats
+  DivineYahtzee           12,51 %   8,36 %   8,36 %<<  contrib    107 sur 1569 achats
+  ClayPiggyBank           51,23 %  82,64 %  82,64 %<<  contrib      — sur 63490 achats
+  GhostDie                26,21 %  12,99 %  12,99 %    contrib      — sur 5108 achats
+  DoubleMirror            12,67 %   8,42 %   8,42 %<<  contrib    194 sur 1601 achats
+
+-- contribution médiane par palier --
+  hypothèse du document d'étape : 1 : 2 : 3,75 — observé ci-dessous
+  commune        352
+  peu commune    559
+  rare           194
+  légendaire     non mesurable (aucune achetée)

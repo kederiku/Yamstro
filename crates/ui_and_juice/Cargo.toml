@@ -37,3 +37,20 @@ measure = []
 [[bin]]
 name = "wasm_size"
 required-features = ["measure"]
+
+# **Première et seule dépendance d'une crate de jeu vers le harnais, et
+# uniquement pour le test d'accord.** Une seconde ferait de l'instrument une
+# brique du jeu, et le jeu embarquerait le parallélisme, la ligne de commande
+# et le tableur.
+#
+# Elle ne crée aucun cycle : le harnais ne dépend d'aucune crate de jeu, et une
+# dépendance de développement n'entre pas dans l'arbre normal — mesuré, celui du
+# harnais reste sans aucun paquet du moteur graphique.
+#
+# **`rand_chacha` est là parce que le contrat de décision nomme le type du
+# générateur dans sa signature**, et que le harnais ne le ré-exporte pas :
+# mesuré, sans cette ligne le fichier de test ne compile pas.
+[dev-dependencies]
+sim_harness = { path = "../sim_harness", version = "0.1.0" }
+rand_chacha = { workspace = true }
+rand = { workspace = true }

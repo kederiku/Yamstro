@@ -1,0 +1,49 @@
+== rapport d'équilibrage ==
+  runs           : 500   retenus : 500   abandons : 0
+  anomalies      : 0
+
+-- taux de victoire par cellule --
+  standard     mise 1      0,00 %<<
+
+-- taux de victoire par gobelet, à mise 1 --
+  standard        0,00 %
+  écart          : non mesurable (aucune victoire)
+
+-- taux de victoire par mise --
+  mise 1            0,00 %
+  progression des six mises : non mesurable avant l'Étape 10
+
+-- ante médian de défaite : 1<< --
+
+-- rapport score / cible par ante --
+  ante 1           96,00 %   sur 500 runs
+  ante 2          100,93 %   sur 185 runs
+  ante 3           89,71 %   sur 97 runs
+  ante 4           90,31 %   sur 35 runs
+  ante 5           69,63 %   sur 6 runs
+  ante 6         non mesurable (aucun run n'y parvient)
+  ante 7         non mesurable (aucun run n'y parvient)
+  ante 8         non mesurable (aucun run n'y parvient)
+  premier ante sous 1,00 : 1   (le mur de la run)
+
+-- reliques : apparition / achat / conservation --
+  (la conservation se rapporte aux runs qui l'ont VUE, pas achetée)
+  CrackedDie              45,60 %  80,26 %  80,26 %<<  contrib   1276 sur 183 achats
+  PolishedStone           44,40 %  84,68 %  84,68 %<<  contrib   1322 sur 188 achats
+  TripletMaster           54,60 %  79,12 %  79,12 %    contrib    500 sur 216 achats
+  FullHouseArchitect      31,60 %   0,63 %   0,63 %<<  contrib      — sur 1 achats
+  StellarAlignment        29,20 %   2,05 %   2,05 %<<  contrib   2016 sur 3 achats
+  PyramidOfSixes          27,00 %   5,18 %   5,18 %<<  contrib    944 sur 7 achats
+  Pendulum                14,00 %   0,00 %   0,00 %<<  contrib      0 sur 0 achats
+  UnstableObsidian        12,40 %   0,00 %   0,00 %<<  contrib      0 sur 0 achats
+  DivineYahtzee           14,80 %   0,00 %   0,00 %<<  contrib      0 sur 0 achats
+  ClayPiggyBank           54,20 %  83,39 %  83,39 %<<  contrib      — sur 226 achats
+  GhostDie                29,00 %   2,06 %   2,06 %<<  contrib      — sur 3 achats
+  DoubleMirror            15,20 %   0,00 %   0,00 %<<  contrib      0 sur 0 achats
+
+-- contribution médiane par palier --
+  hypothèse du document d'étape : 1 : 2 : 3,75 — observé ci-dessous
+  commune        500
+  peu commune    non mesurable (aucune achetée)
+  rare           non mesurable (aucune achetée)
+  légendaire     non mesurable (aucune achetée)

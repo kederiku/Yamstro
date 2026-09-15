@@ -8,7 +8,17 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
+      # `fetch-depth: 0` ressemble à un réglage de performance qu'on
+      # « optimise » un jour de CI lente ; c'est en réalité ce qui rend la
+      # règle n°1 exécutable. Le clone par défaut est superficiel et ne porte
+      # que la référence de l'événement : `origin/main est une révision inconnue`,
+      # et le point de branchement est alors introuvable. Retirée, cette
+      # ligne ne casse pas la vérification du moteur — elle la fait échouer
+      # pour une raison qui n'a rien à voir avec le moteur, c'est-à-dire de la
+      # pire façon.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       # `rustup show` n'installe plus la toolchain active depuis rustup 1.28.0.
       # L'auto-installation est revenue en 1.28.1 et le runner porte 1.29.0,
@@ -936,7 +946,14 @@ jobs:
           # garde qui mord son premier cas légitime ; celle-ci a mis un ticket.
           # Le renommage est complet : deux chemins pour un même type feraient
           # diverger les importateurs.
-          forbid  "critère 6  ancien chemin du module de manche" -n 'core_engine::blind\b|crate::blind\b|mod blind;' crates/
+          # **Deux portées, et pas une.** Le chemin absolu est faux partout : un
+          # importateur qui l'écrit vise un module qui n'existe plus. Le chemin
+          # relatif et la déclaration de module, eux, n'ont de sens que dans le
+          # moteur — mesuré à TASK-143 : le harnais de simulation porte son
+          # propre `blind.rs`, que son périmètre lui impose, et la forme unique
+          # interdisait un fichier qu'un ticket exige.
+          forbid  "critère 6  ancien chemin du module de manche" -n 'core_engine::blind\b' crates/
+          forbid  "critère 6  module de manche au singulier dans le moteur" -n 'crate::blind\b|mod blind;' crates/core_engine/src
           # Reflect seul sur les trois types de données ; seul le contexte est
           # une ressource.
           forbid  "critère 6  contrainte rendue composant ou ressource" -nU 'reflect\(Resource\)[^\n]*\n(#[^\n]*\n)*pub (enum BlindModifier|enum BlindType|struct BlindDefinition)' "$BLINDS"
@@ -954,7 +971,24 @@ jobs:
           # employait.
           require "critère 6  constantes de courbe, à un seul endroit" -n 'const BASE_ANTE_1_MILLI: u64 = 300_000;' "$SCALING"
           forbid  "critère 6  seconde courbe de difficulté" -n 'BASE_TARGET|ANTE_GROWTH_MILLI|fn base_target|fn scale_milli' crates/
-          forbid  "critère 6  facteur de courbe hors du moteur" -nU 'fn (blind_mult|cup_mult|stake_mult|boss_mult)\b' crates/game_state/src crates/ui_and_juice/src
+          # **La liste de chemins avait vieilli.** Elle nommait les deux crates
+          # qui existaient à TASK-69 ; il y en a cinq. Mesuré à TASK-143 : une
+          # courbe entière réimplémentée dans le harnais de simulation ne
+          # déclenchait **aucune** garde. La portée devient `crates/`, avec la
+          # seule exception qui la justifie, comme le fait déjà la garde du
+          # facteur de stake dix lignes plus bas.
+          # **Le motif ne voyait pas les vrais noms, et la liste de chemins avait
+          # vieilli.** La frontière de mot exigeait qu'un caractère non-mot
+          # suive « blind_mult » ; en « blind_mult_permille » c'est un souligné,
+          # donc aucune correspondance — la garde ne pouvait attraper qu'un nom
+          # tronqué que personne n'écrit. Et elle ne nommait que les deux crates
+          # qui existaient alors, sur cinq aujourd'hui. Mesuré à TASK-143 : une
+          # courbe entière réimplémentée dans le harnais de simulation ne
+          # déclenchait rien. Ancrée sur la **déclaration**, portée sur les
+          # sources — une signature souhaitée dans `MISSING_API.md` n'est pas
+          # une implémentation, et le ticket qui relève le manque doit pouvoir
+          # la nommer.
+          forbid  "critère 6  facteur de courbe hors du moteur" -n 'fn (blind_mult|cup_mult|stake_mult|boss_mult)[a-z_]*\(' crates/ -g '*.rs' -g '!**/blinds/scaling.rs'
           # Aucun plafond sur la cible : l'empilement maximal est le signal de
           # calibrage remis à l'Étape 6 bis, pas un défaut à corriger.
           forbid  "critère 6  plafond sur la cible"        -n '\.min\(|\.clamp\(|MAX_TARGET' "$SCALING"
@@ -977,7 +1011,10 @@ jobs:
           # Le facteur de stake déménagera à l'Étape 10 : un déplacement, jamais
           # une seconde implémentation.
           require "critère 6  facteur de stake, à un seul endroit" -n 'fn stake_mult_permille' "$SCALING"
-          forbid  "critère 6  seconde implémentation du facteur de stake" -n 'fn stake_mult_permille' crates/ -g '!**/blinds/scaling.rs'
+          # Restreinte aux sources : une **signature souhaitée** consignée dans
+          # `MISSING_API.md` n'est pas une implémentation, et le ticket qui
+          # relève le manque doit pouvoir la nommer. Mesuré à TASK-143.
+          forbid  "critère 6  seconde implémentation du facteur de stake" -n 'fn stake_mult_permille' crates/ -g '*.rs' -g '!**/blinds/scaling.rs'
 
 
           # ---- Étape 6 : gain de fin de manche (TASK-70) ----
@@ -1204,6 +1241,114 @@ jobs:
           forbid  "critère 6  seconde table de rareté" -n 'RARITY_WEIGHTS_PERMILLE *(:|=)' crates/ -g '!**/shop/generator.rs'
           forbid  "critère 6  table de rareté fausse" -n \
                   'WEIGHTS[A-Z_]* *(:[^=]*)?= *\[ *(700|70|650 *, *250 *, *45)' crates/
+          # **Le harnais lit la table, il ne la recopie jamais** — pas même
+          # dans un test « pour vérifier ». La garde ne **compte** pas les
+          # occurrences sur `crates/` entier : le dépôt en porte deux, la
+          # déclaration et le test de l'Étape 6 qui la garde, et exiger un
+          # total de un demanderait de toucher le moteur. Elle porte sur le
+          # seul chemin où une copie serait un défaut.
+          forbid  "critère 6  table de rareté recopiée dans le harnais" -n \
+                  '\[ *650 *, *250 *, *90 *, *10 *\]' crates/sim_harness/
+          # **La sonde à plan classe le catalogue, elle ne le récite pas.**
+          # Deux identifiants écrits à la main passeraient tous les tests
+          # d'aujourd'hui ; à l'Étape 9 la sonde ne saurait classer aucune des
+          # reliques ajoutées, achèterait au hasard sous un nom qui promet un
+          # plan, et le tableau resterait crédible. La garde porte sur la
+          # **variante nommée** et non sur le type, dont la table a besoin ; sur
+          # la production seule, les tests devant nommer ce qu'ils vérifient ; et
+          # sur le seul répertoire où une liste en dur serait un défaut. Portée
+          # à `src` entier, elle attrape le doc-test d'en-tête de `view.rs`, qui
+          # doit nommer une relique pour montrer qu'une vue ne mute rien — et
+          # que `forbid_prod` ne coupe pas, un `//!` précédant le premier
+          # `#[cfg(test)]`.
+          forbid_prod "critère 6  liste de reliques écrite à la main dans le harnais" \
+                  'RelicId::' crates/sim_harness/src/policy
+          # **La ligne du tableau ne se mute pas après construction.** La garde
+          # porte sur **l'acte** — prendre une référence mutable sur la ligne —
+          # et non sur la syntaxe `&mut self`, qui bannirait du même coup les
+          # deux constructeurs des agrégats, lesquels se remplissent *pendant*
+          # le run et doivent donc l'être. Un agrégat qui repasserait sur les
+          # lignes pour « normaliser » une colonne réécrirait après coup ce que
+          # le run a dit.
+          forbid  "critère 6  la ligne de sortie mutée après coup" -n \
+                  '&mut RunOutcome' crates/sim_harness/src
+          # Le vocabulaire v1 sur le seul fichier où il serait naturel : un champ
+          # « argent gagné », un « relances restantes ». Les noms canoniques sont
+          # `gold`, `rerolls_left` et `hands_remaining`.
+          forbid  "critère 6  vocabulaire v1 dans la ligne de sortie" -n \
+                  'rerolls_remaining|hands_left|rolls_remaining|rerolls_per_hand|RollSession|RoundContext|HandEvaluation|evaluate_hand|ScoringDie|défausse|\bf64\b|\bf32\b|HashMap|HashSet' \
+                  crates/sim_harness/src/outcome.rs
+          # **Rien ne s'écrit depuis la section parallèle.** Avec un écrivain
+          # partagé, chaque run resterait juste et le tableau changerait d'ordre
+          # à chaque exécution : l'identité octet pour octet deviendrait
+          # invérifiable *sans qu'aucun run ne soit faux*, et la comparaison
+          # nocturne signalerait une dérive chaque nuit.
+          forbid  "critère 6  écriture depuis la section parallèle" -n \
+                  'Mutex|RwLock|Atomic|par_bridge|par_iter\(\)\.for_each' \
+                  crates/sim_harness/src/campaign.rs
+          # Un flottant ou une table non ordonnée sur le chemin de campagne, et
+          # l'écart ne se voit qu'à la comparaison d'empreintes, une nuit plus
+          # tard, sur une autre machine.
+          forbid  "critère 6  flottant ou table non ordonnée en campagne" -n \
+                  '\bf64\b|\bf32\b|HashMap|HashSet' crates/sim_harness/src/campaign.rs
+          # **Un bras attrape-tout dans l'aiguillage compile et ne prévient de
+          # rien** : il fait tourner une option sur une autre sonde, et l'écart
+          # entre les deux sondes de main devient nul pour une raison de
+          # câblage. Une sixième politique doit être une erreur de compilation.
+          forbid_prod "critère 6  bras attrape-tout dans l'aiguillage" \
+                  '^\s*_ =>' crates/sim_harness/src/campaign.rs
+          # L'ordre indexé **est** la garantie : le commentaire qui le dit est
+          # normatif, et sa disparition annoncerait un remplacement du collect.
+          require "critère 6  le collect de campagne est indexé" -n \
+                  'collect\(\); // collect indexé : l.ordre est celui des indices' \
+                  crates/sim_harness/src/campaign.rs
+          # **Le rapport ne compte rien en flottant, pas même à l'affichage.**
+          # L'addition flottante n'est pas associative et l'ordre de réduction
+          # d'un agrégat parallèle n'est pas garanti : seule la ligne de résumé
+          # changerait entre deux plateformes, et la comparaison d'empreintes
+          # nocturne signalerait une dérive que personne ne saurait attribuer.
+          # Un invariant à zéro strict se défend mieux qu'un invariant à
+          # exceptions.
+          forbid  "critère 6  flottant ou table non ordonnée dans le rapport" -n \
+                  '\bf64\b|\bf32\b|HashMap|HashSet' crates/sim_harness/src/report.rs
+          # Une seule convention de médiane pour tout le harnais : trois
+          # implémentations en donneraient trois au premier remaniement.
+          require "critère 6  une seule médiane dans le harnais" -n \
+                  '^pub fn median\(values: &mut \[u64\]\) -> u64 \{' \
+                  crates/sim_harness/src/report.rs
+          forbid  "critère 6  seconde médiane" -n 'fn median' crates/sim_harness/src \
+                  -g '!**/report.rs'
+          # Le rapport n'horodate rien : une date lue à l'horloge ferait changer
+          # son empreinte à chaque exécution, et c'est cette empreinte que la
+          # passe nocturne compare.
+          forbid  "critère 6  horodatage dans le rapport" -n \
+                  'SystemTime|Instant::now|chrono|Local::now' crates/sim_harness/src/report.rs
+          # La table des reliques itère le catalogue : douze aujourd'hui,
+          # soixante à l'Étape 9, sans qu'une ligne change.
+          forbid_prod "critère 6  liste de reliques écrite à la main dans le rapport" \
+                  'RelicId::' crates/sim_harness/src/report.rs
+          # **Le journal ne porte rien de volatil.** Un horodatage, une durée,
+          # une adresse ou un numéro de fil fait diverger deux journaux
+          # identiques et rend la comparaison inutilisable dès la première
+          # ligne — c'est-à-dire supprime la seule chose que ce mode apporte.
+          forbid  "critère 6  valeur volatile dans le journal" -n \
+                  'Instant::now|SystemTime|thread::current|\{:p\}|elapsed\(' \
+                  crates/sim_harness/src/trace.rs
+          # Un journal dont deux plateformes n'arrondiraient pas la dernière
+          # décimale de la même façon échouerait au critère de reproductibilité
+          # **en imprimant des chiffres justes** — le cas le plus difficile à
+          # diagnostiquer de l'étape. Quotient et reste, en entiers.
+          forbid  "critère 6  flottant ou table non ordonnée dans le journal" -n \
+                  '\bf64\b|\bf32\b|HashMap|HashSet' crates/sim_harness/src/trace.rs
+          # **La forme tronquée du score est le piège central du journal.**
+          # Mesurée, elle ne diffère de l'arrondi que sur 2,3 % des pas quand
+          # trois reliques multiplient, et sur aucun quand aucune ne multiplie :
+          # elle passerait donc presque toujours, et le défaut dormirait jusqu'à
+          # la première relique multiplicative.
+          forbid  "critère 6  score reconstitué sans son arrondi" -n \
+                  'chips[a-z_]* *\* *mult[a-z_]* */ *100' crates/sim_harness/src
+          require "critère 6  le score reconstitué porte l'arrondi et le plancher" -n \
+                  'mult.max\(0\).unsigned_abs\(\)' crates/sim_harness/src/trace.rs
           # Déterminisme de l'offre : ordre d'itération garanti, entiers seuls.
           forbid  "critère 6  table associative dans l'offre" -n 'HashMap|HashSet' "$SHOP"
           forbid  "critère 6  flottant dans l'offre" -n '\bf64\b|\bf32\b' "$SHOP"
@@ -1430,6 +1575,235 @@ jobs:
           # de la boutique fait tomber ces deux gardes-là.
 
           exit $status
+
+      # ---- Étape 6 bis : le harnais de simulation (TASK-154) ----
+      #
+      # **Une exigence qu'aucune commande ne vérifie n'est pas une exigence,
+      # c'est un vœu.** Les motifs des audits amont sont portés sur les
+      # répertoires des quatre crates de jeu ; aucun ne balaye celui du harnais.
+      #
+      # Ce bloc **ajoute**, il ne réécrit rien. Et il ne recopie pas non plus ce
+      # qui est déjà gardé : le littéral de la table de rareté est interdit dans
+      # le harnais depuis TASK-148, la courbe est gardée structurellement sur
+      # l'ensemble des crates, et le flottant comme la table de hachage le sont
+      # déjà fichier par fichier sur trois fichiers. Un second endroit à
+      # corriger le jour où un chemin change, c'est un endroit qui restera faux.
+      - name: Invariants normatifs Étape 6 bis
+        run: |
+          set -euo pipefail
+          status=0
+          # Même lecture du code de sortie qu'au volet 1 : `! rg` confond
+          # « rien trouvé » et « rg a échoué ».
+          forbid() {
+            label=$1; shift
+            out=$(rg "$@" 2>&1) && rc=0 || rc=$?
+            case $rc in
+              1) printf '  ok    %s\n' "$label" ;;
+              0) printf '  ECHEC %s\n%s\n' "$label" "$out"; status=1 ;;
+              *) printf '  ECHEC %s : rg a échoué (code %s)\n%s\n' "$label" "$rc" "$out"; status=1 ;;
+            esac
+          }
+          require() {
+            label=$1; shift
+            out=$(rg "$@" 2>&1) && rc=0 || rc=$?
+            case $rc in
+              0) printf '  ok    %s\n' "$label" ;;
+              *) printf '  ECHEC %s : motif attendu absent (code %s)\n%s\n' "$label" "$rc" "$out"; status=1 ;;
+            esac
+          }
+
+          HARNAIS=crates/sim_harness
+
+          # **Le motif flottant est borné, jamais un fichier exclu.** Exclure le
+          # rapport ou le journal supprimerait l'invariant sur les deux fichiers
+          # qui en ont le plus besoin, et « aucun flottant sauf là où on en
+          # écrit » n'est pas un invariant. La forme extrait toutes les
+          # occurrences, puis compte celles qui ne sont **pas** sur une ligne de
+          # formatage.
+          #
+          # Mesuré, le fichier intermédiaire est **vide** : le harnais n'emploie
+          # aucun flottant, pas même à l'affichage, et la seconde ligne est donc
+          # satisfaite a fortiori. La borne existe parce que la règle du corpus,
+          # elle, tolère un flottant au formatage — un invariant à zéro qui ne
+          # tiendrait que par chance n'est pas un invariant.
+          rg -n '\bf64\b|\bf32\b' "$HARNAIS/src" > flottants.txt || true
+          hors=$(rg -cv 'format!\(|write!\(|writeln!\(|print!\(|println!\(' flottants.txt || echo 0)
+          if [ "$hors" = "0" ]; then
+            printf '  ok    critère 6  aucun flottant hors du formatage (%s ligne(s) extraite(s))\n' \
+                   "$(wc -l < flottants.txt | tr -d ' ')"
+          else
+            printf '  ECHEC critère 6  %s flottant(s) hors du formatage\n' "$hors"; status=1
+          fi
+          rm -f flottants.txt
+
+          # Une seule itération non ordonnée suffit à rendre le tableau de
+          # sortie non reproductible, donc la campagne nocturne incomparable.
+          forbid  "critère 6  table de hachage dans le harnais" -n 'HashMap|HashSet' "$HARNAIS/src"
+
+          # Insensible à la casse et **sans frontière de mot** : le manifeste ne
+          # doit porter ni une dépendance au moteur graphique, ni une de ses
+          # briques glissée en dépendance de test, ni sa feature activée.
+          forbid  "critère 6  moteur graphique dans le manifeste du harnais" -in 'bevy' "$HARNAIS/Cargo.toml"
+          cargo tree -p sim_harness --edges normal > arbre.txt
+          # Non vacuous : un arbre vide passerait le filtre sans rien garder.
+          require "critère 6  l'arbre du harnais est bien lu" -n 'core_engine' arbre.txt
+          forbid  "critère 6  paquet graphique dans l'arbre normal du harnais" -n 'bevy' arbre.txt
+          rm -f arbre.txt
+
+          # **La règle n°1, sous la seule forme qui puisse échouer.** Un
+          # `git diff` nu sur un checkout frais est vide par construction : un
+          # contrôle incapable d'échouer, qui donne l'illusion que la règle est
+          # gardée. Et la base de la PR ne convient pas davantage : ce workflow
+          # se déclenche aussi sur un push, où elle est vide — mesuré,
+          # `git diff origin/` rend « bad revision », code 128, à chaque
+          # exécution. Un rouge permanent ne se diagnostique pas, il se
+          # contourne, et le contournement évident est le `git diff` nu.
+          #
+          # Le point de branchement, lui, énonce la règle elle-même : le moteur
+          # n'a pas bougé depuis qu'on a branché.
+          git fetch --no-tags --depth=0 origin main 2>/dev/null || git fetch --no-tags origin main
+          base=$(git merge-base origin/main HEAD)
+          if git diff --exit-code "$base" -- crates/core_engine/ > moteur.diff; then
+            printf '  ok    critère 6  le moteur n'"'"'a pas bougé depuis %s\n' "$base"
+          else
+            printf '  ECHEC critère 6  le moteur a bougé\n'; cat moteur.diff; status=1
+          fi
+          rm -f moteur.diff
+
+          # **Contre-épreuve de présence.** Les paniques se mécanisent par un
+          # lint et non par une recherche textuelle : les tests unitaires du
+          # harnais vivent sous `#[cfg(test)]` dans les mêmes fichiers que la
+          # production, où le dépaquetage forcé est légitime. Une recherche
+          # serait rouge dès le premier test, et la seule correction disponible
+          # serait d'exclure un fichier entier — c'est-à-dire de perdre
+          # l'invariant sur la production de ce fichier. Le lint, lui, connaît
+          # la compilation de test.
+          #
+          # L'attribut vit dans la **bibliothèque**, et c'est là tout l'enjeu :
+          # le binaire fait six lignes, et tout le harnais est dans la
+          # bibliothèque. Posé sur le binaire, il garderait `fn main`.
+          require "critère 6  les paniques sont mécanisées par le lint" -n \
+                  'deny\(clippy::unwrap_used, clippy::expect_used, clippy::panic\)' "$HARNAIS/src/lib.rs"
+
+          exit $status
+
+      # ---- Étape 6 bis : clôture (TASK-157) ----
+      #
+      # **Contre-épreuves de présence.** Ces lignes doivent remonter quelque
+      # chose : un invariant dont la cible a disparu est vide de sens, et rien
+      # ne le dit. Elles complètent le bloc de TASK-154, qui interdit ; ici on
+      # exige.
+      - name: Clôture Étape 6 bis
+        run: |
+          set -euo pipefail
+          status=0
+          exiger() {
+            label=$1; shift
+            if rg -q "$@" 2>/dev/null; then
+              printf '  ok    %s\n' "$label"
+            else
+              printf '  ECHEC %s : attendu présent\n' "$label"; status=1
+            fi
+          }
+          interdire() {
+            label=$1; shift
+            out=$(rg "$@" 2>&1) && rc=0 || rc=$?
+            case $rc in
+              1) printf '  ok    %s\n' "$label" ;;
+              0) printf '  ECHEC %s\n%s\n' "$label" "$out"; status=1 ;;
+              *) printf '  ECHEC %s : rg a échoué (code %s)\n%s\n' "$label" "$rc" "$out"; status=1 ;;
+            esac
+          }
+
+          # Le fichier des API absentes existe **et n'est pas vide**. Un fichier
+          # vide obtenu en élargissant une visibilité serait un échec de
+          # l'étape : le manque disparaîtrait du seul document qui le porte.
+          test -s crates/sim_harness/MISSING_API.md
+          printf '  ok    critère 6  le fichier des API absentes est non vide\n'
+          exiger "critère 6  la décomposition de la courbe reste hors d'atteinte" \
+                 -n 'pub\(crate\) fn apply_permille' crates/core_engine/src/blinds/scaling.rs
+
+          # **La cible web du harnais, et elle seule — sur sa production.**
+          # Deux bornes, et chacune a sa raison. La cible historique apparaît
+          # trois fois sous le répertoire des workflows : c'est le job qui
+          # mesure le binaire du **jeu**, et l'exiger absente de là demanderait
+          # de le supprimer. Et l'audit de clôture doit pouvoir **nommer** la
+          # cible qu'il interdit : portée sur le répertoire entier, la garde se
+          # déclenche sur le test qui la vérifie — mesuré.
+          interdire "critère 4  cible web historique dans le harnais" -n \
+                    'wasm32-unknown-unknown' \
+                    crates/sim_harness/src crates/sim_harness/Cargo.toml
+
+          # Le harnais ne remonte dans aucune crate de jeu, à une exception près
+          # — la dépendance de développement du test d'accord, qui vit dans la
+          # crate d'interface et n'entre pas dans l'arbre normal.
+          interdire "critère 6  le harnais remonte dans une crate de jeu" -n \
+                    'sim_harness' crates/game_state/ crates/core_engine/ crates/shop_system/
+
+          # **Six types, une déclaration chacun.** Une migration mal faite laisse
+          # deux déclarations homonymes que le compilateur distingue et que le
+          # lecteur confond ; c'est le seul contrôle qui l'attrape.
+          compte=$(rg -c --no-filename 'struct RunOutcome|enum HandDecision|trait Policy\b|trait ShopPolicy|struct LockMask|struct SimRng' \
+                   crates/ -g '!**/tests/**' | paste -sd+ - | bc)
+          if [ "$compte" = "6" ]; then
+            printf '  ok    critère 6  les six types migrés sont déclarés une fois\n'
+          else
+            printf '  ECHEC critère 6  %s déclarations au lieu de six\n' "$compte"; status=1
+          fi
+
+          # Le bloc de glossaire est livré et nomme les vingt types. Le
+          # glossaire lui-même vit sur le corpus : aucun contrôle d'ici ne peut
+          # le lire, et ce qui se vérifie est la correspondance entre le code et
+          # le bloc.
+          exiger "critère 6  le bloc de glossaire est livré" -n \
+                 'Types du harnais de simulation' reports/glossaire-sim-harness.md
+
+          exit $status
+
+      # ---- Étape 6 bis : la porte d'équilibrage (TASK-154) ----
+      #
+      # **Ce ne sont pas cinq cents tirages, c'est toujours les mêmes cinq cents
+      # runs.** La porte est un test doré, pas un test statistique, et elle
+      # n'est donc jamais instable : elle ne peut échouer que si le code a
+      # changé, et le changement se lit dans le diff.
+      #
+      # **Ni tolérance, ni relance, ni moyenne.** Élargir la fourchette, ou
+      # n'échouer qu'au second dépassement, transforme un contrôle exact en
+      # approximation et laisse passer précisément les dérives lentes que la
+      # porte existe pour attraper. Rejouer la commande rejoue **le même calcul
+      # déterministe** et rend donc le même résultat : cela ne stabilise rien,
+      # cela double le temps de CI et cela installe l'idée que la porte est
+      # capricieuse. Et moyenner sur plusieurs graines remplacerait le test doré
+      # par un estimateur, dont la marge à cinq cents runs dépasse plusieurs
+      # points.
+      #
+      # **Ce que la porte compare est le rapport entier, pas le seul taux de
+      # victoire, et la mesure l'impose.** Au calibrage actuel le taux vaut zéro
+      # sur cent mille runs comme sur cinq cents, à toute graine. Une fourchette
+      # écrite sur cette grandeur serait soit nulle — donc rouge le jour où
+      # quelqu'un répare le jeu —, soit large — donc verte pendant toute la
+      # réparation. Le rapport, lui, porte les grandeurs qui discriminent
+      # aujourd'hui : le rapport score sur cible par ante, et les taux
+      # d'apparition, d'achat et de conservation des reliques.
+      #
+      # La cible reste **25 % – 40 %** de taux de victoire, et c'est le premier
+      # chiffre que le rapport d'équilibrage de TASK-156 doit instruire. Elle
+      # est écrite ici, une seule fois dans le dépôt.
+      #
+      # **La référence ne se met jamais à jour toute seule** — même discipline
+      # que la référence de taille du binaire web : une référence qui se réécrit
+      # depuis la CI enregistre la dérive au lieu de la signaler. Elle se change
+      # par une modification explicite de `ci/short-gate-report.txt`, revue
+      # comme le reste, dans la PR qui change le comportement.
+      - name: Porte d'équilibrage (passe courte)
+        run: |
+          set -euo pipefail
+          cargo run -p sim_harness --release -- \
+            --runs 500 --seed-base "$(cat ci/short-gate-seed-base.txt)" \
+            --cup standard --stake 1 \
+            --policy grid-aware --shop-policy budget \
+            --report > passe-courte.txt
+          diff -u ci/short-gate-report.txt passe-courte.txt
 
   # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en
   # `lto = "fat"` avec `codegen-units = 1` se compte en minutes ; l'agréger au

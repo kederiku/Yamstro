@@ -1,0 +1,157 @@
+name: Campagne nocturne
+
+# **Fichier séparé, et c'est la décision qui porte l'invariant.** Ajouter
+# `schedule:` au `on:` de `ci.yml` ferait tourner le job de validation chaque
+# nuit pour rien, et surtout ferait tourner cette campagne — neuf millions de
+# runs sur deux architectures — sur **chaque PR**. Il faudrait alors deux `if:`
+# correctifs, dont l'un garde précisément ce que le ticket appelle un piège. Ici
+# la non-exécution sur PR est une propriété du fichier : elle ne se retire pas
+# par mégarde.
+#
+# **Le job est dormant tant que ce fichier n'est pas sur la branche par
+# défaut.** Documenté : « Scheduled workflows run on the latest commit on the
+# default branch », et « This event will only trigger a workflow run if the
+# workflow file exists on the default branch » — pour `schedule:` comme pour
+# `workflow_dispatch:`. La première nuit sera donc celle qui suit la fusion de
+# l'étape, pas celle qui suit ce commit.
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read   # `gh run download` lit l'artefact de la veille
+
+jobs:
+  campagne:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Deux architectures, et c'est l'objet du job. Jusqu'ici le
+        # déterminisme n'était prouvé que sur la résolution d'une main : aucun
+        # test n'avait rejoué **une partie complète** — huit antes, quatre flux
+        # de RNG, une boutique, une chaîne de relances, un inventaire ordonné —
+        # sur deux machines. C'est la garantie sur laquelle reposent le partage
+        # de graines et l'anti-save-scum de l'Étape 10.
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain (pilotée par rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: nocturne-${{ matrix.runner }}
+
+      # La matrice complète est **six invocations**, pas une : mesuré, la sonde
+      # de main ne se répète pas sur la ligne de commande — `the argument
+      # '--policy <POLICY>' cannot be used multiple times`. Chaque invocation
+      # couvre les cinq gobelets et les trois mises.
+      #
+      # Cent mille runs par cellule : mesuré, une invocation prend treize
+      # secondes. Le débit n'est pas la contrainte de cette étape.
+      - name: Campagne complète, six sondes croisées
+        run: |
+          set -euo pipefail
+          mkdir -p nuit/rapports nuit/csv
+          graine=$(cat ci/short-gate-seed-base.txt)
+          for main in greedy grid-aware random; do
+            for achat in budget synergy; do
+              cellule="${main}-${achat}"
+              cargo run -p sim_harness --release -- \
+                --runs 100000 --seed-base "${graine}" \
+                --policy "${main}" --shop-policy "${achat}" \
+                --out "nuit/csv/${cellule}.csv" \
+                --report > "nuit/rapports/${cellule}.txt"
+            done
+          done
+
+      # L'empreinte porte sur les **octets du fichier**, jamais sur un parsage :
+      # un terminateur, un espace de fin ou un BOM qui différerait est
+      # précisément le genre de détail qui diverge entre deux plateformes, et un
+      # parsage tolérant les masquerait tous les trois.
+      - name: Empreintes des tableaux
+        run: |
+          set -euo pipefail
+          (cd nuit/csv && sha256sum ./*.csv | sort -k2) > nuit/empreintes.txt
+          cat nuit/empreintes.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rapports-${{ matrix.runner }}
+          path: nuit/rapports/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: empreintes-${{ matrix.runner }}
+          path: nuit/empreintes.txt
+
+      # **Rétention courte sur les tableaux, et elle dit ce qu'ils sont.** Ce
+      # qui rend la nuit n comparable à la nuit n-1, c'est le rapport, que le
+      # comparateur lit et qui pèse deux kilo-octets. Le tableau, lui, est la
+      # pièce à conviction qu'un humain fouille une fois, la nuit où un chiffre
+      # paraît faux. Mesuré : deux cent deux mégaoctets par invocation, deux
+      # cent cinquante compressés par nuit pour les douze — vingt-deux
+      # gigaoctets en régime à la rétention par défaut.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: csv-${{ matrix.runner }}
+          path: nuit/csv/
+          retention-days: 7
+
+  comparaison:
+    needs: campagne
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: empreintes-*
+          path: empreintes/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rapports-ubuntu-latest
+          path: nuit/
+
+      # Un écart d'empreinte **fait échouer le job**, et celui-là seulement : ce
+      # n'est pas une dérive d'équilibrage, c'est une rupture du déterminisme, et
+      # elle invalide toute la campagne.
+      - name: Déterminisme entre les deux architectures
+        run: |
+          set -euo pipefail
+          if ! diff -u empreintes/empreintes-ubuntu-latest/empreintes.txt \
+                      empreintes/empreintes-ubuntu-24.04-arm/empreintes.txt; then
+            echo "ECHEC : les empreintes divergent entre x86 et ARM."
+            exit 1
+          fi
+          echo "les deux architectures rendent les mêmes octets."
+
+      # **La dérive signale, elle ne fait pas échouer.** Un job nocturne rouge
+      # que personne ne peut rejouer se désactive au bout de trois nuits, et
+      # l'archivage des artefacts disparaît avec lui.
+      #
+      # Aucune assertion sur le taux de victoire n'est câblée ici : au
+      # calibrage actuel les quatre-vingt-dix cellules valent zéro, si bien
+      # qu'une fourchette écrirait la même ligne chaque nuit et qu'une
+      # fourchette englobante ne se déclencherait jamais. Le comparateur
+      # ci-dessous signale déjà toute cellule qui bouge — la première qui se
+      # mettra à gagner y apparaîtra d'elle-même.
+      - name: Dérive par rapport à la veille
+        run: |
+          set -euo pipefail
+          mkdir -p veille
+          precedent=$(gh run list --workflow nightly.yml --status success \
+                        --limit 2 --json databaseId --jq '.[1].databaseId' || true)
+          if [ -n "${precedent}" ]; then
+            gh run download "${precedent}" -n rapports-ubuntu-latest -D veille || true
+          fi
+          ci/compare-nightly.sh veille nuit | tee "${GITHUB_STEP_SUMMARY:-/dev/null}"
+        env:
+          GH_TOKEN: ${{ github.token }}

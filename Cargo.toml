@@ -6,6 +6,7 @@ members = [
   "crates/game_state",
   "crates/ui_and_juice",
   "crates/shop_system",
+  "crates/sim_harness",
 ]
 
 [workspace.package]
@@ -16,8 +17,14 @@ rust-version = "1.95"
 bevy         = { version = "=0.19.1", default-features = false }
 bevy_ecs     = "=0.19.1"
 bevy_reflect = "=0.19.1"
+# Les trois dépendances du harnais de simulation, introduites par TASK-141 et
+# **bornées**, jamais par un joker : `deny.toml` pose `wildcards = "deny"` depuis
+# TASK-01. Le caret majeur suffit, `Cargo.lock` étant versionné.
+clap         = { version = "4", features = ["derive"] }
+csv          = "1"
 rand         = "0.10"
 rand_chacha  = { version = "0.10", features = ["serde"] }
+rayon        = "1"
 serde        = { version = "1", features = ["derive"] }
 serde_json   = "1"
 smallvec     = { version = "1", features = ["serde", "union"] }

@@ -1,0 +1,32 @@
+# crates/sim_harness/Cargo.toml
+[package]
+name = "sim_harness"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+# **Aucune feature n'est activée ici**, à l'inverse des quatre crates de jeu.
+# La formulation est en toutes lettres et ne recopie pas la chaîne qu'elle
+# proscrit : la porte de CI de TASK-154 lit ce fichier sans tenir compte de la
+# casse, et un commentaire qui citerait l'interdit la ferait rougir.
+#
+# La version accompagne le chemin, comme sur les trois autres crates : une
+# dépendance de chemin nue est comptée **joker** par `cargo deny`, que
+# `wildcards = "deny"` refuse. Mesuré ici : `error[wildcard]: found 1 wildcard
+# dependency for crate 'sim_harness'`.
+core_engine = { path = "../core_engine", version = "0.1.0" }
+clap = { workspace = true }
+csv = { workspace = true }
+# **Huitième dépendance, et la liste se ferme ici.** Le trait qui porte le
+# tirage dans un intervalle vit dans cette crate et n'est ré-exporté par aucune
+# autre : mesuré, le chemin par le générateur ChaCha n'existe pas. Les deux
+# solutions de rechange étaient pires — réécrire un échantillonnage uniforme
+# sans biais à la main, qui paraît juste et l'est subtilement moins, ou
+# détourner une fonction de manche du moteur, qui marche et ment.
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+smallvec = { workspace = true }
