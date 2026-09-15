@@ -28,9 +28,15 @@
 use bevy::prelude::*;
 use game_state::GameStatePlugin;
 use ui_and_juice::JuicePlugin;
+use ui_and_juice::graphics::VisualEffectsPlugin;
 
 fn main() {
     App::new()
-        .add_plugins((DefaultPlugins, GameStatePlugin, JuicePlugin))
+        .add_plugins((
+            DefaultPlugins,
+            GameStatePlugin,
+            JuicePlugin,
+            VisualEffectsPlugin,
+        ))
         .run();
 }

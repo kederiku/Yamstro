@@ -1760,6 +1760,81 @@ jobs:
 
           exit $status
 
+      # ---- Étape 7 : direction artistique et shaders (TASK-82 et suivants) ----
+      #
+      # **L'étape est ouverte le 15 septembre 2026, avant les Étapes 10 et 9**,
+      # par dérogation à l'ADR-009 ; la dérogation est consignée dans la v2 du
+      # ticket et du backlog. TASK-82 n'a posé que l'infrastructure : un
+      # module, un plugin sans matériau, trois shaders qui rendent une couleur
+      # opaque.
+      #
+      # **Ancrer sur l'acte, jamais sur un nom nu.** La doc de module de
+      # `lib.rs` nomme les combinateurs disparus pour dire qu'ils n'existent
+      # plus : la garde nue du ticket ne peut pas être vide, et le volet 1
+      # interdit déjà `run_in(` sur l'appel et `RenderGraph|ViewNode` sur
+      # `crates/`. Ici ne restent que les noms sans aucun emploi légitime, y
+      # compris en commentaire, et `assets/` que le volet 1 ne couvre pas. La
+      # portée est `crates/` et `assets/`, **jamais `.`** : les tickets citent
+      # les orthographes proscrites pour les proscrire.
+      - name: Invariants normatifs Étape 7
+        run: |
+          set -euo pipefail
+          status=0
+          forbid() {
+            label=$1; shift
+            out=$(rg "$@" 2>&1) && rc=0 || rc=$?
+            case $rc in
+              1) printf '  ok    %s\n' "$label" ;;
+              0) printf '  ECHEC %s\n%s\n' "$label" "$out"; status=1 ;;
+              *) printf '  ECHEC %s : rg a échoué (code %s)\n%s\n' "$label" "$rc" "$out"; status=1 ;;
+            esac
+          }
+          require() {
+            label=$1; shift
+            out=$(rg "$@" 2>&1) && rc=0 || rc=$?
+            case $rc in
+              0) printf '  ok    %s\n' "$label" ;;
+              *) printf '  ECHEC %s : motif attendu absent (code %s)\n%s\n' "$label" "$rc" "$out"; status=1 ;;
+            esac
+          }
+
+          JUICE=crates/ui_and_juice
+          SHADERS=assets/shaders
+
+          # TASK-82 : le module et le plugin, déclarés là où le ticket les met.
+          # Un module de `ui_and_juice`, pas une crate de plus : le sens des
+          # dépendances est gardé par le volet 1, « dépendance inverse vers le
+          # juice ».
+          require "TASK-82  module graphics déclaré"      -n '^pub mod graphics;$' "$JUICE/src/lib.rs"
+          require "TASK-82  plugin ré-exporté"            -n '^pub use plugin::VisualEffectsPlugin;$' "$JUICE/src/graphics/mod.rs"
+          require "TASK-82  le plugin existe"             -n '^pub struct VisualEffectsPlugin;$' "$JUICE/src/graphics/plugin.rs"
+
+          # Les trois chemins sont publiés par le plugin, en une seule source,
+          # et les trois fichiers existent sous `assets/`. Un fichier vide
+          # serait « présent » et ferait quand même basculer le repli de
+          # TASK-92 : chaque shader porte son point d'entrée.
+          require "TASK-82  chemin du vortex publié"      -n '^pub const PSYCHE_BACKGROUND_SHADER: &str = "shaders/psyche_background\.wgsl";$' "$JUICE/src/graphics/plugin.rs"
+          require "TASK-82  chemin du filtre publié"      -n '^pub const CRT_POSTPROCESS_SHADER: &str = "shaders/crt_postprocess\.wgsl";$' "$JUICE/src/graphics/plugin.rs"
+          require "TASK-82  chemin du contour publié"     -n '^pub const HOLO_CARD_SHADER: &str = "shaders/holo_card\.wgsl";$' "$JUICE/src/graphics/plugin.rs"
+          require "critère 6  point d'entrée du vortex"   -n '^fn fragment\(' "$SHADERS/psyche_background.wgsl"
+          require "critère 6  point d'entrée du filtre"   -n '^fn fragment\(' "$SHADERS/crt_postprocess.wgsl"
+          require "critère 6  point d'entrée du contour"  -n '^fn fragment\(' "$SHADERS/holo_card.wgsl"
+
+          # Critère 1 : API de rendu 0.19. Ces noms n'ont plus aucun emploi,
+          # pas même pour expliquer la règle : c'est ce commentaire-ci qui
+          # l'explique, et il ne les nomme pas.
+          forbid  "critère 1  nœud cathodique de la v1"   -n 'CrtPostProcessNode' crates/ assets/
+          forbid  "critère 1  priorité wgpu renommée"     -n 'WgpuSettingsPriority::Compatibility' crates/ assets/
+          forbid  "critère 1  dépendances proscrites"     -n 'cosmic-text|bevy_scene' "$JUICE" assets/
+          forbid  "critère 1  graphe de rendu dans un shader" -n 'RenderGraph|ViewNode|\brun_(in|after|before)\b' assets/
+
+          # Critère 8 : la cible de mesure monte le plugin. Une cible qui
+          # l'omettrait mesurerait un binaire amputé, et l'écart jouerait à la
+          # baisse, sans déclencher la porte de taille.
+          require "critère 8  plugin monté dans la cible" -n '^\s+VisualEffectsPlugin,$' "$JUICE/src/bin/wasm_size.rs"
+
+          exit $status
+
       # ---- Étape 6 bis : la porte d'équilibrage (TASK-154) ----
       #
       # **Ce ne sont pas cinq cents tirages, c'est toujours les mêmes cinq cents
