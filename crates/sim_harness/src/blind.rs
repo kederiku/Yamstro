@@ -252,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_api_has_the_three_entries() {
+    fn test_missing_api_has_the_known_entries() {
         let chemin = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("MISSING_API.md");
         let contenu = std::fs::read_to_string(&chemin)
             .unwrap_or_else(|erreur| panic!("{} : {erreur}", chemin.display()));
@@ -265,9 +265,16 @@ mod tests {
         ] {
             assert!(contenu.contains(attendu), "l'entrée « {attendu} » manque");
         }
-        // Quatre entrées, quatre propriétaires : 1 pour le catalogue de
-        // gobelets, 6 pour l'assemblage et la décomposition, 2 pour l'ordre.
-        assert_eq!(contenu.matches("Étape propriétaire").count(), 4);
+        // **Au moins quatre entrées, jamais exactement quatre.** Le compte
+        // exact était une porte comptante sur un document conçu pour grandir :
+        // le premier rapport d'équilibrage y a versé deux manques révélés par
+        // la campagne, et la garde a échoué **parce que le fichier avait fait
+        // son travail**. C'est le même défaut que toute garde qui compte au
+        // lieu de vérifier une présence.
+        assert!(
+            contenu.matches("Étape propriétaire").count() >= 4,
+            "les quatre entrées connues d'avance doivent porter leur propriétaire"
+        );
         for proprietaire in [
             "Étape propriétaire : 1",
             "Étape propriétaire : 6",

@@ -119,3 +119,65 @@ raisonnement vaudra pour l'identifiant de gobelet, à qui `Ord` manque de la mê
 façon.
 
 **Étape propriétaire : 2**
+
+---
+
+## 5. Le boss d'une manche n'est pas récupérable une fois la manche assemblée
+
+*Ajoutée par le premier rapport d'équilibrage, après cent cinquante mille runs.*
+
+Le tirage de boss rend une définition, dont seul le **modificateur** survit dans
+la définition de manche. L'identifiant, lui, est perdu : une fois la manche
+posée, plus rien ne dit **quel** boss a été tiré.
+
+La conséquence s'est vue au premier usage. Le rapport devait trancher un
+arbitrage sur *La Cage* — son taux d'échec comparé à celui des cinq autres boss —
+et la colonne de manche de défaite du tableau de sortie ne porte que le **type**
+de manche, jamais le boss. Le chiffre a dû être obtenu par une sonde jetable qui
+reconstruit la correspondance modificateur vers identifiant en rejouant le
+catalogue, ce qui ne tient que tant que **deux boss ne partagent pas le même
+modificateur**. Le jour où l'Étape 9 en livre quinze, cette reconstruction cesse
+d'être fiable sans prévenir.
+
+```rust
+pub struct BlindDefinition {
+    // …
+    pub boss: Option<BossId>,
+}
+```
+
+Un champ, non un accesseur : la définition est construite par littéral en
+plusieurs endroits, et un accesseur devrait deviner ce que le champ porterait.
+
+**Étape propriétaire : 6** — c'est elle qui a posé le catalogue de boss et
+l'assemblage de manche. Sans ce champ, **aucune analyse par boss n'est possible**,
+et l'Étape 9 en livrera quinze.
+
+---
+
+## 6. La contribution d'une relique ne se lit que dans le journal de score
+
+*Ajoutée par le premier rapport d'équilibrage.*
+
+Le budget de puissance par rareté est un invariant normatif du glossaire, et la
+seule façon de l'éprouver est de mesurer ce que chaque relique **apporte** au
+score. Or rien n'expose cette grandeur : le harnais doit relire le journal des
+paliers de score et imputer lui-même chaque palier à la relique qui l'a émis, en
+s'appuyant sur la variante de source du palier.
+
+L'imputation est correcte, mais elle est **refaite dans le harnais**, donc
+susceptible de diverger de ce que le jeu comptabilise — et elle interdit à toute
+autre crate de poser la même question sans réécrire le même code.
+
+```rust
+pub fn contribution_par_relique(steps: &[ScoreStep]) -> Vec<(u32, u64)>;
+```
+
+Une liste de paires, indexée par l'identifiant unique du slot et non par
+l'identifiant de relique : deux exemplaires de la même relique contribuent
+séparément, et c'est ce que le rapport doit pouvoir distinguer. La forme de liste
+évite par ailleurs l'ordre manquant de l'entrée n° 4.
+
+**Étape propriétaire : 2** — c'est elle qui a posé le journal de score et les
+variantes de source. Le rapport d'équilibrage sera reconduit à chaque étape de
+contenu ; cette imputation sera refaite à chaque fois.
