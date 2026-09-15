@@ -8,7 +8,17 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
+      # `fetch-depth: 0` ressemble à un réglage de performance qu'on
+      # « optimise » un jour de CI lente ; c'est en réalité ce qui rend la
+      # règle n°1 exécutable. Le clone par défaut est superficiel et ne porte
+      # que la référence de l'événement : `origin/main est une révision inconnue`,
+      # et le point de branchement est alors introuvable. Retirée, cette
+      # ligne ne casse pas la vérification du moteur — elle la fait échouer
+      # pour une raison qui n'a rien à voir avec le moteur, c'est-à-dire de la
+      # pire façon.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       # `rustup show` n'installe plus la toolchain active depuis rustup 1.28.0.
       # L'auto-installation est revenue en 1.28.1 et le runner porte 1.29.0,
@@ -1565,6 +1575,162 @@ jobs:
           # de la boutique fait tomber ces deux gardes-là.
 
           exit $status
+
+      # ---- Étape 6 bis : le harnais de simulation (TASK-154) ----
+      #
+      # **Une exigence qu'aucune commande ne vérifie n'est pas une exigence,
+      # c'est un vœu.** Les motifs des audits amont sont portés sur les
+      # répertoires des quatre crates de jeu ; aucun ne balaye celui du harnais.
+      #
+      # Ce bloc **ajoute**, il ne réécrit rien. Et il ne recopie pas non plus ce
+      # qui est déjà gardé : le littéral de la table de rareté est interdit dans
+      # le harnais depuis TASK-148, la courbe est gardée structurellement sur
+      # l'ensemble des crates, et le flottant comme la table de hachage le sont
+      # déjà fichier par fichier sur trois fichiers. Un second endroit à
+      # corriger le jour où un chemin change, c'est un endroit qui restera faux.
+      - name: Invariants normatifs Étape 6 bis
+        run: |
+          set -euo pipefail
+          status=0
+          # Même lecture du code de sortie qu'au volet 1 : `! rg` confond
+          # « rien trouvé » et « rg a échoué ».
+          forbid() {
+            label=$1; shift
+            out=$(rg "$@" 2>&1) && rc=0 || rc=$?
+            case $rc in
+              1) printf '  ok    %s\n' "$label" ;;
+              0) printf '  ECHEC %s\n%s\n' "$label" "$out"; status=1 ;;
+              *) printf '  ECHEC %s : rg a échoué (code %s)\n%s\n' "$label" "$rc" "$out"; status=1 ;;
+            esac
+          }
+          require() {
+            label=$1; shift
+            out=$(rg "$@" 2>&1) && rc=0 || rc=$?
+            case $rc in
+              0) printf '  ok    %s\n' "$label" ;;
+              *) printf '  ECHEC %s : motif attendu absent (code %s)\n%s\n' "$label" "$rc" "$out"; status=1 ;;
+            esac
+          }
+
+          HARNAIS=crates/sim_harness
+
+          # **Le motif flottant est borné, jamais un fichier exclu.** Exclure le
+          # rapport ou le journal supprimerait l'invariant sur les deux fichiers
+          # qui en ont le plus besoin, et « aucun flottant sauf là où on en
+          # écrit » n'est pas un invariant. La forme extrait toutes les
+          # occurrences, puis compte celles qui ne sont **pas** sur une ligne de
+          # formatage.
+          #
+          # Mesuré, le fichier intermédiaire est **vide** : le harnais n'emploie
+          # aucun flottant, pas même à l'affichage, et la seconde ligne est donc
+          # satisfaite a fortiori. La borne existe parce que la règle du corpus,
+          # elle, tolère un flottant au formatage — un invariant à zéro qui ne
+          # tiendrait que par chance n'est pas un invariant.
+          rg -n '\bf64\b|\bf32\b' "$HARNAIS/src" > flottants.txt || true
+          hors=$(rg -cv 'format!\(|write!\(|writeln!\(|print!\(|println!\(' flottants.txt || echo 0)
+          if [ "$hors" = "0" ]; then
+            printf '  ok    critère 6  aucun flottant hors du formatage (%s ligne(s) extraite(s))\n' \
+                   "$(wc -l < flottants.txt | tr -d ' ')"
+          else
+            printf '  ECHEC critère 6  %s flottant(s) hors du formatage\n' "$hors"; status=1
+          fi
+          rm -f flottants.txt
+
+          # Une seule itération non ordonnée suffit à rendre le tableau de
+          # sortie non reproductible, donc la campagne nocturne incomparable.
+          forbid  "critère 6  table de hachage dans le harnais" -n 'HashMap|HashSet' "$HARNAIS/src"
+
+          # Insensible à la casse et **sans frontière de mot** : le manifeste ne
+          # doit porter ni une dépendance au moteur graphique, ni une de ses
+          # briques glissée en dépendance de test, ni sa feature activée.
+          forbid  "critère 6  moteur graphique dans le manifeste du harnais" -in 'bevy' "$HARNAIS/Cargo.toml"
+          cargo tree -p sim_harness --edges normal > arbre.txt
+          # Non vacuous : un arbre vide passerait le filtre sans rien garder.
+          require "critère 6  l'arbre du harnais est bien lu" -n 'core_engine' arbre.txt
+          forbid  "critère 6  paquet graphique dans l'arbre normal du harnais" -n 'bevy' arbre.txt
+          rm -f arbre.txt
+
+          # **La règle n°1, sous la seule forme qui puisse échouer.** Un
+          # `git diff` nu sur un checkout frais est vide par construction : un
+          # contrôle incapable d'échouer, qui donne l'illusion que la règle est
+          # gardée. Et la base de la PR ne convient pas davantage : ce workflow
+          # se déclenche aussi sur un push, où elle est vide — mesuré,
+          # `git diff origin/` rend « bad revision », code 128, à chaque
+          # exécution. Un rouge permanent ne se diagnostique pas, il se
+          # contourne, et le contournement évident est le `git diff` nu.
+          #
+          # Le point de branchement, lui, énonce la règle elle-même : le moteur
+          # n'a pas bougé depuis qu'on a branché.
+          git fetch --no-tags --depth=0 origin main 2>/dev/null || git fetch --no-tags origin main
+          base=$(git merge-base origin/main HEAD)
+          if git diff --exit-code "$base" -- crates/core_engine/ > moteur.diff; then
+            printf '  ok    critère 6  le moteur n'"'"'a pas bougé depuis %s\n' "$base"
+          else
+            printf '  ECHEC critère 6  le moteur a bougé\n'; cat moteur.diff; status=1
+          fi
+          rm -f moteur.diff
+
+          # **Contre-épreuve de présence.** Les paniques se mécanisent par un
+          # lint et non par une recherche textuelle : les tests unitaires du
+          # harnais vivent sous `#[cfg(test)]` dans les mêmes fichiers que la
+          # production, où le dépaquetage forcé est légitime. Une recherche
+          # serait rouge dès le premier test, et la seule correction disponible
+          # serait d'exclure un fichier entier — c'est-à-dire de perdre
+          # l'invariant sur la production de ce fichier. Le lint, lui, connaît
+          # la compilation de test.
+          #
+          # L'attribut vit dans la **bibliothèque**, et c'est là tout l'enjeu :
+          # le binaire fait six lignes, et tout le harnais est dans la
+          # bibliothèque. Posé sur le binaire, il garderait `fn main`.
+          require "critère 6  les paniques sont mécanisées par le lint" -n \
+                  'deny\(clippy::unwrap_used, clippy::expect_used, clippy::panic\)' "$HARNAIS/src/lib.rs"
+
+          exit $status
+
+      # ---- Étape 6 bis : la porte d'équilibrage (TASK-154) ----
+      #
+      # **Ce ne sont pas cinq cents tirages, c'est toujours les mêmes cinq cents
+      # runs.** La porte est un test doré, pas un test statistique, et elle
+      # n'est donc jamais instable : elle ne peut échouer que si le code a
+      # changé, et le changement se lit dans le diff.
+      #
+      # **Ni tolérance, ni relance, ni moyenne.** Élargir la fourchette, ou
+      # n'échouer qu'au second dépassement, transforme un contrôle exact en
+      # approximation et laisse passer précisément les dérives lentes que la
+      # porte existe pour attraper. Rejouer la commande rejoue **le même calcul
+      # déterministe** et rend donc le même résultat : cela ne stabilise rien,
+      # cela double le temps de CI et cela installe l'idée que la porte est
+      # capricieuse. Et moyenner sur plusieurs graines remplacerait le test doré
+      # par un estimateur, dont la marge à cinq cents runs dépasse plusieurs
+      # points.
+      #
+      # **Ce que la porte compare est le rapport entier, pas le seul taux de
+      # victoire, et la mesure l'impose.** Au calibrage actuel le taux vaut zéro
+      # sur cent mille runs comme sur cinq cents, à toute graine. Une fourchette
+      # écrite sur cette grandeur serait soit nulle — donc rouge le jour où
+      # quelqu'un répare le jeu —, soit large — donc verte pendant toute la
+      # réparation. Le rapport, lui, porte les grandeurs qui discriminent
+      # aujourd'hui : le rapport score sur cible par ante, et les taux
+      # d'apparition, d'achat et de conservation des reliques.
+      #
+      # La cible reste **25 % – 40 %** de taux de victoire, et c'est le premier
+      # chiffre que le rapport d'équilibrage de TASK-156 doit instruire. Elle
+      # est écrite ici, une seule fois dans le dépôt.
+      #
+      # **La référence ne se met jamais à jour toute seule** — même discipline
+      # que la référence de taille du binaire web : une référence qui se réécrit
+      # depuis la CI enregistre la dérive au lieu de la signaler. Elle se change
+      # par une modification explicite de `ci/short-gate-report.txt`, revue
+      # comme le reste, dans la PR qui change le comportement.
+      - name: Porte d'équilibrage (passe courte)
+        run: |
+          set -euo pipefail
+          cargo run -p sim_harness --release -- \
+            --runs 500 --seed-base "$(cat ci/short-gate-seed-base.txt)" \
+            --cup standard --stake 1 \
+            --policy grid-aware --shop-policy budget \
+            --report > passe-courte.txt
+          diff -u ci/short-gate-report.txt passe-courte.txt
 
   # Job **séparé**, et c'est délibéré. La compilation de Bevy pour le web en
   # `lto = "fat"` avec `codegen-units = 1` se compte en minutes ; l'agréger au

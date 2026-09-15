@@ -9,6 +9,22 @@
 //!
 //! Le binaire, lui, tient en trois lignes : il appelle [`run`].
 
+// **Les paniques se mécanisent par un lint, pas par une recherche textuelle.**
+// Les tests unitaires du harnais vivent sous `#[cfg(test)]` dans les mêmes
+// fichiers que la production, où le dépaquetage forcé est légitime : une
+// recherche serait rouge dès le premier test, et la seule correction
+// disponible serait d'exclure un fichier entier — c'est-à-dire de perdre
+// l'invariant sur la production de ce fichier. Le lint, lui, connaît la
+// compilation de test.
+//
+// **L'attribut vit ici, et pas sur le binaire.** Celui-ci fait six lignes ;
+// tout le harnais est dans cette bibliothèque. Posé là-bas, il garderait
+// `fn main` et rien d'autre.
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
+
 pub mod blind;
 pub mod campaign;
 pub mod config;
