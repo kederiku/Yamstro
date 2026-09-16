@@ -1892,6 +1892,34 @@ jobs:
           forbid  "TASK-83  drapeau déclaré dans graphics"  -n '\benabled\s*:' "$JUICE/src/graphics"
           forbid  "TASK-83  drapeau lu dans graphics"       -n '\.enabled\b' "$JUICE/src/graphics"
 
+          # TASK-84 : le premier matériau, forme A, et son bloc de 64 octets.
+          # Un seul `#[uniform(0)]` par matériau, ancré sur l'attribut en tête
+          # de ligne, la doc ayant le droit de le nommer ; jamais la forme B ;
+          # aucun champ `time`, le mot restant libre puisque le bloc verbatim
+          # l'emploie pour dire qu'il n'y en a pas ; ni `Component` ni
+          # `Resource` sur un matériau ; aucune couleur ni défaut ici, les
+          # palettes sont TASK-86 ; le remplissage explicite à l'offset 56 et
+          # les six offsets en commentaire, seule façon de relire les deux
+          # blocs côte à côte. Le chemin du shader est celui que le plugin
+          # publie, en une seule orthographe.
+          count() {
+            label=$1; expected=$2; shift 2
+            n=$( (rg "$@" || true) | wc -l | tr -d ' ')
+            if [ "$n" = "$expected" ]; then printf '  ok    %s\n' "$label"; else printf '  ECHEC %s : %s occurrence(s), %s attendue(s)\n' "$label" "$n" "$expected"; status=1; fi
+          }
+          BG=$JUICE/src/graphics/background.rs
+          require "TASK-84  module background déclaré"       -n '^pub mod background;$' "$JUICE/src/graphics/mod.rs"
+          require "TASK-84  le matériau est un Material2d"   -n '^impl Material2d for BackgroundMaterial \{$' "$BG"
+          require "TASK-84  shader désigné par la source unique" -n '^\s+PSYCHE_BACKGROUND_SHADER\.into\(\)$' "$BG"
+          require "TASK-84  le plugin enregistre le matériau" -n '^\s+app\.add_plugins\(Material2dPlugin::<BackgroundMaterial>::default\(\)\);$' "$JUICE/src/graphics/plugin.rs"
+          require "critère 2  remplissage explicite à l'offset 56" -n '^\s+pub _pad: Vec2,\s*// offset 56' "$BG"
+          count   "critère 2  six offsets en commentaire" 6 -o '// offset +(0|16|32|48|52|56),' "$BG"
+          count   "critère 2  un seul uniform(0) dans le matériau" 1 -n '^\s*#\[uniform\(0' "$BG"
+          forbid  "critère 2  forme B mélangée"              -n '^\s*#\[uniform\(0,' "$BG"
+          forbid  "TASK-84  champ time dans l'uniforme"      -n '^\s*(pub\s+)?time\s*:' "$BG"
+          forbid  "TASK-84  matériau composant ou ressource" -n 'derive\([^)]*(Component|Resource)' "$BG"
+          forbid  "TASK-84  défaut ou couleur dans le matériau" -n '^impl Default for|Srgba::hex\(|LinearRgba::(new|rgb|rgba)\(|Color::' "$BG"
+
           exit $status
 
       # ---- Passe rand 0.10 et Default (15 septembre 2026) ----

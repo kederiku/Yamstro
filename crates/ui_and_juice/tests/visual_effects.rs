@@ -6,23 +6,27 @@
 //! expose : lui-même, et les chemins des trois shaders.
 //!
 //! **Headless, sans plugin de rendu.** `MinimalPlugins` ne monte ni le serveur
-//! d'assets ni le rendu ; le type `Shader` n'y est enregistré par personne. Le
-//! plugin doit donc démarrer sans rien réclamer de ce qu'il n'a pas.
+//! d'assets ni le rendu ; le type `Shader` n'y est enregistré par personne.
+//! Depuis TASK-84, le plugin enregistre un matériau, et `Material2dPlugin`
+//! appelle `init_asset`, qui lit `AssetServer` : les tests montent donc
+//! `AssetPlugin`, et toujours rien du rendu. Le plugin ne réclame rien de plus.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
+use bevy::render::render_resource::ShaderType;
 use ui_and_juice::graphics::VisualEffectsPlugin;
+use ui_and_juice::graphics::background::{BackgroundMaterial, BackgroundUniform};
 use ui_and_juice::graphics::plugin::SHADER_PATHS;
 use ui_and_juice::settings::{CrtSettings, JuiceSettings, SafeMode};
 
-/// Trois mises à jour, aucune panique : le plugin se monte seul, sans état,
-/// sans assets et sans rendu.
+/// Trois mises à jour, aucune panique : le plugin se monte sans rendu, avec le
+/// seul serveur d'assets.
 #[test]
 fn test_visual_effects_plugin_boots_headless() {
-    let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VisualEffectsPlugin));
+    let mut app = app_headless();
 
     app.update();
     app.update();
@@ -64,10 +68,11 @@ fn test_three_shader_files_exist() {
     );
 }
 
-/// Une application headless avec le seul plugin de l'étape.
+/// Une application headless avec le plugin de l'étape : `MinimalPlugins`, le
+/// serveur d'assets qu'exige tout `Material2dPlugin`, et rien du rendu.
 fn app_headless() -> App {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VisualEffectsPlugin));
+    app.add_plugins((MinimalPlugins, AssetPlugin::default(), VisualEffectsPlugin));
     app
 }
 
@@ -162,4 +167,29 @@ fn test_zero_intensity_equals_disabled() {
     );
 
     assert!(!nominal.is_active(&SafeMode { enabled: true }));
+}
+
+/// Le bloc du vortex fait 64 octets, multiple de 16 : trois `LinearRgba`, deux
+/// `f32`, et le remplissage explicite. Les deux assertions, pas la première
+/// seule : un bloc de 80 octets est aussi un multiple de 16, et un décalage
+/// d'alignement ne lève aucune erreur, il produit des couleurs fausses.
+#[test]
+fn test_background_uniform_is_16_byte_aligned() {
+    let taille = BackgroundUniform::min_size().get();
+    assert_eq!(taille % 16, 0, "bloc non aligné sur 16 octets : {taille}");
+    assert_eq!(taille, 64, "bloc de {taille} octets, 64 attendus");
+}
+
+/// Le plugin enregistre le matériau du fond : `Assets<BackgroundMaterial>`
+/// existe après le montage. La garde de CI voit la ligne d'enregistrement ; ce
+/// test voit qu'elle compile et qu'elle s'exécute.
+#[test]
+fn test_background_material_asset_is_registered() {
+    let mut app = app_headless();
+    app.update();
+
+    assert!(
+        app.world()
+            .contains_resource::<Assets<BackgroundMaterial>>()
+    );
 }

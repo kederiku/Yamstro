@@ -13,14 +13,21 @@ publish = false
 # est comptée comme une dépendance joker, que `deny.toml` refuse.
 core_engine = { path = "../core_engine", version = "0.1.0", features = ["bevy"] }
 game_state = { path = "../game_state", version = "0.1.0" }
-# Liste strictement identique à celle de `game_state` : ni `bevy_audio`, ni
-# `vorbis`, aucune feature 3D. En 0.19 `audio` n'est plus impliquée par `2d`,
-# `3d` ni `ui`, et une feature absente l'est **sans erreur de compilation** :
-# cette liste se lit comme un contrat.
+# Liste identique à celle de `game_state`, **plus `bevy_sprite_render`** : ni
+# `bevy_audio`, ni `vorbis`, aucune feature 3D. En 0.19 `audio` n'est plus
+# impliquée par `2d`, `3d` ni `ui`, et une feature absente l'est **sans erreur
+# de compilation** : cette liste se lit comme un contrat.
+#
+# `bevy_sprite_render` est la crate de `Material2d`, `Material2dPlugin` et
+# `MeshMaterial2d` (`bevy_sprite_render-0.19.1/src/mesh2d/material.rs`), que
+# `bevy_sprite` n'implique pas (`bevy_internal-0.19.1/Cargo.toml:166`) : mesuré
+# à TASK-82, elle était absente de tout l'arbre. Seule cette crate déclare des
+# matériaux (TASK-84), `game_state` n'en a pas l'usage. Notre `webgl2` lui
+# passe `webgl` de lui-même.
 bevy = { workspace = true, default-features = false, features = [
   "bevy_asset", "bevy_color", "bevy_core_pipeline",
-  "bevy_render", "bevy_sprite", "bevy_state", "bevy_text",
-  "bevy_ui", "bevy_window", "bevy_winit",
+  "bevy_render", "bevy_sprite", "bevy_sprite_render", "bevy_state",
+  "bevy_text", "bevy_ui", "bevy_window", "bevy_winit",
   "multi_threaded", "png", "x11", "webgl2",
 ] }
 

@@ -4,7 +4,7 @@
 //! `CrtSettings` et `SafeMode`, déclarées dans `settings.rs` à côté de
 //! `JuiceSettings` : il ne les possède pas, il les insère.
 //!
-//! # Trois responsabilités de rendu, aucune encore peuplée
+//! # Trois responsabilités de rendu, la deuxième peuplée depuis TASK-84
 //!
 //! 1. **Les trois shaders.** Le plugin publie leurs chemins, relatifs à la
 //!    racine `assets/` du dépôt, en une seule source : les matériaux de
@@ -17,9 +17,13 @@
 //!    quand il traite l'événement d'échec d'un type inconnu. Retenir les
 //!    poignées et lire `LoadState::Failed` appartient à TASK-92.
 //! 2. **L'enregistrement des matériaux.** `build` est le point
-//!    d'enregistrement des `Material2dPlugin` ; il est posé, pas peuplé : aucun
-//!    matériau n'existe encore. TASK-84 y branche le fond, TASK-88 le filtre
-//!    cathodique, TASK-90 le contour.
+//!    d'enregistrement des `Material2dPlugin` : le fond y est branché
+//!    (TASK-84), TASK-88 y branche le filtre cathodique, TASK-90 le contour.
+//!    Chaque matériau est un `Asset`, et `Material2dPlugin::build` appelle
+//!    `init_asset`, qui lit `AssetServer`
+//!    (`bevy_asset-0.19.1/src/lib.rs:639`) : **ce plugin exige le serveur
+//!    d'assets**, et les tests headless de l'étape montent `AssetPlugin`, sans
+//!    rendu ni fenêtre.
 //! 3. **Le placement des passes.** Le vortex et le contour sont des `Material2d`
 //!    rendus en `MainPass` ; le filtre cathodique va dans
 //!    `Core2dSystems::PostProcess`, après le tonemapping, jamais dans
@@ -37,7 +41,9 @@
 //! justifier.
 
 use bevy::prelude::*;
+use bevy::sprite_render::Material2dPlugin;
 
+use super::background::BackgroundMaterial;
 use crate::settings::{CrtSettings, SafeMode};
 
 /// Le vortex d'arrière-plan, rendu en `MainPass` sur le quad de fond.
@@ -63,9 +69,10 @@ pub const SHADER_PATHS: [&str; 3] = [
 
 /// Plugin des effets visuels.
 ///
-/// Il se monte seul, sans assets et sans rendu : le test headless de l'étape
-/// le vérifie sous `MinimalPlugins`. Son seul état est les deux ressources de
-/// réglages qu'il insère.
+/// Il se monte sans rendu ni fenêtre, mais pas sans serveur d'assets : le test
+/// headless de l'étape le vérifie sous `MinimalPlugins` plus `AssetPlugin`.
+/// Son seul état est les deux ressources de réglages qu'il insère et les
+/// matériaux qu'il enregistre.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct VisualEffectsPlugin;
 
@@ -78,9 +85,9 @@ impl Plugin for VisualEffectsPlugin {
         app.init_resource::<CrtSettings>();
         app.init_resource::<SafeMode>();
 
-        // Point d'enregistrement des `Material2dPlugin` : posé, pas peuplé.
-        // Aucun matériau n'existe encore, et `Material2dPlugin::<X>` sans `X`
-        // ne compile pas. TASK-84, TASK-88 et TASK-90 le peuplent, chacun
-        // d'une ligne.
+        // Point d'enregistrement des `Material2dPlugin`, une ligne par
+        // matériau : le fond (TASK-84) ; TASK-88 y branche le filtre, TASK-90
+        // le contour.
+        app.add_plugins(Material2dPlugin::<BackgroundMaterial>::default());
     }
 }
