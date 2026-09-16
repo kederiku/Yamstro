@@ -51,9 +51,10 @@
 //! exécution, au premier accès ; `target_palette` les lit en `*SMALL`. Un
 //! `const LazyLock` serait inliné à chaque usage, le verrou reconstruit à
 //! chaque lecture, la conversion refaite à chaque frame : clippy le signale,
-//! et la CI l'interdit avant lui. Le `.unwrap()` est admis ici et seulement
-//! ici : les chaînes sont littérales, et le test des quatre palettes les
-//! parcourt à chaque exécution.
+//! et la CI l'interdit avant lui. Le `expect` sur la conversion est admis ici
+//! et seulement ici : les chaînes sont littérales, et le test des quatre
+//! palettes les parcourt à chaque exécution ; le volet 1 interdit tout
+//! `unwrap` dans `crates/`, prose comprise.
 //!
 //! `target_palette` est publique, là où le document l'écrit privée : sans
 //! appelant avant TASK-87, une fonction privée est du code mort sous
@@ -91,18 +92,18 @@ pub struct ThemePalette {
 
 /// Petite Mise : bleu nuit / violet néon. Aussi la palette hors run.
 pub static SMALL: LazyLock<ThemePalette> = LazyLock::new(|| ThemePalette {
-    primary: Srgba::hex("#0B1026").unwrap().into(),
-    secondary: Srgba::hex("#7B2FF7").unwrap().into(),
-    accent: Srgba::hex("#39E1F7").unwrap().into(),
+    primary: Srgba::hex("#0B1026").expect("littéral sRGB").into(),
+    secondary: Srgba::hex("#7B2FF7").expect("littéral sRGB").into(),
+    accent: Srgba::hex("#39E1F7").expect("littéral sRGB").into(),
     speed: 0.4,
     swirl_factor: 0.9,
 });
 
 /// Grosse Mise : vert émeraude / doré ambré.
 pub static BIG: LazyLock<ThemePalette> = LazyLock::new(|| ThemePalette {
-    primary: Srgba::hex("#053B2C").unwrap().into(),
-    secondary: Srgba::hex("#E0A128").unwrap().into(),
-    accent: Srgba::hex("#FFE7A3").unwrap().into(),
+    primary: Srgba::hex("#053B2C").expect("littéral sRGB").into(),
+    secondary: Srgba::hex("#E0A128").expect("littéral sRGB").into(),
+    accent: Srgba::hex("#FFE7A3").expect("littéral sRGB").into(),
     speed: 0.7,
     swirl_factor: 1.2,
 });
@@ -110,18 +111,18 @@ pub static BIG: LazyLock<ThemePalette> = LazyLock::new(|| ThemePalette {
 /// Mise Boss : rubis incandescent / pourpre sombre. Le vortex accélère et la
 /// distorsion fait plus que doubler : 2,1 est voulu, ce n'est pas 1,2.
 pub static BOSS: LazyLock<ThemePalette> = LazyLock::new(|| ThemePalette {
-    primary: Srgba::hex("#2E0618").unwrap().into(),
-    secondary: Srgba::hex("#E11D3C").unwrap().into(),
-    accent: Srgba::hex("#FF7A18").unwrap().into(),
+    primary: Srgba::hex("#2E0618").expect("littéral sRGB").into(),
+    secondary: Srgba::hex("#E11D3C").expect("littéral sRGB").into(),
+    accent: Srgba::hex("#FF7A18").expect("littéral sRGB").into(),
     speed: 1.3,
     swirl_factor: 2.1,
 });
 
 /// Boutique : sépia / bleu pétrole.
 pub static SHOP: LazyLock<ThemePalette> = LazyLock::new(|| ThemePalette {
-    primary: Srgba::hex("#3A2C1E").unwrap().into(),
-    secondary: Srgba::hex("#125A66").unwrap().into(),
-    accent: Srgba::hex("#D8C6A0").unwrap().into(),
+    primary: Srgba::hex("#3A2C1E").expect("littéral sRGB").into(),
+    secondary: Srgba::hex("#125A66").expect("littéral sRGB").into(),
+    accent: Srgba::hex("#D8C6A0").expect("littéral sRGB").into(),
     speed: 0.3,
     swirl_factor: 0.6,
 });
@@ -355,7 +356,7 @@ mod tests {
     /// CI compte les douze appels des palettes, écrits avec dièse.
     #[test]
     fn test_srgb_converted_exactly_once() {
-        let attendu: LinearRgba = Srgba::hex("7B2FF7").unwrap().into();
+        let attendu: LinearRgba = Srgba::hex("7B2FF7").expect("littéral sRGB").into();
         assert_eq!(attendu, SMALL.secondary);
 
         let reconvertie: LinearRgba =

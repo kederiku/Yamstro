@@ -204,15 +204,31 @@ pub fn outline_color(state: usize) -> LinearRgba {
 }
 
 /// Les réglages de départ de chaque état, dans l'ordre des index : couleur,
-/// largeur, masque de face. Le `.unwrap()` est admis là et seulement là : les
-/// chaînes sont littérales, et le test de la banque les parcourt à chaque
-/// exécution.
+/// largeur, masque de face. Le `expect` sur la conversion est admis là et
+/// seulement là : les chaînes sont littérales, et le test de la banque les
+/// parcourt à chaque exécution.
 fn starting_variants() -> [(LinearRgba, f32, f32); 4] {
     [
-        (Srgba::hex("#FFFFFF").unwrap().into(), 1.0, 0.0),
-        (Srgba::hex("#FFFFFF").unwrap().into(), 2.5, 0.0),
-        (Srgba::hex("#FFD54A").unwrap().into(), 3.0, 0.0),
-        (Srgba::hex("#9AA0A6").unwrap().into(), 1.5, 1.0),
+        (
+            Srgba::hex("#FFFFFF").expect("littéral sRGB").into(),
+            1.0,
+            0.0,
+        ),
+        (
+            Srgba::hex("#FFFFFF").expect("littéral sRGB").into(),
+            2.5,
+            0.0,
+        ),
+        (
+            Srgba::hex("#FFD54A").expect("littéral sRGB").into(),
+            3.0,
+            0.0,
+        ),
+        (
+            Srgba::hex("#9AA0A6").expect("littéral sRGB").into(),
+            1.5,
+            1.0,
+        ),
     ]
 }
 

@@ -42,7 +42,7 @@ bevy = { workspace = true, default-features = false, features = [
 log = "0.4"
 
 # **La cible de mesure WebAssembly ne vit plus ici.** Elle a suivi le sommet du
-# graphe dans `shop_system` (TASK-81 bis) : posée ici depuis TASK-40, elle
+# graphe, la crate de la boutique (TASK-81 bis) : posée ici depuis TASK-40, elle
 # ignorait toute la boutique, et l'écart jouait à la baisse, donc sans
 # déclencher la porte de taille. Une seule cible dans le workspace, et la CI
 # interdit qu'une seconde se déclare ailleurs.

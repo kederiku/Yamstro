@@ -167,7 +167,11 @@ jobs:
           # sont légitimes ici : l'interdiction porte sur l'arithmétique de
           # score, tenue en point fixe, pas sur l'animation ». Un ressort a
           # besoin d'un seuil de repos, qui EST une comparaison approchée.
-          forbid  "critère 2  comparaison approchée"     -n 'assert_relative_eq|EPSILON|\bapprox::|abs\(\)\s*<' crates/ -g '!**/animation.rs'
+          # Même distinction pour l'interpolation de palettes de l'Étape 7,
+          # de l'animation au sens de TASK-30 : le test des cinq champs du
+          # thème et ceux de sa transition comparent des flottants à 1e-6 ;
+          # le code de jeu, lui, reste sous la garde.
+          forbid  "critère 2  comparaison approchée"     -n 'assert_relative_eq|EPSILON|\bapprox::|abs\(\)\s*<' crates/ -g '!**/animation.rs' -g '!**/graphics/theme.rs' -g '!**/tests/visual_effects.rs'
           require "critère 2  égalités exactes"          -n 'assert_eq!' "$SRC/scoring"
 
           # ---- Étape 3 : mise en place d'une manche (TASK-32) ----

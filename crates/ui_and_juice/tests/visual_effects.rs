@@ -504,11 +504,14 @@ fn take_modified(app: &mut App) -> usize {
     std::mem::take(&mut app.world_mut().resource_mut::<ModifiedCount>().0)
 }
 
-fn elapsed_secs(app: &App) -> f32 {
+/// Le temps écoulé du minuteur, en millisecondes entières : le pas manuel est
+/// de 10 ms, la somme est exacte, la comparaison aussi.
+fn elapsed_millis(app: &App) -> u128 {
     app.world()
         .resource::<VisualThemeController>()
         .timer
-        .elapsed_secs()
+        .elapsed()
+        .as_millis()
 }
 
 /// Cent vingt frames sans changement de manche : zéro `Modified` sur le
@@ -539,7 +542,7 @@ fn test_palette_transition_lasts_1_5s() {
     for _ in 0..149 {
         app.update();
     }
-    assert!((elapsed_secs(&app) - 1.49).abs() < 1e-6);
+    assert_eq!(elapsed_millis(&app), 1490);
     assert_ne!(material_palette(&app), *BOSS, "pas avant 1,5 s");
     assert_eq!(
         take_modified(&mut app),
@@ -548,7 +551,7 @@ fn test_palette_transition_lasts_1_5s() {
     );
 
     app.update();
-    assert!((elapsed_secs(&app) - 1.5).abs() < 1e-6);
+    assert_eq!(elapsed_millis(&app), 1500);
     assert_eq!(material_palette(&app), *BOSS, "exactement à 1,5 s");
     assert_eq!(take_modified(&mut app), 1, "la dernière écriture");
 
@@ -598,7 +601,7 @@ fn test_interrupted_transition_restarts_from_current() {
     for _ in 0..50 {
         app.update();
     }
-    assert!((elapsed_secs(&app) - 0.5).abs() < 1e-6);
+    assert_eq!(elapsed_millis(&app), 500);
     let courante = app.world().resource::<VisualThemeController>().current();
     assert_ne!(courante, *SMALL);
     assert_ne!(courante, *BOSS);
@@ -624,7 +627,7 @@ fn test_small_to_boss_varies_swirl() {
     for _ in 0..75 {
         app.update();
     }
-    assert!((elapsed_secs(&app) - 0.75).abs() < 1e-6);
+    assert_eq!(elapsed_millis(&app), 750);
     assert!((material_palette(&app).swirl_factor - 1.5).abs() <= 1e-6);
     for _ in 0..75 {
         app.update();
@@ -1047,11 +1050,11 @@ fn test_holo_bank_has_eight_distinct_die_handles() {
     }
     let uni = &materials
         .get(bank.die(HoloMaterials::SCORING, false))
-        .unwrap()
+        .expect("une variante de la banque")
         .params;
     let irise = &materials
         .get(bank.die(HoloMaterials::SCORING, true))
-        .unwrap()
+        .expect("une variante de la banque")
         .params;
     assert_eq!(uni.outline_color, irise.outline_color);
     assert_eq!(uni.outline_width, irise.outline_width);
