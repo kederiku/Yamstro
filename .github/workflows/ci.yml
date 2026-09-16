@@ -2027,6 +2027,26 @@ jobs:
           require "TASK-88  écriture gardée par is_changed"   -n 'settings\.is_changed\(\)' "$CRT"
           count   "critère 5  intensity multiplie les quatre champs" 4 -n '\* settings\.intensity' "$CRT"
 
+          # TASK-89 : le WGSL du filtre. Les trois déclarations de bindings et
+          # l'import, à la lettre des sources ; le miroir WGSL des quatre
+          # champs, pendant de la garde Rust de TASK-88 ; aucune horloge du GPU
+          # dans ce shader, seul de l'étape ; rien qui ne passe pas sous
+          # webgl2 dans aucun shader ; le noir hors du tube avant le premier
+          # échantillonnage, et rien avant lui ; la densité des scanlines lue
+          # sur la cible ; trois échantillonnages, pas un de plus.
+          CRTW=$SHADERS/crt_postprocess.wgsl
+          require "TASK-89  import du triangle plein écran"   -n '^#import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput$' "$CRTW"
+          require "TASK-89  texture d'écran en 0"             -n '^@group\(0\) @binding\(0\) var screen_texture: texture_2d<f32>;$' "$CRTW"
+          require "TASK-89  sampler en 1"                     -n '^@group\(0\) @binding\(1\) var screen_sampler: sampler;$' "$CRTW"
+          require "TASK-89  uniforme en 2"                    -n '^@group\(0\) @binding\(2\) var<uniform> settings: CrtUniform;$' "$CRTW"
+          require "critère 2  miroir WGSL du CRT, quatre champs" -U '(?s)curvature.*?// offset +0\b.*?scanline_intensity.*?// offset +4\b.*?vignette_roundness.*?// offset +8\b.*?chromatic_aberration.*?// offset 12' "$CRTW"
+          forbid  "critère 5  horloge du GPU dans le filtre"  -n '\bglobals\b' "$CRTW"
+          forbid  "critère 8  hors webgl2"                    -n 'textureStore|var<storage|@compute' "$SHADERS"
+          require "TASK-89  noir hors du tube avant l'échantillonnage" -U 'if \(uv\.x < 0\.0 \|\| uv\.x > 1\.0 \|\| uv\.y < 0\.0 \|\| uv\.y > 1\.0\) \{\s*return vec4<f32>\(0\.0, 0\.0, 0\.0, 1\.0\);\s*\}[\s\S]*?textureSample' "$CRTW"
+          forbid  "TASK-89  échantillonnage avant le garde"   -U '(?s)textureSample.*?if \(uv\.x < 0\.0' "$CRTW"
+          require "TASK-89  densité des scanlines lue sur la cible" -n 'textureDimensions\(screen_texture\)' "$CRTW"
+          count   "TASK-89  trois échantillonnages"   3        -n 'textureSample' "$CRTW"
+
           exit $status
 
       # ---- Passe rand 0.10 et Default (15 septembre 2026) ----

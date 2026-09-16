@@ -53,3 +53,11 @@ bevy = { workspace = true, default-features = false, features = [
 sim_harness = { path = "../sim_harness", version = "0.1.0" }
 rand_chacha = { workspace = true }
 rand = { workspace = true }
+# **Le compilateur de shaders, pour les tests seulement** (TASK-89) : les
+# shaders de l'étape sont composés avec des bouchons des bibliothèques de Bevy
+# puis validés par naga, ce qu'aucun test headless ne fait autrement. Les deux
+# versions sont celles que `bevy_shader` tire déjà : aucun paquet de plus dans
+# le lock. Épinglées, parce qu'un `naga_oil` d'une autre version que celui de
+# Bevy ne validerait pas les mêmes shaders.
+naga_oil = "=0.22.0"
+naga = { version = "=29.0.4", features = ["wgsl-in"] }

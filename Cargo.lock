@@ -4543,6 +4543,8 @@ dependencies = [
  "bevy",
  "core_engine",
  "game_state",
+ "naga",
+ "naga_oil",
  "rand",
  "rand_chacha",
  "sim_harness",

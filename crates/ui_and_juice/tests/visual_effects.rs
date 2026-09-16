@@ -26,6 +26,9 @@ use bevy::window::{PrimaryWindow, WindowPlugin, WindowResized};
 use core_engine::blinds::{BlindContext, BlindDefinition, BlindType};
 use core_engine::hands::HandGrid;
 use game_state::RunPhase;
+use naga_oil::compose::{
+    ComposableModuleDescriptor, Composer, NagaModuleDescriptor, ShaderDefValue, ShaderLanguage,
+};
 use ui_and_juice::graphics::VisualEffectsPlugin;
 use ui_and_juice::graphics::background::{BackgroundMaterial, BackgroundQuad, BackgroundUniform};
 use ui_and_juice::graphics::crt::{CrtMaterial, CrtUniform, crt_pass_wanted};
@@ -770,4 +773,130 @@ fn test_crt_material_removed_when_disabled() {
     app.world_mut().resource_mut::<SafeMode>().enabled = false;
     app.update();
     assert!(camera_crt(&mut app).is_some(), "revenu");
+}
+
+/// Le bouchon de `bevy_core_pipeline::fullscreen_vertex_shader` : la struct
+/// exacte de `fullscreen.wgsl:3-8`, deux champs.
+const FULLSCREEN_VERTEX_STUB: &str =
+    "#define_import_path bevy_core_pipeline::fullscreen_vertex_shader
+struct FullscreenVertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+";
+
+/// Le bouchon de `bevy_sprite::mesh2d_vertex_output` : les quatre champs
+/// inconditionnels de `mesh2d_vertex_output.wgsl`.
+const MESH2D_VERTEX_OUTPUT_STUB: &str = "#define_import_path bevy_sprite::mesh2d_vertex_output
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) world_position: vec4<f32>,
+    @location(1) world_normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+};
+";
+
+/// Le bouchon de `bevy_sprite::mesh2d_view_bindings`, réduit à ce que le
+/// vortex lit : `view.viewport` et `globals.time`, aux bindings réels.
+const MESH2D_VIEW_BINDINGS_STUB: &str = "#define_import_path bevy_sprite::mesh2d_view_bindings
+struct View { viewport: vec4<f32>, };
+struct Globals { time: f32, };
+@group(0) @binding(0) var<uniform> view: View;
+@group(0) @binding(1) var<uniform> globals: Globals;
+";
+
+/// Compose un shader de `assets/shaders/` avec des bouchons des bibliothèques
+/// de Bevy, comme Bevy le fait à la création du pipeline, puis le valide par
+/// naga. Les bouchons déclarent les interfaces que le shader emploie, pas la
+/// disposition réelle de Bevy : c'est la syntaxe, les types et l'uniformité
+/// du shader qui sont validés, avec les versions de naga que Bevy embarque.
+fn compose_and_validate(shader: &str, stubs: &[&str], defs: &[(&str, u32)]) -> naga::Module {
+    let chemin = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("assets")
+        .join(shader);
+    let source = std::fs::read_to_string(&chemin).expect("le shader existe");
+    let mut composer = Composer::default();
+    for stub in stubs {
+        let resultat = composer.add_composable_module(ComposableModuleDescriptor {
+            source: stub,
+            file_path: "bouchon.wgsl",
+            language: ShaderLanguage::Wgsl,
+            ..Default::default()
+        });
+        if let Err(e) = resultat {
+            panic!("bouchon : {}", e.emit_to_string(&composer));
+        }
+    }
+    let shader_defs = defs
+        .iter()
+        .map(|(nom, valeur)| ((*nom).to_string(), ShaderDefValue::UInt(*valeur)))
+        .collect();
+    let module = match composer.make_naga_module(NagaModuleDescriptor {
+        source: &source,
+        file_path: shader,
+        shader_defs,
+        ..Default::default()
+    }) {
+        Ok(module) => module,
+        Err(e) => panic!("{shader} : {}", e.emit_to_string(&composer)),
+    };
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|e| panic!("{shader} invalide : {e:?}"));
+    module
+}
+
+fn has_fragment_entry(module: &naga::Module) -> bool {
+    module
+        .entry_points
+        .iter()
+        .any(|e| e.stage == naga::ShaderStage::Fragment && e.name == "fragment")
+}
+
+/// Le shader du filtre compose avec la sortie du triangle plein écran et
+/// passe le validateur de naga : syntaxe, types, uniformité, un point
+/// d'entrée fragment.
+#[test]
+fn test_crt_shader_composes_and_validates() {
+    let module = compose_and_validate(
+        "shaders/crt_postprocess.wgsl",
+        &[FULLSCREEN_VERTEX_STUB],
+        &[],
+    );
+    assert!(has_fragment_entry(&module));
+}
+
+/// Le shader du vortex compose avec la sortie du vertex 2D et les bindings de
+/// vue, le def `MATERIAL_BIND_GROUP` valant 2 comme Bevy le passe, et passe
+/// le validateur.
+#[test]
+fn test_background_shader_composes_and_validates() {
+    let module = compose_and_validate(
+        "shaders/psyche_background.wgsl",
+        &[MESH2D_VERTEX_OUTPUT_STUB, MESH2D_VIEW_BINDINGS_STUB],
+        &[("MATERIAL_BIND_GROUP", 2)],
+    );
+    assert!(has_fragment_entry(&module));
+}
+
+/// Le facteur de scanline du shader, répliqué : à `scanline_intensity == 0`,
+/// il vaut exactement 1, bit à bit, sur tout un échantillon de `uv.y`. Pas
+/// d'atténuation résiduelle quand le réglage est nul.
+#[test]
+fn test_scanline_is_identity_at_zero() {
+    // Le littéral `3.14159265` du shader est `PI` une fois arrondi en f32.
+    let facteur = |uv_y: f32, hauteur: f32, intensite: f32| {
+        let s = (uv_y * hauteur * core::f32::consts::PI).sin();
+        1.0 - intensite * 0.5 * (1.0 - s * s)
+    };
+    for i in 0..=100 {
+        let uv_y = i as f32 / 100.0;
+        assert_eq!(facteur(uv_y, 720.0, 0.0).to_bits(), 1.0_f32.to_bits());
+    }
+    assert!(facteur(0.5, 720.0, 0.25) <= 1.0);
 }
