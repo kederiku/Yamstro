@@ -20,6 +20,7 @@ use bevy::asset::{AssetEvent, AssetPlugin};
 use bevy::mesh::{MeshPlugin, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::render::render_resource::ShaderType;
+use bevy::render::sync_world::SyncWorldPlugin;
 use bevy::time::TimeUpdateStrategy;
 use bevy::window::{PrimaryWindow, WindowPlugin, WindowResized};
 use core_engine::blinds::{BlindContext, BlindDefinition, BlindType};
@@ -27,6 +28,7 @@ use core_engine::hands::HandGrid;
 use game_state::RunPhase;
 use ui_and_juice::graphics::VisualEffectsPlugin;
 use ui_and_juice::graphics::background::{BackgroundMaterial, BackgroundQuad, BackgroundUniform};
+use ui_and_juice::graphics::crt::{CrtMaterial, CrtUniform, crt_pass_wanted};
 use ui_and_juice::graphics::plugin::SHADER_PATHS;
 use ui_and_juice::graphics::theme::{BOSS, SHOP, SMALL, ThemePalette, VisualThemeController};
 use ui_and_juice::settings::{CrtSettings, JuiceSettings, SafeMode};
@@ -79,8 +81,12 @@ fn test_three_shader_files_exist() {
 
 /// Une application headless avec le plugin de l'étape : `MinimalPlugins`, le
 /// serveur d'assets qu'exige tout `Material2dPlugin`, `Assets<Mesh>` et la
-/// fenêtre primaire que le quad de fond lit, ce que `DefaultPlugins` monte
-/// sans le rendu ni winit. La fenêtre par défaut fait 1280 × 720 logiques.
+/// fenêtre primaire que le quad de fond lit, et la synchronisation des
+/// entités vers le monde de rendu, dont `ExtractComponentPlugin` pose les
+/// crochets : sans elle, retirer un `CrtMaterial` panique sur la ressource
+/// `PendingSyncEntity` absente (`bevy_render-0.19.1/src/sync_component.rs:55`).
+/// C'est ce que `DefaultPlugins` monte, sans le rendu ni winit ; la fenêtre
+/// par défaut fait 1280 × 720 logiques.
 fn app_headless() -> App {
     let mut app = App::new();
     app.add_plugins((
@@ -88,6 +94,7 @@ fn app_headless() -> App {
         AssetPlugin::default(),
         MeshPlugin,
         WindowPlugin::default(),
+        SyncWorldPlugin,
         VisualEffectsPlugin,
     ));
     app
@@ -572,4 +579,195 @@ fn test_interpolation_is_linear_in_linear_space() {
     }
     assert!((milieu.speed - moyenne(SMALL.speed, BOSS.speed)).abs() <= 1e-6);
     assert!((milieu.swirl_factor - moyenne(SMALL.swirl_factor, BOSS.swirl_factor)).abs() <= 1e-6);
+}
+
+/// Le nombre de frames où une sonde sous `run_if(crt_pass_wanted)` a tourné.
+#[derive(Resource, Default)]
+struct ProbeRuns(usize);
+
+fn crt_probe(mut runs: ResMut<ProbeRuns>) {
+    runs.0 += 1;
+}
+
+/// Le nombre de frames où le matériau du filtre a changé sur une caméra,
+/// insertion comprise.
+#[derive(Resource, Default)]
+struct CrtWrites(usize);
+
+fn count_crt_writes(changed: Query<(), Changed<CrtMaterial>>, mut writes: ResMut<CrtWrites>) {
+    writes.0 += changed.iter().count();
+}
+
+/// L'application de l'étape avec une caméra 2D, la sonde de passe et le
+/// compteur d'écritures, **avant** le démarrage : les réglages se posent
+/// ensuite, puis `update()`.
+fn app_with_camera() -> App {
+    let mut app = app_headless();
+    app.init_resource::<ProbeRuns>();
+    app.init_resource::<CrtWrites>();
+    app.add_systems(Update, crt_probe.run_if(crt_pass_wanted));
+    app.add_systems(Last, count_crt_writes);
+    app.world_mut().spawn(Camera2d);
+    app
+}
+
+fn camera_crt(app: &mut App) -> Option<CrtMaterial> {
+    app.world_mut()
+        .query_filtered::<Option<&CrtMaterial>, With<Camera2d>>()
+        .single(app.world())
+        .expect("une seule caméra")
+        .copied()
+}
+
+/// Seize octets pile pour le bloc, et pour le matériau qui le porte :
+/// quatre `f32`, aucun padding, pas seulement un multiple de seize.
+#[test]
+fn test_crt_uniform_is_exactly_16_bytes() {
+    assert_eq!(CrtUniform::min_size().get(), 16);
+    assert_eq!(CrtMaterial::min_size().get(), 16);
+}
+
+/// Filtre coupé, intensité nulle, ou mode dégradé : dans les trois cas la
+/// condition rend faux, la sonde ne tourne pas sur 60 frames, et la caméra ne
+/// porte aucun matériau : la passe n'est pas ordonnancée.
+#[test]
+fn test_crt_pass_not_scheduled_when_disabled() {
+    let coupe = CrtSettings {
+        enabled: false,
+        ..CrtSettings::default()
+    };
+    let nulle = CrtSettings {
+        intensity: 0.0,
+        ..CrtSettings::default()
+    };
+    let cas = [
+        (coupe, SafeMode::default()),
+        (nulle, SafeMode::default()),
+        (CrtSettings::default(), SafeMode { enabled: true }),
+    ];
+    for (settings, safe_mode) in cas {
+        assert!(!settings.is_active(&safe_mode));
+        let mut app = app_with_camera();
+        app.insert_resource(settings);
+        app.insert_resource(safe_mode);
+        for _ in 0..60 {
+            app.update();
+        }
+        assert_eq!(app.world().resource::<ProbeRuns>().0, 0);
+        assert!(
+            camera_crt(&mut app).is_none(),
+            "aucun matériau sur la caméra"
+        );
+    }
+}
+
+/// Réglages nominaux, hors mode dégradé : la sonde tourne à chaque frame et
+/// la caméra porte le matériau écrit depuis les réglages.
+#[test]
+fn test_crt_pass_scheduled_when_enabled() {
+    let mut app = app_with_camera();
+    for _ in 0..60 {
+        app.update();
+    }
+    assert_eq!(app.world().resource::<ProbeRuns>().0, 60);
+    let material = camera_crt(&mut app).expect("le matériau est sur la caméra");
+    let attendu = CrtUniform::from_settings(&CrtSettings::default());
+    assert_eq!(material.params.curvature, attendu.curvature);
+    assert_eq!(
+        material.params.scanline_intensity,
+        attendu.scanline_intensity
+    );
+    assert_eq!(
+        material.params.vignette_roundness,
+        attendu.vignette_roundness
+    );
+    assert_eq!(
+        material.params.chromatic_aberration,
+        attendu.chromatic_aberration
+    );
+    assert!(attendu.curvature > 0.0);
+}
+
+/// `intensity == 0.5` : les quatre champs du matériau valent la moitié des
+/// réglages ; `intensity == 0.0` les met tous à zéro.
+#[test]
+fn test_intensity_scales_all_four_fields() {
+    let mut app = app_with_camera();
+    app.insert_resource(CrtSettings {
+        intensity: 0.5,
+        ..CrtSettings::default()
+    });
+    app.update();
+    let reglages = CrtSettings::default();
+    let params = camera_crt(&mut app).expect("matériau présent").params;
+    assert_eq!(params.curvature, reglages.curvature * 0.5);
+    assert_eq!(params.scanline_intensity, reglages.scanline_intensity * 0.5);
+    assert_eq!(params.vignette_roundness, reglages.vignette_roundness * 0.5);
+    assert_eq!(
+        params.chromatic_aberration,
+        reglages.chromatic_aberration * 0.5
+    );
+
+    let zero = CrtUniform::from_settings(&CrtSettings {
+        intensity: 0.0,
+        ..CrtSettings::default()
+    });
+    assert_eq!(zero.curvature, 0.0);
+    assert_eq!(zero.scanline_intensity, 0.0);
+    assert_eq!(zero.vignette_roundness, 0.0);
+    assert_eq!(zero.chromatic_aberration, 0.0);
+}
+
+/// Cent vingt frames sans toucher aux réglages : le matériau, écrit une fois
+/// à son insertion, n'est plus jamais réécrit.
+#[test]
+fn test_no_uniform_write_when_settings_unchanged() {
+    let mut app = app_with_camera();
+    app.update();
+    assert_eq!(app.world().resource::<CrtWrites>().0, 1, "l'insertion");
+    app.world_mut().resource_mut::<CrtWrites>().0 = 0;
+    for _ in 0..120 {
+        app.update();
+    }
+    assert_eq!(app.world().resource::<CrtWrites>().0, 0);
+}
+
+/// Un changement d'`intensity` : exactement une frame où le matériau change,
+/// et les quatre champs suivent.
+#[test]
+fn test_uniform_written_once_on_change() {
+    let mut app = app_with_camera();
+    app.update();
+    app.world_mut().resource_mut::<CrtWrites>().0 = 0;
+
+    app.world_mut().resource_mut::<CrtSettings>().intensity = 0.5;
+    app.update();
+    assert_eq!(app.world().resource::<CrtWrites>().0, 1);
+    for _ in 0..10 {
+        app.update();
+    }
+    assert_eq!(
+        app.world().resource::<CrtWrites>().0,
+        1,
+        "une seule écriture"
+    );
+    let params = camera_crt(&mut app).expect("matériau présent").params;
+    assert_eq!(params.curvature, CrtSettings::default().curvature * 0.5);
+}
+
+/// Activé puis coupé, le matériau disparaît de la caméra ; réactivé, il
+/// revient.
+#[test]
+fn test_crt_material_removed_when_disabled() {
+    let mut app = app_with_camera();
+    app.update();
+    assert!(camera_crt(&mut app).is_some());
+
+    app.world_mut().resource_mut::<SafeMode>().enabled = true;
+    app.update();
+    assert!(camera_crt(&mut app).is_none(), "retiré en mode dégradé");
+
+    app.world_mut().resource_mut::<SafeMode>().enabled = false;
+    app.update();
+    assert!(camera_crt(&mut app).is_some(), "revenu");
 }

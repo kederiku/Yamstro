@@ -7,11 +7,11 @@
 //! aurait deux ressources de réglages visuels à sérialiser à l'Étape 10.
 //!
 //! TASK-82 a posé `mod.rs` et `plugin.rs`, TASK-84 `background.rs`, TASK-86
-//! `theme.rs`. `crt.rs` (TASK-88) et `holo.rs` (TASK-90) arrivent chacun avec
-//! leur ticket : un `pub mod` sans fichier ne compile pas, et bloquerait les
-//! deux.
+//! `theme.rs`, TASK-88 `crt.rs`. `holo.rs` (TASK-90) arrive avec son ticket :
+//! un `pub mod` sans fichier ne compile pas.
 
 pub mod background;
+pub mod crt;
 pub mod plugin;
 pub mod theme;
 

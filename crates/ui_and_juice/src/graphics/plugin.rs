@@ -17,8 +17,9 @@
 //!    quand il traite l'événement d'échec d'un type inconnu. Retenir les
 //!    poignées et lire `LoadState::Failed` appartient à TASK-92.
 //! 2. **L'enregistrement des matériaux.** `build` est le point
-//!    d'enregistrement des `Material2dPlugin` : le fond y est branché
-//!    (TASK-84), TASK-88 y branche le filtre cathodique, TASK-90 le contour.
+//!    d'enregistrement des matériaux : le fond y est branché (TASK-84), le
+//!    filtre cathodique aussi (TASK-88, par `FullscreenMaterialPlugin`),
+//!    TASK-90 y branche le contour.
 //!    Chaque matériau est un `Asset`, et `Material2dPlugin::build` appelle
 //!    `init_asset`, qui lit `AssetServer`
 //!    (`bevy_asset-0.19.1/src/lib.rs:639`) : **ce plugin exige le serveur
@@ -26,8 +27,9 @@
 //!    rendu ni fenêtre.
 //! 3. **Le placement des passes.** Le vortex et le contour sont des `Material2d`
 //!    rendus en `MainPass` ; le filtre cathodique va dans
-//!    `Core2dSystems::PostProcess`, après le tonemapping, jamais dans
-//!    `EarlyPostProcess` ni dans la prépasse 2D. TASK-88 remplit ce placement.
+//!    `Core2dSystems::PostProcess`, après le tonemapping, jamais dans le set
+//!    précoce ni dans la prépasse 2D. TASK-88 l'a placé, dans `crt.rs`, par
+//!    `FullscreenMaterial::schedule_configs`.
 //!
 //! # Chemins d'import, relevés dans les sources 0.19.1
 //!
@@ -40,10 +42,12 @@
 //! déclarera le premier matériau devra ajouter la feature du même nom, et le
 //! justifier.
 
+use bevy::core_pipeline::fullscreen_material::FullscreenMaterialPlugin;
 use bevy::prelude::*;
 use bevy::sprite_render::Material2dPlugin;
 
 use super::background::{BackgroundMaterial, resize_background_quad, spawn_background_quad};
+use super::crt::{CrtMaterial, sync_crt_material};
 use super::theme::{animate_visual_theme, init_visual_theme};
 use crate::settings::{CrtSettings, SafeMode};
 
@@ -86,10 +90,16 @@ impl Plugin for VisualEffectsPlugin {
         app.init_resource::<CrtSettings>();
         app.init_resource::<SafeMode>();
 
-        // Point d'enregistrement des `Material2dPlugin`, une ligne par
-        // matériau : le fond (TASK-84) ; TASK-88 y branche le filtre, TASK-90
-        // le contour.
+        // Point d'enregistrement des matériaux, une ligne par matériau : le
+        // fond (TASK-84), le filtre cathodique (TASK-88) ; TASK-90 y branche le
+        // contour.
         app.add_plugins(Material2dPlugin::<BackgroundMaterial>::default());
+        app.add_plugins(FullscreenMaterialPlugin::<CrtMaterial>::default());
+
+        // Le filtre cathodique (TASK-88) : présent sur la caméra 2D quand il
+        // est actif, absent sinon, réécrit seulement quand les réglages
+        // changent. Sa présence est ce qui ordonnance la passe.
+        app.add_systems(Update, sync_crt_material);
 
         // Le quad de fond (TASK-85) : spawné une fois au démarrage, redimensionné
         // en place sur `WindowResized`, sans jamais réécrire son `Transform`.

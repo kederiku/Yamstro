@@ -1997,6 +1997,36 @@ jobs:
           forbid  "TASK-87  champ de temps dans un uniforme"  -n '^\s*(pub\s+)?time\s*:\s*f32\b' "$JUICE/src/graphics"
           require "TASK-87  le contrôleur est animé"          -n '^\s+app\.add_systems\(Update, animate_visual_theme\);$' "$JUICE/src/graphics/plugin.rs"
 
+          # TASK-88 : le filtre cathodique, un `FullscreenMaterial` en 2D, set
+          # `PostProcess` après le tonemapping, jamais le set précoce ni la
+          # prépasse. Le trait impose un composant porteur de l'uniforme : ni
+          # `Asset`, ni `AsBindGroup`, ni `Resource` dérivés dans le fichier,
+          # aucun remplissage, aucun champ booléen. La passe n'existe que pour
+          # les caméras qui portent le composant, décidé par la condition pure
+          # de TASK-83 ; l'écriture est gardée par `is_changed`, et `intensity`
+          # multiplie les quatre champs. Le miroir des quatre champs, offsets
+          # compris, attend son pendant WGSL à TASK-89. « Après le tonemapping »
+          # s'ancre sur l'appel chaîné complet : mesuré, la doc du fichier cite
+          # `.after(tonemapping)` et satisfaisait la garde nue.
+          CRT=$JUICE/src/graphics/crt.rs
+          require "TASK-88  module crt déclaré"               -n '^pub mod crt;$' "$JUICE/src/graphics/mod.rs"
+          require "TASK-88  le plugin enregistre le filtre"   -n '^\s+app\.add_plugins\(FullscreenMaterialPlugin::<CrtMaterial>::default\(\)\);$' "$JUICE/src/graphics/plugin.rs"
+          require "TASK-88  la synchronisation est ordonnancée" -n '^\s+app\.add_systems\(Update, sync_crt_material\);$' "$JUICE/src/graphics/plugin.rs"
+          require "TASK-88  le filtre est un FullscreenMaterial" -n '^impl FullscreenMaterial for CrtMaterial \{$' "$CRT"
+          require "TASK-88  la passe vit dans Core2d"         -U 'fn schedule\(\) -> impl ScheduleLabel \+ Clone \{\n\s*Core2d\n' "$CRT"
+          require "critère 1  set PostProcess de la 2D"       -n '\.in_set\(Core2dSystems::PostProcess\)' "$CRT"
+          require "critère 1  après le tonemapping"           -U 'system\s*\.in_set\(Core2dSystems::PostProcess\)\s*\.after\(tonemapping\)' "$CRT"
+          forbid  "critère 1  set précoce ou prépasse"        -n 'EarlyPostProcess|Prepass' "$JUICE/src"
+          forbid  "TASK-88  passe 3D"                         -n '\bCore3d' "$CRT"
+          forbid  "TASK-88  matériau asset, bind group ou ressource" -n 'derive\([^)]*(Asset|AsBindGroup|Resource)' "$CRT"
+          forbid  "TASK-88  remplissage dans l'uniforme"      -n '_pad' "$CRT"
+          forbid  "TASK-88  booléen dans le filtre"           -n '^\s*(pub\s+)?\w+\s*:\s*bool\b' "$CRT"
+          require "critère 2  miroir Rust du CRT, quatre champs" -U '(?s)curvature.*?// offset +0\b.*?scanline_intensity.*?// offset +4\b.*?vignette_roundness.*?// offset +8\b.*?chromatic_aberration.*?// offset 12' "$CRT"
+          require "TASK-88  shader désigné par la source unique" -n '^\s+CRT_POSTPROCESS_SHADER\.into\(\)$' "$CRT"
+          require "TASK-88  la condition pure de TASK-83"     -n 'settings\.is_active\(&safe_mode\)' "$CRT"
+          require "TASK-88  écriture gardée par is_changed"   -n 'settings\.is_changed\(\)' "$CRT"
+          count   "critère 5  intensity multiplie les quatre champs" 4 -n '\* settings\.intensity' "$CRT"
+
           exit $status
 
       # ---- Passe rand 0.10 et Default (15 septembre 2026) ----
