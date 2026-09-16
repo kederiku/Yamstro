@@ -6,12 +6,13 @@
 //! obligerait la boutique et les états à arbitrer un nouveau sens, et il y
 //! aurait deux ressources de réglages visuels à sérialiser à l'Étape 10.
 //!
-//! TASK-82 a posé `mod.rs` et `plugin.rs`, TASK-84 `background.rs`.
-//! `theme.rs` (TASK-86), `crt.rs` (TASK-88) et `holo.rs` (TASK-90) arrivent
-//! chacun avec leur ticket : un `pub mod` sans fichier ne compile pas, et
-//! bloquerait les trois.
+//! TASK-82 a posé `mod.rs` et `plugin.rs`, TASK-84 `background.rs`, TASK-86
+//! `theme.rs`. `crt.rs` (TASK-88) et `holo.rs` (TASK-90) arrivent chacun avec
+//! leur ticket : un `pub mod` sans fichier ne compile pas, et bloquerait les
+//! deux.
 
 pub mod background;
 pub mod plugin;
+pub mod theme;
 
 pub use plugin::VisualEffectsPlugin;

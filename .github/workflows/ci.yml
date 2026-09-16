@@ -1898,8 +1898,7 @@ jobs:
           # aucun champ `time`, le mot restant libre puisque le bloc verbatim
           # l'emploie pour dire qu'il n'y en a pas ; ni `Component` ni
           # `Resource` sur un matériau ; aucune couleur ni défaut ici, les
-          # palettes sont TASK-86 (le remplissage neutre du spawn, noir, est
-          # admis jusqu'à TASK-86 : il ne nomme aucune couleur) ; ni `Component`
+          # palettes sont TASK-86, et le spawn en part depuis TASK-86 ; ni `Component`
           # ni `Resource` sur le matériau ou son bloc, ancré sur le dérivé posé
           # sur ces deux types, le marqueur du quad de TASK-85 étant un
           # composant légitime du même fichier ; le remplissage explicite à
@@ -1952,6 +1951,30 @@ jobs:
           require "TASK-85  le maillage est réécrit en place" -n 'meshes\.get_mut\(' "$BG"
           forbid  "critère 4  écriture de Transform dans graphics" -n '&mut Transform' "$JUICE/src/graphics"
           forbid  "critère 4  échelle de Transform écrite"    -n '\.scale\s*=|Transform::from_scale|with_scale\(' "$JUICE/src/graphics"
+
+          # TASK-86 : les quatre palettes, sRGB converti une seule fois. Douze
+          # appels `Srgba::hex("#…")`, un par couleur, et aucune composante
+          # linéaire écrite à la main. Des `static LazyLock`, jamais un `const`
+          # inliné à chaque usage. Aucune logique de transition dans la moitié
+          # données, ancrée sur les types et les appels, pas sur les mots. La
+          # boutique prime sur le type de blind, par la place du bras, ancrée
+          # sur le premier `match` du corps de la fonction : mesuré, un `match`
+          # inversé garde un `match phase` interne que la garde non ancrée
+          # acceptait ; le
+          # spawn du fond part de la Petite Mise, et le remplissage neutre de
+          # TASK-85 a disparu.
+          THEME=$JUICE/src/graphics/theme.rs
+          require "TASK-86  module theme déclaré"            -n '^pub mod theme;$' "$JUICE/src/graphics/mod.rs"
+          count   "TASK-86  quatre palettes statiques" 4     -n '^pub static (SMALL|BIG|BOSS|SHOP): LazyLock<ThemePalette> = LazyLock::new\(' "$THEME"
+          count   "TASK-86  douze conversions sRGB" 12       -n 'Srgba::hex\("#[0-9A-F]{6}"\)' "$THEME"
+          forbid  "TASK-86  composante linéaire à la main"   -n 'LinearRgba::(new|rgb|rgba)\(' "$THEME"
+          forbid  "TASK-86  palette en const LazyLock"       -n 'const [A-Z_]+: *LazyLock' "$JUICE/src"
+          forbid  "TASK-86  palette composant ou ressource"  -nU 'derive\([^)]*(Component|Resource)[^)]*\)\]\s*\npub struct ThemePalette\b' "$THEME"
+          forbid  "TASK-86  transition dans la moitié données" -n '\bTimer\b|Assets<|\.lerp\(|\bmix\(|fn \w+_system' "$THEME"
+          require "TASK-86  la boutique prime"               -U 'fn target_palette\([^{]*\{\n\s*match phase \{\n\s*RunPhase::Shop => \*SHOP,' "$THEME"
+          require "TASK-86  sans blind, la Petite Mise"      -n '^\s+_ => \*SMALL,$' "$THEME"
+          forbid  "TASK-86  remplissage neutre resté dans le spawn" -n 'const [A-Z_]+: BackgroundUniform' "$BG"
+          require "TASK-86  le spawn part de la Petite Mise" -n 'BackgroundUniform::from\(\*SMALL\)' "$BG"
 
           exit $status
 

@@ -4,9 +4,8 @@
 //! Le type et son bloc sont TASK-84 ; le spawn du quad et le redimensionnement
 //! sont TASK-85, le shader vivant sous `assets/shaders/`. Les quatre palettes
 //! et la conversion sRGB → linéaire sont TASK-86, l'interpolation sur 1,5 s
-//! TASK-87. Aucune couleur de palette n'est écrite ici, aucun `impl Default` :
-//! la seule valeur de couleur du fichier est le remplissage neutre du spawn,
-//! noir, que TASK-86 remplace.
+//! TASK-87. Aucune couleur n'est écrite ici, aucun `impl Default` : le spawn
+//! part de la palette de la Petite Mise, `theme::SMALL`, la palette hors run.
 //!
 //! # Raccord A : le quad ne s'agrandit pas par son `Transform`
 //!
@@ -81,6 +80,7 @@ use bevy::sprite_render::{Material2d, MeshMaterial2d};
 use bevy::window::{PrimaryWindow, Window, WindowResized};
 
 use super::plugin::PSYCHE_BACKGROUND_SHADER;
+use super::theme::SMALL;
 
 // ---- Forme A (retenue pour ce projet) : un champ unique portant un ShaderType.
 
@@ -134,25 +134,11 @@ impl Material2d for BackgroundMaterial {
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct BackgroundQuad;
 
-/// Le remplissage neutre des paramètres au spawn : noir, aucune animation.
-///
-/// Isolé dans cette seule constante pour que TASK-86 le remplace par sa
-/// première palette et pose la garde de sa disparition. Ce n'est pas une
-/// couleur choisie, c'est l'absence de couleur en attendant qu'une palette
-/// existe.
-const NEUTRAL_FILL: BackgroundUniform = BackgroundUniform {
-    primary_color: LinearRgba::BLACK,
-    secondary_color: LinearRgba::BLACK,
-    accent_color: LinearRgba::BLACK,
-    speed: 0.0,
-    swirl_factor: 0.0,
-    _pad: Vec2::ZERO,
-};
-
 /// Spawne l'entité du fond, une seule fois, au démarrage.
 ///
 /// Le rectangle prend les dimensions logiques de la fenêtre primaire, le
-/// matériau reçoit le remplissage neutre, et le `Transform` est posé ici, à
+/// matériau part de la Petite Mise, la palette hors run que TASK-87 fera
+/// évoluer, et le `Transform` est posé ici, à
 /// `z = -100`, derrière tout le reste, pour ne plus jamais être réécrit. Le
 /// système est unique et nommé : TASK-92 le garde derrière le mode dégradé.
 pub fn spawn_background_quad(
@@ -166,7 +152,7 @@ pub fn spawn_background_quad(
         BackgroundQuad,
         Mesh2d(meshes.add(Mesh::from(Rectangle::new(width, height)))),
         MeshMaterial2d(materials.add(BackgroundMaterial {
-            params: NEUTRAL_FILL,
+            params: BackgroundUniform::from(*SMALL),
         })),
         Transform::from_xyz(0.0, 0.0, -100.0),
     ));
