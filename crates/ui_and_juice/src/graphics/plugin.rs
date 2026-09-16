@@ -43,7 +43,7 @@
 use bevy::prelude::*;
 use bevy::sprite_render::Material2dPlugin;
 
-use super::background::BackgroundMaterial;
+use super::background::{BackgroundMaterial, resize_background_quad, spawn_background_quad};
 use crate::settings::{CrtSettings, SafeMode};
 
 /// Le vortex d'arrière-plan, rendu en `MainPass` sur le quad de fond.
@@ -89,5 +89,10 @@ impl Plugin for VisualEffectsPlugin {
         // matériau : le fond (TASK-84) ; TASK-88 y branche le filtre, TASK-90
         // le contour.
         app.add_plugins(Material2dPlugin::<BackgroundMaterial>::default());
+
+        // Le quad de fond (TASK-85) : spawné une fois au démarrage, redimensionné
+        // en place sur `WindowResized`, sans jamais réécrire son `Transform`.
+        app.add_systems(Startup, spawn_background_quad);
+        app.add_systems(Update, resize_background_quad);
     }
 }

@@ -15,10 +15,12 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use bevy::asset::AssetPlugin;
+use bevy::mesh::{MeshPlugin, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::render::render_resource::ShaderType;
+use bevy::window::{PrimaryWindow, WindowPlugin, WindowResized};
 use ui_and_juice::graphics::VisualEffectsPlugin;
-use ui_and_juice::graphics::background::{BackgroundMaterial, BackgroundUniform};
+use ui_and_juice::graphics::background::{BackgroundMaterial, BackgroundQuad, BackgroundUniform};
 use ui_and_juice::graphics::plugin::SHADER_PATHS;
 use ui_and_juice::settings::{CrtSettings, JuiceSettings, SafeMode};
 
@@ -69,11 +71,66 @@ fn test_three_shader_files_exist() {
 }
 
 /// Une application headless avec le plugin de l'étape : `MinimalPlugins`, le
-/// serveur d'assets qu'exige tout `Material2dPlugin`, et rien du rendu.
+/// serveur d'assets qu'exige tout `Material2dPlugin`, `Assets<Mesh>` et la
+/// fenêtre primaire que le quad de fond lit, ce que `DefaultPlugins` monte
+/// sans le rendu ni winit. La fenêtre par défaut fait 1280 × 720 logiques.
 fn app_headless() -> App {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, AssetPlugin::default(), VisualEffectsPlugin));
+    app.add_plugins((
+        MinimalPlugins,
+        AssetPlugin::default(),
+        MeshPlugin,
+        WindowPlugin::default(),
+        VisualEffectsPlugin,
+    ));
     app
+}
+
+/// Le handle du maillage du fond et ses dimensions, lues sur les positions
+/// des sommets.
+fn quad_mesh(app: &mut App) -> (Handle<Mesh>, Vec2) {
+    let handle = app
+        .world_mut()
+        .query_filtered::<&Mesh2d, With<BackgroundQuad>>()
+        .single(app.world())
+        .expect("une seule entité de fond")
+        .0
+        .clone();
+    let meshes = app.world().resource::<Assets<Mesh>>();
+    let mesh = meshes.get(&handle).expect("le maillage du fond existe");
+    let positions = mesh
+        .attribute(Mesh::ATTRIBUTE_POSITION)
+        .and_then(VertexAttributeValues::as_float3)
+        .expect("des positions de sommets");
+    let (mut min, mut max) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+    for p in positions {
+        min = min.min(Vec2::new(p[0], p[1]));
+        max = max.max(Vec2::new(p[0], p[1]));
+    }
+    (handle, max - min)
+}
+
+/// Écrit un `WindowResized` pour la fenêtre primaire, puis une mise à jour.
+fn resize_window(app: &mut App, width: f32, height: f32) {
+    let window = app
+        .world_mut()
+        .query_filtered::<Entity, With<PrimaryWindow>>()
+        .single(app.world())
+        .expect("une fenêtre primaire");
+    app.world_mut().write_message(WindowResized {
+        window,
+        width,
+        height,
+    });
+    app.update();
+}
+
+/// Le `Transform` du quad, copié.
+fn quad_transform(app: &mut App) -> Transform {
+    *app.world_mut()
+        .query_filtered::<&Transform, With<BackgroundQuad>>()
+        .single(app.world())
+        .expect("une seule entité de fond")
 }
 
 /// Le plugin pose `CrtSettings`, et le défaut est le filtre allumé, à pleine
@@ -192,4 +249,85 @@ fn test_background_material_asset_is_registered() {
         app.world()
             .contains_resource::<Assets<BackgroundMaterial>>()
     );
+}
+
+/// Trois mises à jour, une seule entité de fond, à `z == -100.0`, aux
+/// dimensions logiques de la fenêtre primaire.
+#[test]
+fn test_background_quad_spawned_once() {
+    let mut app = app_headless();
+    app.update();
+    app.update();
+    app.update();
+
+    let fonds = app
+        .world_mut()
+        .query_filtered::<Entity, With<BackgroundQuad>>()
+        .iter(app.world())
+        .count();
+    assert_eq!(fonds, 1, "une seule entité de fond, pour toute la partie");
+    assert_eq!(quad_transform(&mut app).translation.z, -100.0);
+    let (_, taille) = quad_mesh(&mut app);
+    assert_eq!(taille, Vec2::new(1280.0, 720.0));
+}
+
+/// Un `WindowResized`, une mise à jour : les dimensions du maillage ont
+/// changé et suivent le message.
+#[test]
+fn test_window_resize_rebuilds_mesh() {
+    let mut app = app_headless();
+    app.update();
+    let (_, avant) = quad_mesh(&mut app);
+
+    resize_window(&mut app, 640.0, 480.0);
+
+    let (_, apres) = quad_mesh(&mut app);
+    assert_ne!(avant, apres);
+    assert_eq!(apres, Vec2::new(640.0, 480.0));
+}
+
+/// Même scénario : le `Transform` du quad est bit à bit identique avant et
+/// après, `scale` comprise. Le redimensionnement passe par le maillage, jamais
+/// par le `Transform` (raccord A).
+#[test]
+fn test_window_resize_never_writes_transform() {
+    let mut app = app_headless();
+    app.update();
+    let avant = quad_transform(&mut app);
+
+    resize_window(&mut app, 640.0, 480.0);
+
+    let apres = quad_transform(&mut app);
+    assert_eq!(avant, apres);
+    let bits = |t: Transform| {
+        let mut v: Vec<u32> = t
+            .translation
+            .to_array()
+            .iter()
+            .map(|f| f.to_bits())
+            .collect();
+        v.extend(t.rotation.to_array().iter().map(|f| f.to_bits()));
+        v.extend(t.scale.to_array().iter().map(|f| f.to_bits()));
+        v
+    };
+    assert_eq!(bits(avant), bits(apres));
+}
+
+/// Le maillage est réécrit en place : même handle avant et après, et pas un
+/// maillage de plus dans `Assets<Mesh>`. Un échange de handle fuiterait un
+/// maillage par événement.
+#[test]
+fn test_window_resize_keeps_mesh_handle() {
+    let mut app = app_headless();
+    app.update();
+    let (avant, _) = quad_mesh(&mut app);
+    let combien = app.world().resource::<Assets<Mesh>>().len();
+
+    resize_window(&mut app, 640.0, 480.0);
+    resize_window(&mut app, 640.0, 480.0);
+
+    let (apres, taille) = quad_mesh(&mut app);
+    assert_eq!(avant, apres, "le handle du maillage ne change pas");
+    assert_eq!(app.world().resource::<Assets<Mesh>>().len(), combien);
+    assert_eq!(taille, Vec2::new(640.0, 480.0), "idempotent");
 }

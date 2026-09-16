@@ -1898,7 +1898,12 @@ jobs:
           # aucun champ `time`, le mot restant libre puisque le bloc verbatim
           # l'emploie pour dire qu'il n'y en a pas ; ni `Component` ni
           # `Resource` sur un matériau ; aucune couleur ni défaut ici, les
-          # palettes sont TASK-86 ; le remplissage explicite à l'offset 56 et
+          # palettes sont TASK-86 (le remplissage neutre du spawn, noir, est
+          # admis jusqu'à TASK-86 : il ne nomme aucune couleur) ; ni `Component`
+          # ni `Resource` sur le matériau ou son bloc, ancré sur le dérivé posé
+          # sur ces deux types, le marqueur du quad de TASK-85 étant un
+          # composant légitime du même fichier ; le remplissage explicite à
+          # l'offset 56 et
           # les six offsets en commentaire, seule façon de relire les deux
           # blocs côte à côte. Le chemin du shader est celui que le plugin
           # publie, en une seule orthographe.
@@ -1917,8 +1922,36 @@ jobs:
           count   "critère 2  un seul uniform(0) dans le matériau" 1 -n '^\s*#\[uniform\(0' "$BG"
           forbid  "critère 2  forme B mélangée"              -n '^\s*#\[uniform\(0,' "$BG"
           forbid  "TASK-84  champ time dans l'uniforme"      -n '^\s*(pub\s+)?time\s*:' "$BG"
-          forbid  "TASK-84  matériau composant ou ressource" -n 'derive\([^)]*(Component|Resource)' "$BG"
+          forbid  "TASK-84  matériau composant ou ressource" -nU 'derive\([^)]*(Component|Resource)[^)]*\)\]\s*\npub struct Background(Material|Uniform)\b' "$BG"
           forbid  "TASK-84  défaut ou couleur dans le matériau" -n '^impl Default for|Srgba::hex\(|LinearRgba::(new|rgb|rgba)\(|Color::' "$BG"
+
+          # TASK-85 : le shader du vortex, le quad et le redimensionnement.
+          # Les chemins d'import, le def de bind group et le champ de viewport
+          # sont ceux des sources 0.19.1, cités dans l'en-tête du shader. Le
+          # miroir des deux structs est une seule garde multiligne, appliquée
+          # au WGSL et au Rust : six champs, même ordre, mêmes offsets, ce
+          # qu'aucun test de taille ne voit. Le temps vient du GPU : aucun
+          # champ de temps dans le WGSL. Le quad est spawné au démarrage,
+          # derrière tout le reste ; le redimensionnement écoute la fenêtre et
+          # réécrit le maillage en place ; aucune écriture de Transform dans
+          # `graphics/`, ni de son échelle (raccord A).
+          WGSL=$SHADERS/psyche_background.wgsl
+          require "TASK-85  import de la sortie du vertex 2D" -n '^#import bevy_sprite::mesh2d_vertex_output::VertexOutput$' "$WGSL"
+          require "TASK-85  import des bindings de vue 2D"    -n '^#import bevy_sprite::mesh2d_view_bindings::\{globals, view\}$' "$WGSL"
+          require "TASK-85  bind group du matériau par le def" -n '^@group\(#\{MATERIAL_BIND_GROUP\}\) @binding\(0\) var<uniform> material: BackgroundUniform;$' "$WGSL"
+          require "TASK-85  le temps vient du GPU"            -n 'globals\.time \* material\.speed' "$WGSL"
+          require "critère 8  correction d'aspect"            -n 'let aspect = view\.viewport\.z / view\.viewport\.w;' "$WGSL"
+          forbid  "TASK-85  champ de temps dans le WGSL"      -n '^\s*time\s*:' "$WGSL"
+          MIROIR='(?s)primary_color.*?// offset +0\b.*?secondary_color.*?// offset 16.*?accent_color.*?// offset 32.*?\bspeed\b.*?// offset 48.*?swirl_factor.*?// offset 52.*?_pad.*?// offset 56'
+          require "critère 2  miroir WGSL, six champs dans l'ordre" -U "$MIROIR" "$WGSL"
+          require "critère 2  miroir Rust, six champs dans l'ordre" -U "$MIROIR" "$BG"
+          require "TASK-85  le quad derrière tout le reste"   -n 'Transform::from_xyz\(0\.0, 0\.0, -100\.0\)' "$BG"
+          require "TASK-85  le spawn tourne au démarrage"     -n '^\s+app\.add_systems\(Startup, spawn_background_quad\);$' "$JUICE/src/graphics/plugin.rs"
+          require "TASK-85  le redimensionnement est ordonnancé" -n '^\s+app\.add_systems\(Update, resize_background_quad\);$' "$JUICE/src/graphics/plugin.rs"
+          require "TASK-85  le redimensionnement écoute la fenêtre" -n 'MessageReader<WindowResized>' "$BG"
+          require "TASK-85  le maillage est réécrit en place" -n 'meshes\.get_mut\(' "$BG"
+          forbid  "critère 4  écriture de Transform dans graphics" -n '&mut Transform' "$JUICE/src/graphics"
+          forbid  "critère 4  échelle de Transform écrite"    -n '\.scale\s*=|Transform::from_scale|with_scale\(' "$JUICE/src/graphics"
 
           exit $status
 
