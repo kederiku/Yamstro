@@ -4543,6 +4543,7 @@ dependencies = [
  "bevy",
  "core_engine",
  "game_state",
+ "log",
  "naga",
  "naga_oil",
  "rand",

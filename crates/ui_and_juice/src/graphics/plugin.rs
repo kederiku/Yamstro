@@ -8,14 +8,33 @@
 //!
 //! 1. **Les trois shaders.** Le plugin publie leurs chemins, relatifs à la
 //!    racine `assets/` du dépôt, en une seule source : les matériaux de
-//!    TASK-84, TASK-88 et TASK-90 les désignent par `ShaderRef::Path`, et le
-//!    repli de TASK-92 les surveille. Il ne les **charge** pas lui-même, et
-//!    c'est une contrainte du moteur, pas un choix : une poignée forte lâchée
-//!    décharge l'asset dès la fin de son chargement, et le type `Shader` n'est
-//!    enregistré que par le plugin de rendu, si bien qu'un `load::<Shader>`
-//!    sous `MinimalPlugins` plus le serveur d'assets fait paniquer ce dernier
-//!    quand il traite l'événement d'échec d'un type inconnu. Retenir les
-//!    poignées et lire `LoadState::Failed` appartient à TASK-92.
+//!    TASK-84, TASK-88 et TASK-90 les désignent par `ShaderRef::Path`. Il ne
+//!    les **charge** pas lui-même, et c'est une contrainte du moteur, pas un
+//!    choix : une poignée forte lâchée décharge l'asset dès la fin de son
+//!    chargement, et le type `Shader` n'est enregistré que par le plugin de
+//!    rendu (`bevy_render-0.19.1/src/lib.rs:353`). Le repli de TASK-92 ne
+//!    retient donc aucune poignée : il écoute le message
+//!    `AssetLoadFailedEvent<Shader>` (`bevy_asset-0.19.1/src/event.rs:10`),
+//!    émis dans le monde principal pour tout shader dont le chargement
+//!    échoue, d'où qu'il ait été demandé. Ce message n'existe que si
+//!    `Assets<Shader>` est enregistré : les tests headless de l'étape font
+//!    `init_asset::<Shader>()`, ce que le plugin de rendu fait dans le jeu.
+//!
+//! # Le mode dégradé (TASK-92)
+//!
+//! Trois déclencheurs : le réglage persistant (Étape 10), l'argument de ligne
+//! de commande `--safe-mode`, lu dans `build` juste après la pose de la
+//! ressource, et la bascule automatique sur un shader en échec, qui journalise
+//! un avertissement et n'a jamais paniqué. Cette dernière couvre un fichier
+//! absent ou illisible ; un échec de **compilation** sur le GPU est une erreur
+//! du cache de pipelines dans le monde de rendu, que Bevy journalise en
+//! sautant le dessin, et qu'aucun message du monde principal ne porte :
+//! consigné pour TASK-94. Les replis vivent à côté de leurs effets, dans
+//! `background.rs` et `holo.rs` ; le filtre cathodique passe déjà par
+//! `is_active`. La réconciliation tourne sur `resource_changed::<SafeMode>`
+//! seulement, et elle est idempotente par constat d'état, pas par mémoire :
+//! elle ne construit jamais ce qui existe, ne retire jamais ce qui manque.
+//! `graphics/` ne lit et n'écrit le mode que par ses méthodes.
 //! 2. **L'enregistrement des matériaux.** `build` est le point
 //!    d'enregistrement des matériaux : le fond (TASK-84), le filtre
 //!    cathodique (TASK-88, par `FullscreenMaterialPlugin`) et le contour
@@ -42,14 +61,22 @@
 //! déclarera le premier matériau devra ajouter la feature du même nom, et le
 //! justifier.
 
+use bevy::asset::AssetLoadFailedEvent;
 use bevy::core_pipeline::fullscreen_material::FullscreenMaterialPlugin;
 use bevy::prelude::*;
+use bevy::shader::Shader;
 use bevy::sprite_render::Material2dPlugin;
+use log::warn;
 
-use super::background::{BackgroundMaterial, resize_background_quad, spawn_background_quad};
+use super::background::{
+    BackgroundMaterial, apply_safe_mode_to_background, resize_background_quad,
+    spawn_background_quad,
+};
 use super::crt::{CrtMaterial, sync_crt_material};
-use super::holo::{HoloOutlineMaterial, build_holo_bank, dress_dice, sync_die_outline};
-use super::theme::{animate_visual_theme, init_visual_theme};
+use super::holo::{
+    HoloOutlineMaterial, apply_safe_mode_to_dice, build_holo_bank, dress_dice, sync_die_outline,
+};
+use super::theme::{animate_visual_theme, init_visual_theme, sync_flat_background};
 use crate::settings::{CrtSettings, SafeMode};
 
 /// Le vortex d'arrière-plan, rendu en `MainPass` sur le quad de fond.
@@ -91,6 +118,13 @@ impl Plugin for VisualEffectsPlugin {
         app.init_resource::<CrtSettings>();
         app.init_resource::<SafeMode>();
 
+        // Le mode dégradé demandé sur la ligne de commande (TASK-92) : lu
+        // ici, avant tout démarrage, et engagé par sa méthode. Sur WASM,
+        // `std::env::args()` est vide.
+        if SafeMode::requested_by(std::env::args()) {
+            app.world_mut().resource_mut::<SafeMode>().engage();
+        }
+
         // Point d'enregistrement des matériaux, une ligne par matériau : le
         // fond (TASK-84), le filtre cathodique (TASK-88), le contour (TASK-90).
         app.add_plugins(Material2dPlugin::<BackgroundMaterial>::default());
@@ -117,5 +151,42 @@ impl Plugin for VisualEffectsPlugin {
         app.add_systems(Startup, (spawn_background_quad, init_visual_theme).chain());
         app.add_systems(Update, resize_background_quad);
         app.add_systems(Update, animate_visual_theme);
+
+        // Le mode dégradé (TASK-92) : l'échec d'un shader l'engage, puis la
+        // réconciliation, sur changement seulement, avant tout ce qui habille
+        // ou anime, pour que la frame du changement voie déjà la bonne tenue.
+        // L'aplat du fond suit la palette cible, sans interpolation.
+        app.add_systems(
+            Update,
+            (
+                engage_safe_mode_on_shader_failure,
+                (apply_safe_mode_to_background, apply_safe_mode_to_dice)
+                    .run_if(resource_changed::<SafeMode>),
+            )
+                .chain()
+                .before(dress_dice)
+                .before(animate_visual_theme)
+                .before(sync_flat_background)
+                .before(resize_background_quad),
+        );
+        app.add_systems(Update, sync_flat_background);
+    }
+}
+
+/// La bascule automatique : un shader dont le chargement échoue engage le mode
+/// dégradé, avec un avertissement qui nomme le chemin et l'erreur. Jamais une
+/// panique : c'est le cas que le mode existe pour couvrir.
+pub fn engage_safe_mode_on_shader_failure(
+    mut failures: MessageReader<AssetLoadFailedEvent<Shader>>,
+    mut safe_mode: ResMut<SafeMode>,
+) {
+    for failure in failures.read() {
+        warn!(
+            "shader `{}` en échec de chargement ({}) : mode dégradé engagé",
+            failure.path, failure.error
+        );
+        if !safe_mode.is_engaged() {
+            safe_mode.engage();
+        }
     }
 }

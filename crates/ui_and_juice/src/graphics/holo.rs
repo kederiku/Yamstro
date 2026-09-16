@@ -1,7 +1,19 @@
 //! Le matériau de contour holographique, son bloc d'uniformes, la banque de
 //! variantes pré-construites (TASK-90), l'habillage des dés et le choix de
-//! leur variante par échange de handle (TASK-91). Le contour uni du mode
-//! dégradé est TASK-92.
+//! leur variante par échange de handle (TASK-91), et le contour uni du mode
+//! dégradé (TASK-92).
+//!
+//! # Le mode dégradé des dés
+//!
+//! En mode dégradé, la banque n'est pas construite et aucun
+//! `HoloOutlineMaterial` n'existe : un dé porte un `Sprite` uni de la couleur
+//! de son état, sans pulsation ni balayage, et `Hidden` donne le carré gris
+//! neutre, le dos, sans que la valeur soit lue. **La banque absente est le
+//! mode dégradé des dés** : les deux systèmes lisent `Option<Res<HoloMaterials>>`
+//! et choisissent la tenue sur sa présence, sans lire le mode. Repos et survol
+//! partagent la même couleur unie : le survol n'est pas une information de
+//! jeu, TASK-94 calibrera. La bascule dépouille les dés, et l'habillage les
+//! rhabille à la frame suivante dans la tenue du moment.
 //!
 //! # Raccord C : le rendu ne lit jamais la valeur d'un dé
 //!
@@ -81,12 +93,14 @@ use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
+use bevy::sprite::Sprite;
 use bevy::sprite_render::{Material2d, MeshMaterial2d};
 use bevy::ui::Interaction;
 use core_engine::dice::Die;
 use game_state::{DieView, Hidden, Scoring};
 
 use super::plugin::HOLO_CARD_SHADER;
+use crate::settings::SafeMode;
 
 // ---- Forme A : un champ unique portant un ShaderType, et la texture de face.
 
@@ -157,6 +171,36 @@ impl HoloMaterials {
     pub fn die(&self, state: usize, iridescent: bool) -> &Handle<HoloOutlineMaterial> {
         &self.dice[state * 2 + iridescent as usize]
     }
+
+    /// Construit la banque : huit matériaux insérés, huit handles retenus, le
+    /// balayage irisé ne différant que par `rainbow_shift`. Appelée au
+    /// démarrage, et à chaque sortie du mode dégradé.
+    #[must_use]
+    pub fn build(materials: &mut Assets<HoloOutlineMaterial>) -> Self {
+        let variants = starting_variants();
+        let dice = core::array::from_fn(|index| {
+            let (outline_color, outline_width, mask_face) = variants[index / 2];
+            let rainbow_shift = if index % 2 == 1 { 1.0 } else { 0.0 };
+            materials.add(HoloOutlineMaterial {
+                params: HoloUniform {
+                    outline_color,
+                    outline_width,
+                    rainbow_shift,
+                    mask_face,
+                    _pad: 0.0,
+                },
+                texture: None,
+            })
+        });
+        Self { dice }
+    }
+}
+
+/// La couleur de contour d'un état, celle de sa variante de départ : c'est
+/// aussi la couleur unie du dé en mode dégradé.
+#[must_use]
+pub fn outline_color(state: usize) -> LinearRgba {
+    starting_variants()[state].0
 }
 
 /// Les réglages de départ de chaque état, dans l'ordre des index : couleur,
@@ -172,28 +216,17 @@ fn starting_variants() -> [(LinearRgba, f32, f32); 4] {
     ]
 }
 
-/// Construit la banque des dés, une fois, au démarrage.
-///
-/// Huit matériaux insérés dans `Assets<HoloOutlineMaterial>`, huit handles
-/// retenus ; le balayage irisé ne diffère que par `rainbow_shift`. TASK-92
-/// gardera ce système derrière le mode dégradé.
-pub fn build_holo_bank(mut commands: Commands, mut materials: ResMut<Assets<HoloOutlineMaterial>>) {
-    let variants = starting_variants();
-    let dice = core::array::from_fn(|index| {
-        let (outline_color, outline_width, mask_face) = variants[index / 2];
-        let rainbow_shift = if index % 2 == 1 { 1.0 } else { 0.0 };
-        materials.add(HoloOutlineMaterial {
-            params: HoloUniform {
-                outline_color,
-                outline_width,
-                rainbow_shift,
-                mask_face,
-                _pad: 0.0,
-            },
-            texture: None,
-        })
-    });
-    commands.insert_resource(HoloMaterials { dice });
+/// Construit la banque des dés, une fois, au démarrage ; rien en mode
+/// dégradé, où aucun `HoloOutlineMaterial` ne doit exister.
+pub fn build_holo_bank(
+    mut commands: Commands,
+    mut materials: ResMut<Assets<HoloOutlineMaterial>>,
+    safe_mode: Res<SafeMode>,
+) {
+    if safe_mode.is_engaged() {
+        return;
+    }
+    commands.insert_resource(HoloMaterials::build(&mut materials));
 }
 
 /// Le côté du quad d'un dé, en pixels logiques : une valeur de départ, la
@@ -238,52 +271,123 @@ type OutlineInputs<'a> = (
     Option<&'a Interaction>,
 );
 
-/// Un dé vu mais pas encore habillé.
-type Undressed = (With<DieView>, Without<Mesh2d>);
+/// Un dé vu mais pas encore habillé, ni par la banque ni à plat.
+type Undressed = (With<DieView>, Without<Mesh2d>, Without<Sprite>);
+
+/// Les dés habillés par la banque.
+type HoloDressed = (With<DieView>, With<MeshMaterial2d<HoloOutlineMaterial>>);
+
+/// Les dés habillés à plat, en mode dégradé.
+type FlatDressed = (With<DieView>, With<Sprite>);
+
+/// La tenue d'un dé, l'une ou l'autre, jamais les deux.
+type DieDress<'a> = (
+    Option<&'a mut MeshMaterial2d<HoloOutlineMaterial>>,
+    Option<&'a mut Sprite>,
+);
+
+/// Le carré uni d'un dé en mode dégradé.
+fn flat_die(state: usize) -> Sprite {
+    Sprite::from_color(outline_color(state), Vec2::splat(DIE_QUAD_SIZE))
+}
+
+/// Dépouille un dé de sa tenue holographique ; `dress_dice` le rhabille.
+fn undress_holo(commands: &mut Commands, die: Entity) {
+    commands
+        .entity(die)
+        .remove::<(Mesh2d, MeshMaterial2d<HoloOutlineMaterial>)>();
+}
+
+/// Dépouille un dé de sa tenue plate ; `dress_dice` le rhabille.
+fn undress_flat(commands: &mut Commands, die: Entity) {
+    commands.entity(die).remove::<Sprite>();
+}
 
 fn state_of((hidden, scoring, interaction): OutlineInputs<'_>) -> usize {
     outline_state(hidden.is_some(), scoring.is_some(), is_hovered(interaction))
 }
 
-/// Habille chaque dé nouvellement vu : un quad partagé, bâti une fois, et le
-/// handle de sa variante. Aucun `Transform` n'est écrit.
+/// Habille chaque dé nouvellement vu : avec la banque, un quad partagé, bâti
+/// une fois, et le handle de sa variante ; sans elle, le carré uni de son
+/// état. Aucun `Transform` n'est écrit.
 pub fn dress_dice(
     mut commands: Commands,
-    bank: Res<HoloMaterials>,
+    bank: Option<Res<HoloMaterials>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut quad: Local<Option<Handle<Mesh>>>,
     dice: Query<(Entity, &Die, OutlineInputs<'_>), Undressed>,
 ) {
     for (entity, die, inputs) in &dice {
+        let state = state_of(inputs);
+        let Some(bank) = bank.as_deref() else {
+            commands.entity(entity).insert(flat_die(state));
+            continue;
+        };
         let quad = quad
             .get_or_insert_with(|| {
                 meshes.add(Mesh::from(Rectangle::new(DIE_QUAD_SIZE, DIE_QUAD_SIZE)))
             })
             .clone();
-        let material = bank.die(state_of(inputs), is_iridescent(die)).clone();
+        let material = bank.die(state, is_iridescent(die)).clone();
         commands
             .entity(entity)
             .insert((Mesh2d(quad), MeshMaterial2d(material)));
     }
 }
 
-/// Réconcilie la variante de chaque dé avec ses marqueurs et son survol, et
-/// n'écrit le handle que s'il diffère.
+/// Réconcilie la tenue de chaque dé avec ses marqueurs et son survol : le
+/// handle avec la banque, la couleur unie sans elle, et n'écrit que si la
+/// valeur diffère.
 pub fn sync_die_outline(
-    bank: Res<HoloMaterials>,
-    mut dice: Query<
-        (
-            &Die,
-            &mut MeshMaterial2d<HoloOutlineMaterial>,
-            OutlineInputs<'_>,
-        ),
-        With<DieView>,
-    >,
+    bank: Option<Res<HoloMaterials>>,
+    mut dice: Query<(&Die, DieDress<'_>, OutlineInputs<'_>), With<DieView>>,
 ) {
-    for (die, mut material, inputs) in &mut dice {
-        let target = bank.die(state_of(inputs), is_iridescent(die));
-        if material.0.id() != target.id() {
-            material.0 = target.clone();
+    for (die, (material, sprite), inputs) in &mut dice {
+        let state = state_of(inputs);
+        match (bank.as_deref(), material, sprite) {
+            (Some(bank), Some(mut material), _) => {
+                let target = bank.die(state, is_iridescent(die));
+                if material.0.id() != target.id() {
+                    material.0 = target.clone();
+                }
+            }
+            (None, _, Some(mut sprite)) => {
+                let target = Color::from(outline_color(state));
+                if sprite.color != target {
+                    sprite.color = target;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Les dés, sur changement du mode (TASK-92) : engagé, la banque tombe avec
+/// ses huit matériaux et les dés sont dépouillés de leur tenue
+/// holographique ; désengagé, la banque est reconstruite, une fois, et les
+/// dés dépouillés de leur tenue plate. `dress_dice` les rhabille à la frame
+/// suivante. Rien n'est fait si l'état est déjà le bon.
+pub fn apply_safe_mode_to_dice(
+    mut commands: Commands,
+    safe_mode: Res<SafeMode>,
+    bank: Option<Res<HoloMaterials>>,
+    mut materials: ResMut<Assets<HoloOutlineMaterial>>,
+    holo_dice: Query<Entity, HoloDressed>,
+    flat_dice: Query<Entity, FlatDressed>,
+) {
+    if safe_mode.is_engaged() {
+        if bank.is_some() {
+            commands.remove_resource::<HoloMaterials>();
+        }
+        for die in &holo_dice {
+            undress_holo(&mut commands, die);
+        }
+    } else {
+        if bank.is_none() {
+            commands.insert_resource(HoloMaterials::build(&mut materials));
+        }
+        for die in &flat_dice {
+            undress_flat(&mut commands, die);
         }
     }
 }

@@ -126,11 +126,41 @@ impl CrtSettings {
 /// dérive `Default` et vaut donc `false` : le mode ne s'active jamais tout seul
 /// au premier lancement. Ses replis (fond plat, passe cathodique absente,
 /// contour uni) et sa bascule automatique sur un shader en échec sont
-/// TASK-92 ; ici il n'est que déclaré.
+/// TASK-92, qui ne passe que par les trois méthodes ci-dessous : `graphics/`
+/// ne lit ni n'écrit jamais le drapeau lui-même, et la CI l'interdit.
 #[derive(Resource, Debug, Clone, Default)]
 pub struct SafeMode {
     /// Vrai quand le mode dégradé est actif.
     pub enabled: bool,
+}
+
+impl SafeMode {
+    /// L'argument de ligne de commande qui engage le mode au lancement.
+    pub const FLAG: &'static str = "--safe-mode";
+
+    /// Vrai quand le mode dégradé est actif.
+    #[must_use]
+    pub fn is_engaged(&self) -> bool {
+        self.enabled
+    }
+
+    /// Engage le mode. À travers une `ResMut`, l'appel seul marque la
+    /// ressource changée : l'appelant teste [`Self::is_engaged`] d'abord,
+    /// pour ne pas réveiller la réconciliation sans raison.
+    pub fn engage(&mut self) {
+        self.enabled = true;
+    }
+
+    /// Vrai si les arguments de ligne de commande portent [`Self::FLAG`].
+    /// Pure : le plugin lui passe `std::env::args()`, vide sur WASM.
+    #[must_use]
+    pub fn requested_by<I, S>(args: I) -> bool
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        args.into_iter().any(|arg| arg.as_ref() == Self::FLAG)
+    }
 }
 
 #[cfg(test)]
@@ -145,5 +175,26 @@ mod tests {
         let reglages = JuiceSettings::default();
         assert_eq!(reglages.flash_intensity, 1.0);
         assert_eq!(reglages.shake_intensity, 1.0);
+    }
+
+    /// Le mode se demande par `--safe-mode`, exactement, n'importe où dans
+    /// les arguments ; rien d'autre ne l'engage, et une ligne vide non plus.
+    #[test]
+    fn test_safe_mode_requested_by_flag() {
+        assert!(SafeMode::requested_by(["yamstro", "--safe-mode"]));
+        assert!(SafeMode::requested_by(["--safe-mode", "--autre"]));
+        assert!(!SafeMode::requested_by(["yamstro", "--safe"]));
+        assert!(!SafeMode::requested_by(["yamstro", "safe-mode"]));
+        assert!(!SafeMode::requested_by(Vec::<String>::new()));
+    }
+
+    /// Engager deux fois vaut engager une fois ; le défaut n'est pas engagé.
+    #[test]
+    fn test_safe_mode_engage_is_idempotent() {
+        let mut mode = SafeMode::default();
+        assert!(!mode.is_engaged());
+        mode.engage();
+        mode.engage();
+        assert!(mode.is_engaged());
     }
 }

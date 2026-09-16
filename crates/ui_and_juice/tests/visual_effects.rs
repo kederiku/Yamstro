@@ -17,10 +17,13 @@ use std::path::Path;
 use std::time::Duration;
 
 use bevy::asset::{AssetEvent, AssetPlugin};
+use bevy::color::{LinearRgba, Srgba};
 use bevy::mesh::{MeshPlugin, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::render::render_resource::ShaderType;
 use bevy::render::sync_world::SyncWorldPlugin;
+use bevy::shader::Shader;
+use bevy::sprite::Sprite;
 use bevy::time::TimeUpdateStrategy;
 use bevy::ui::Interaction;
 use bevy::window::{PrimaryWindow, WindowPlugin, WindowResized};
@@ -38,7 +41,7 @@ use ui_and_juice::graphics::holo::{
     HoloMaterials, HoloOutlineMaterial, HoloUniform, outline_state,
 };
 use ui_and_juice::graphics::plugin::SHADER_PATHS;
-use ui_and_juice::graphics::theme::{BOSS, SHOP, SMALL, ThemePalette, VisualThemeController};
+use ui_and_juice::graphics::theme::{BIG, BOSS, SHOP, SMALL, ThemePalette, VisualThemeController};
 use ui_and_juice::settings::{CrtSettings, JuiceSettings, SafeMode};
 
 /// Trois mises à jour, aucune panique : le plugin se monte sans rendu, avec le
@@ -105,7 +108,76 @@ fn app_headless() -> App {
         SyncWorldPlugin,
         VisualEffectsPlugin,
     ));
+    // Ce que le plugin de rendu fait dans le jeu (`bevy_render/src/lib.rs:353`)
+    // et que le repli de TASK-92 exige : sans `Assets<Shader>`, le message
+    // d'échec de chargement n'existe pas.
+    app.init_asset::<Shader>();
     app
+}
+
+/// L'application de l'étape en mode dégradé, engagé **avant** le démarrage.
+fn app_safe() -> App {
+    let mut app = app_headless();
+    app.world_mut().resource_mut::<SafeMode>().engage();
+    app
+}
+
+fn set_safe_mode(app: &mut App, engaged: bool) {
+    app.world_mut().resource_mut::<SafeMode>().enabled = engaged;
+}
+
+fn safe_mode_engaged(app: &App) -> bool {
+    app.world().resource::<SafeMode>().is_engaged()
+}
+
+/// La seule entité de fond, et une assertion qu'il n'y en a qu'une.
+fn background_entity(app: &mut App) -> Entity {
+    let quads: Vec<Entity> = app
+        .world_mut()
+        .query_filtered::<Entity, With<BackgroundQuad>>()
+        .iter(app.world())
+        .collect();
+    assert_eq!(quads.len(), 1, "une seule entité de fond");
+    quads[0]
+}
+
+fn sprite_of(app: &App, entity: Entity) -> Option<Sprite> {
+    app.world().get::<Sprite>(entity).cloned()
+}
+
+fn has_background_material(app: &App, entity: Entity) -> bool {
+    app.world()
+        .get::<MeshMaterial2d<BackgroundMaterial>>(entity)
+        .is_some()
+}
+
+fn count_assets<A: Asset>(app: &App) -> usize {
+    app.world().resource::<Assets<A>>().len()
+}
+
+/// Les `Added` du matériau de fond, comptés en `Last` : un matériau créé puis
+/// libéré avant la troisième frame échappe au comptage des assets, pas à
+/// celui des messages.
+#[derive(Resource, Default)]
+struct BackgroundEvents {
+    added: usize,
+}
+
+fn count_background_events(
+    mut reader: MessageReader<AssetEvent<BackgroundMaterial>>,
+    mut count: ResMut<BackgroundEvents>,
+) {
+    for event in reader.read() {
+        if matches!(event, AssetEvent::Added { .. }) {
+            count.added += 1;
+        }
+    }
+}
+
+/// La couleur unie attendue d'un état, depuis le littéral sRGB du corpus,
+/// jamais depuis la fonction sous test.
+fn flat_color(hex: &str) -> Color {
+    Color::from(LinearRgba::from(Srgba::hex(hex).expect("littéral")))
 }
 
 /// Le handle du maillage du fond et ses dimensions, lues sur les positions
@@ -1231,4 +1303,249 @@ fn test_holo_shader_composes_and_validates() {
         &[("MATERIAL_BIND_GROUP", 2)],
     );
     assert!(has_fragment_entry(&module));
+}
+
+// ------------------------------------------------------------ TASK-92
+
+/// En mode dégradé dès le démarrage, aucun matériau custom n'est instancié :
+/// zéro `Added` sur les deux types, les deux `Assets<..>` vides, ni banque ni
+/// contrôleur, et l'App tourne. Le compte des messages voit ce que le compte
+/// des assets ne voit pas : un matériau créé puis libéré par la bascule.
+#[test]
+fn test_safe_mode_spawns_no_custom_material() {
+    let mut app = app_safe();
+    app.init_resource::<HoloEvents>();
+    app.add_systems(Last, count_holo_events);
+    app.init_resource::<BackgroundEvents>();
+    app.add_systems(Last, count_background_events);
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(app.world().resource::<BackgroundEvents>().added, 0);
+    assert_eq!(app.world().resource::<HoloEvents>().added, 0);
+    assert_eq!(count_assets::<BackgroundMaterial>(&app), 0);
+    assert_eq!(count_assets::<HoloOutlineMaterial>(&app), 0);
+    assert!(!app.world().contains_resource::<HoloMaterials>());
+    assert!(!app.world().contains_resource::<VisualThemeController>());
+}
+
+/// Un shader dont le chargement échoue engage le mode dégradé, sans panique,
+/// et les matériaux tombent : aucun handle ne survit à la bascule.
+#[test]
+fn test_shader_load_failure_enables_safe_mode() {
+    let mut app = app_headless();
+    app.update();
+    assert!(!safe_mode_engaged(&app));
+    assert_eq!(count_assets::<HoloOutlineMaterial>(&app), 8);
+
+    let server = app.world().resource::<AssetServer>().clone();
+    let _absent: Handle<Shader> = server.load("shaders/absent.wgsl");
+    let mut frames = 0;
+    while !safe_mode_engaged(&app) && frames < 600 {
+        app.update();
+        frames += 1;
+    }
+    assert!(
+        safe_mode_engaged(&app),
+        "le mode ne s'est pas engagé en 600 frames"
+    );
+
+    for _ in 0..3 {
+        app.update();
+    }
+    let quad = background_entity(&mut app);
+    assert!(sprite_of(&app, quad).is_some(), "le fond est plat");
+    assert!(!has_background_material(&app, quad));
+    assert_eq!(count_assets::<BackgroundMaterial>(&app), 0);
+    assert_eq!(count_assets::<HoloOutlineMaterial>(&app), 0);
+    assert!(!app.world().contains_resource::<HoloMaterials>());
+}
+
+/// Mode dégradé actif : la condition de TASK-88 rend faux, la sonde ne tourne
+/// pas sur 60 frames, la caméra ne porte aucun matériau.
+#[test]
+fn test_safe_mode_removes_crt_from_schedule() {
+    let mut app = app_with_camera();
+    app.world_mut().resource_mut::<SafeMode>().engage();
+    for _ in 0..60 {
+        app.update();
+    }
+    assert_eq!(app.world().resource::<ProbeRuns>().0, 0);
+    assert!(camera_crt(&mut app).is_none());
+}
+
+/// Le fond plat : une seule entité, un `Sprite` de la couleur primaire de la
+/// Petite Mise aux dimensions de la fenêtre, aucun maillage ni matériau, et le
+/// même `z` que le quad.
+#[test]
+fn test_safe_mode_spawns_flat_gradient() {
+    let mut app = app_safe();
+    for _ in 0..3 {
+        app.update();
+    }
+    let quad = background_entity(&mut app);
+    let sprite = sprite_of(&app, quad).expect("un aplat");
+    assert_eq!(sprite.custom_size, Some(Vec2::new(1280.0, 720.0)));
+    assert_eq!(sprite.color, Color::from(SMALL.primary));
+    assert!(app.world().get::<Mesh2d>(quad).is_none());
+    assert!(!has_background_material(&app, quad));
+    let transform = app.world().get::<Transform>(quad).expect("un Transform");
+    assert_eq!(transform.translation.z, -100.0);
+}
+
+/// Trois allers-retours : une seule entité de fond, un seul matériau de fond,
+/// exactement huit handles holo, deux maillages, le contrôleur sur le bon
+/// handle, et le dé rhabillé par la banque. Rien ne fuit, rien ne double.
+#[test]
+fn test_toggling_safe_mode_off_reinstates_materials() {
+    let mut app = app_headless();
+    app.update();
+    let die = spawn_die(&mut app, None);
+    app.update();
+
+    for _ in 0..3 {
+        set_safe_mode(&mut app, true);
+        for _ in 0..3 {
+            app.update();
+        }
+        let quad = background_entity(&mut app);
+        assert!(sprite_of(&app, quad).is_some());
+        assert_eq!(count_assets::<BackgroundMaterial>(&app), 0);
+        assert_eq!(count_assets::<HoloOutlineMaterial>(&app), 0);
+        assert!(sprite_of(&app, die).is_some(), "le dé est plat");
+        assert!(
+            app.world()
+                .get::<MeshMaterial2d<HoloOutlineMaterial>>(die)
+                .is_none()
+        );
+
+        set_safe_mode(&mut app, false);
+        for _ in 0..3 {
+            app.update();
+        }
+    }
+
+    let quad = background_entity(&mut app);
+    assert!(sprite_of(&app, quad).is_none());
+    assert!(has_background_material(&app, quad));
+    assert_eq!(count_assets::<BackgroundMaterial>(&app), 1);
+    assert_eq!(count_assets::<HoloOutlineMaterial>(&app), 8);
+    assert_eq!(count_assets::<Mesh>(&app), 2, "le fond et le quad des dés");
+    assert!(app.world().contains_resource::<HoloMaterials>());
+    let controller = app.world().resource::<VisualThemeController>();
+    let material = app
+        .world()
+        .get::<MeshMaterial2d<BackgroundMaterial>>(quad)
+        .expect("le matériau du fond");
+    assert_eq!(controller.handle.id(), material.0.id());
+    assert!(sprite_of(&app, die).is_none());
+    assert_eq!(
+        die_material(&app, die),
+        bank_id(&app, HoloMaterials::IDLE, false)
+    );
+    let sprites = app.world_mut().query::<&Sprite>().iter(app.world()).count();
+    assert_eq!(sprites, 0, "aucun aplat orphelin");
+}
+
+/// Un dé `Hidden` en mode dégradé porte le carré gris neutre, le dos, et
+/// aucun matériau : rien ne lit la valeur, la CI l'interdit.
+#[test]
+fn test_hidden_die_still_masked_in_safe_mode() {
+    let mut app = app_safe();
+    app.update();
+    let die = spawn_die(&mut app, None);
+    app.world_mut().entity_mut(die).insert(Hidden);
+    app.update();
+    app.update();
+    let sprite = sprite_of(&app, die).expect("un dé plat");
+    assert_eq!(sprite.color, flat_color("#9AA0A6"), "le gris neutre du dos");
+    assert!(
+        app.world()
+            .get::<MeshMaterial2d<HoloOutlineMaterial>>(die)
+            .is_none()
+    );
+    assert_eq!(count_assets::<HoloOutlineMaterial>(&app), 0);
+}
+
+/// En mode dégradé, un dé est un carré uni de 64 px : blanc au repos, doré
+/// sous `Scoring`, blanc à nouveau au retrait ; jamais un maillage.
+#[test]
+fn test_safe_mode_dice_are_flat_sprites() {
+    let mut app = app_safe();
+    app.update();
+    let die = spawn_die(&mut app, None);
+    app.update();
+    let sprite = sprite_of(&app, die).expect("un dé plat");
+    assert_eq!(sprite.custom_size, Some(Vec2::splat(64.0)));
+    assert_eq!(sprite.color, flat_color("#FFFFFF"));
+    assert!(app.world().get::<Mesh2d>(die).is_none());
+
+    app.world_mut().entity_mut(die).insert(Scoring);
+    app.update();
+    assert_eq!(
+        sprite_of(&app, die).expect("un dé plat").color,
+        flat_color("#FFD54A")
+    );
+
+    app.world_mut().entity_mut(die).remove::<Scoring>();
+    app.update();
+    assert_eq!(
+        sprite_of(&app, die).expect("un dé plat").color,
+        flat_color("#FFFFFF")
+    );
+}
+
+/// Le nombre de `Sprite` écrits dans la frame, fond et dés confondus.
+#[derive(Resource, Default)]
+struct SpriteWrites(usize);
+
+fn count_sprite_writes(mut writes: ResMut<SpriteWrites>, changed: Query<(), Changed<Sprite>>) {
+    writes.0 += changed.iter().count();
+}
+
+/// Au repos en mode dégradé, ni le fond ni les dés ne sont réécrits : cent
+/// vingt frames sans un seul écrit de `Sprite`.
+#[test]
+fn test_safe_mode_no_component_write_at_rest() {
+    let mut app = app_safe();
+    app.init_resource::<SpriteWrites>();
+    app.add_systems(Last, count_sprite_writes);
+    app.update();
+    let die = spawn_die(&mut app, Some(DieSeal::Gold));
+    app.world_mut().entity_mut(die).insert(Scoring);
+    app.update();
+    app.update();
+
+    app.world_mut().resource_mut::<SpriteWrites>().0 = 0;
+    for _ in 0..120 {
+        app.update();
+    }
+    assert_eq!(app.world().resource::<SpriteWrites>().0, 0, "rien au repos");
+}
+
+/// L'aplat suit la palette cible sans interpolation : la Grande Mise donne sa
+/// couleur primaire à la frame, la boutique la sienne.
+#[test]
+fn test_flat_background_follows_target_palette() {
+    let mut app = app_safe();
+    app.update();
+    let quad = background_entity(&mut app);
+    assert_eq!(
+        sprite_of(&app, quad).expect("un aplat").color,
+        Color::from(SMALL.primary)
+    );
+
+    enter_blind(&mut app, BlindType::Big);
+    app.update();
+    assert_eq!(
+        sprite_of(&app, quad).expect("un aplat").color,
+        Color::from(BIG.primary)
+    );
+
+    app.insert_resource(State::new(RunPhase::Shop));
+    app.update();
+    assert_eq!(
+        sprite_of(&app, quad).expect("un aplat").color,
+        Color::from(SHOP.primary)
+    );
 }

@@ -64,6 +64,7 @@ use std::sync::LazyLock;
 use bevy::color::{LinearRgba, Mix, Srgba};
 use bevy::math::Vec2;
 use bevy::prelude::*;
+use bevy::sprite::Sprite;
 use bevy::sprite_render::MeshMaterial2d;
 use core_engine::blinds::{BlindContext, BlindDefinition, BlindType};
 use game_state::RunPhase;
@@ -237,13 +238,14 @@ pub fn animate_visual_theme(
     blind: Option<Res<BlindContext>>,
     phase: Option<Res<State<RunPhase>>>,
     time: Res<Time>,
-    mut controller: ResMut<VisualThemeController>,
+    controller: Option<ResMut<VisualThemeController>>,
     mut materials: ResMut<Assets<BackgroundMaterial>>,
 ) {
-    let target = match phase {
-        Some(phase) => target_palette(*phase.get(), blind.as_deref().map(|b| &b.blind)),
-        None => *SMALL,
+    // Sans contrôleur, le fond est plat (mode dégradé) : rien à animer.
+    let Some(mut controller) = controller else {
+        return;
     };
+    let target = current_target(phase, blind);
     if target != controller.to {
         controller.from = controller.current();
         controller.to = target;
@@ -256,6 +258,34 @@ pub fn animate_visual_theme(
     let palette = controller.current();
     if let Some(mut material) = materials.get_mut(&controller.handle) {
         material.params = BackgroundUniform::from(palette);
+    }
+}
+
+/// La palette cible du moment : celle de la phase et de la manche, `SMALL`
+/// hors run.
+fn current_target(
+    phase: Option<Res<State<RunPhase>>>,
+    blind: Option<Res<BlindContext>>,
+) -> ThemePalette {
+    match phase {
+        Some(phase) => target_palette(*phase.get(), blind.as_deref().map(|b| &b.blind)),
+        None => *SMALL,
+    }
+}
+
+/// Le thème du fond plat (TASK-92) : la couleur primaire de la palette cible,
+/// sans interpolation, écrite sur le `Sprite` seulement quand elle diffère.
+/// Sans fond plat, rien.
+pub fn sync_flat_background(
+    blind: Option<Res<BlindContext>>,
+    phase: Option<Res<State<RunPhase>>>,
+    mut flats: Query<&mut Sprite, With<BackgroundQuad>>,
+) {
+    let target = Color::from(current_target(phase, blind).primary);
+    for mut sprite in &mut flats {
+        if sprite.color != target {
+            sprite.color = target;
+        }
     }
 }
 

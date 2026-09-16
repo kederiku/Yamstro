@@ -24,12 +24,22 @@ game_state = { path = "../game_state", version = "0.1.0" }
 # à TASK-82, elle était absente de tout l'arbre. Seule cette crate déclare des
 # matériaux (TASK-84), `game_state` n'en a pas l'usage. Notre `webgl2` lui
 # passe `webgl` de lui-même.
+#
+# Pas de `bevy_log` (TASK-92, mesuré) : la feature de la façade fait monter
+# `LogPlugin` par `DefaultPlugins`, l'abonné `tracing-subscriber` entier, soit
+# +741 971 octets de WASM. La bascule du mode dégradé journalise par la crate
+# `log`, ci-dessous ; l'abonné est le choix de l'application, pas de cette
+# crate.
 bevy = { workspace = true, default-features = false, features = [
   "bevy_asset", "bevy_color", "bevy_core_pipeline",
   "bevy_render", "bevy_sprite", "bevy_sprite_render", "bevy_state",
   "bevy_text", "bevy_ui", "bevy_window", "bevy_winit",
   "multi_threaded", "png", "x11", "webgl2",
 ] }
+# La façade de journalisation (TASK-92) : déjà dans l'arbre par `bevy_app`,
+# zéro octet de plus ; `LogPlugin`, quand une application le monte, capte ses
+# enregistrements par `LogTracer` (`bevy_log-0.19.1/src/lib.rs:387`).
+log = "0.4"
 
 # **La cible de mesure WebAssembly ne vit plus ici.** Elle a suivi le sommet du
 # graphe dans `shop_system` (TASK-81 bis) : posée ici depuis TASK-40, elle

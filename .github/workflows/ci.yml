@@ -2099,6 +2099,31 @@ jobs:
           require "TASK-91  les dés sont habillés puis suivis" -n '^\s+app\.add_systems\(Update, \(dress_dice, sync_die_outline\)\.chain\(\)\);$' "$JUICE/src/graphics/plugin.rs"
           require "TASK-91  handle réécrit seulement s'il diffère" -n 'material\.0\.id\(\) != target\.id\(\)' "$HOLO"
 
+          # TASK-92 : le mode dégradé. Un seul `SafeMode`, dans les réglages,
+          # jamais un module ; `graphics/` ne passe que par ses méthodes (les
+          # gardes TASK-83 sur le drapeau restent) ; l'argument de ligne de
+          # commande lu dans build ; l'échec d'un shader écouté, journalisé,
+          # engagé, jamais une panique ; la réconciliation sur changement
+          # seulement ; fond et dés plats par un Sprite uni ; la banque et le
+          # quad ne se construisent pas en mode dégradé ; le masque de face
+          # n'est lu que par le contour.
+          PLG=$JUICE/src/graphics/plugin.rs
+          forbid  "TASK-92  panique dans le plugin"            -n 'panic!|\.unwrap\(\)|\.expect\(' "$PLG"
+          count   "TASK-92  un seul SafeMode" 1                -n '^pub struct SafeMode \{$' "$JUICE/src"
+          forbid  "TASK-92  module du mode dégradé"            -n '^\s*(pub(\(crate\))? )?mod safe_mode' "$JUICE/src"
+          require "TASK-92  l'argument de ligne de commande"   -n '^\s+if SafeMode::requested_by\(std::env::args\(\)\) \{$' "$PLG"
+          require "TASK-92  l'échec d'un shader est écouté"    -n 'MessageReader<AssetLoadFailedEvent<Shader>>' "$PLG"
+          require "TASK-92  l'échec est journalisé puis engagé" -U 'fn engage_safe_mode_on_shader_failure\([^{]*\{\n\s*for failure in failures\.read\(\) \{\n\s*warn!\(' "$PLG"
+          require "TASK-92  la bascule est gardée par le changement" -n '^\s+\.run_if\(resource_changed::<SafeMode>\),$' "$PLG"
+          require "TASK-92  le mode se lit par sa méthode"     -n 'is_engaged\(\)' "$JUICE/src/graphics"
+          require "TASK-92  fond plat"                          -n 'Sprite::from_color\(SMALL\.primary, size\)' "$BG"
+          require "TASK-92  le fond ne se dresse pas en mode dégradé" -U 'fn spawn_background_quad\([^{]*\{\n[^}]*?if safe_mode\.is_engaged\(\) \{' "$BG"
+          require "TASK-92  dés plats"                          -n 'Sprite::from_color\(outline_color\(state\), Vec2::splat\(DIE_QUAD_SIZE\)\)' "$HOLO"
+          require "TASK-92  la banque absente est le mode dégradé des dés" -n 'bank: Option<Res<HoloMaterials>>' "$HOLO"
+          require "TASK-92  la banque ne se construit pas en mode dégradé" -U 'fn build_holo_bank\([^{]*\{\n\s*if safe_mode\.is_engaged\(\) \{\n\s*return;' "$HOLO"
+          forbid  "TASK-92  masque de face lu hors du contour" -n 'mask_face' "$JUICE/src" -g '!**/graphics/holo.rs'
+          forbid  "TASK-92  le contrôleur exigé sans fond"     -n 'mut controller: ResMut<VisualThemeController>' "$THEME"
+
           exit $status
 
       # ---- Passe rand 0.10 et Default (15 septembre 2026) ----

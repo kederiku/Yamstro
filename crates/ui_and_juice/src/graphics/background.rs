@@ -1,11 +1,22 @@
 //! Le matériau du vortex d'arrière-plan, son bloc d'uniformes, le quad qui le
-//! porte et son redimensionnement.
+//! porte, son redimensionnement, et son repli plat.
 //!
 //! Le type et son bloc sont TASK-84 ; le spawn du quad et le redimensionnement
 //! sont TASK-85, le shader vivant sous `assets/shaders/`. Les quatre palettes
 //! et la conversion sRGB → linéaire sont TASK-86, l'interpolation sur 1,5 s
 //! TASK-87. Aucune couleur n'est écrite ici, aucun `impl Default` : le spawn
 //! part de la palette de la Petite Mise, `theme::SMALL`, la palette hors run.
+//!
+//! # Le mode dégradé du fond (TASK-92)
+//!
+//! Une seule entité `BackgroundQuad`, toujours, qui porte soit le maillage et
+//! son `BackgroundMaterial`, soit un `Sprite` uni aux dimensions logiques de
+//! la fenêtre, jamais les deux. Au démarrage, le spawn lit le mode et choisit
+//! la forme : en mode dégradé, **aucun `BackgroundMaterial` n'est instancié**.
+//! La bascule échange les composants sur place, par [`flatten_background`] et
+//! [`restore_background`] ; les assets tombent avec leurs derniers handles.
+//! La couleur de l'aplat suit la palette cible, sans interpolation, écrite
+//! par le thème seulement quand la cible change.
 //!
 //! # Raccord A : le quad ne s'agrandit pas par son `Transform`
 //!
@@ -69,6 +80,7 @@
 
 use bevy::asset::Asset;
 use bevy::color::LinearRgba;
+use bevy::ecs::query::Has;
 use bevy::math::Vec2;
 use bevy::math::primitives::Rectangle;
 use bevy::mesh::Mesh2d;
@@ -76,11 +88,13 @@ use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
+use bevy::sprite::Sprite;
 use bevy::sprite_render::{Material2d, MeshMaterial2d};
 use bevy::window::{PrimaryWindow, Window, WindowResized};
 
 use super::plugin::PSYCHE_BACKGROUND_SHADER;
-use super::theme::SMALL;
+use super::theme::{SMALL, VisualThemeController};
+use crate::settings::SafeMode;
 
 // ---- Forme A (retenue pour ce projet) : un champ unique portant un ShaderType.
 
@@ -146,16 +160,75 @@ pub fn spawn_background_quad(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<BackgroundMaterial>>,
     window: Option<Single<&Window, With<PrimaryWindow>>>,
+    safe_mode: Res<SafeMode>,
 ) {
-    let (width, height) = window.map_or((1.0, 1.0), |w| (w.width(), w.height()));
+    let size = window_size(window);
+    if safe_mode.is_engaged() {
+        commands.spawn((
+            BackgroundQuad,
+            flat_background(size),
+            background_transform(),
+        ));
+        return;
+    }
     commands.spawn((
         BackgroundQuad,
-        Mesh2d(meshes.add(Mesh::from(Rectangle::new(width, height)))),
-        MeshMaterial2d(materials.add(BackgroundMaterial {
-            params: BackgroundUniform::from(*SMALL),
-        })),
-        Transform::from_xyz(0.0, 0.0, -100.0),
+        Mesh2d(meshes.add(background_mesh(size))),
+        MeshMaterial2d(materials.add(starting_material())),
+        background_transform(),
     ));
+}
+
+/// Les dimensions logiques de la fenêtre primaire, 1 × 1 sans fenêtre.
+fn window_size(window: Option<Single<&Window, With<PrimaryWindow>>>) -> Vec2 {
+    window.map_or(Vec2::ONE, |w| Vec2::new(w.width(), w.height()))
+}
+
+/// Le `Transform` du fond, posé une fois : `z = -100`, derrière tout le reste.
+fn background_transform() -> Transform {
+    Transform::from_xyz(0.0, 0.0, -100.0)
+}
+
+/// Le rectangle du fond aux dimensions données.
+fn background_mesh(size: Vec2) -> Mesh {
+    Mesh::from(Rectangle::new(size.x, size.y))
+}
+
+/// Le matériau de départ, la Petite Mise.
+fn starting_material() -> BackgroundMaterial {
+    BackgroundMaterial {
+        params: BackgroundUniform::from(*SMALL),
+    }
+}
+
+/// L'aplat du mode dégradé : un `Sprite` uni, aucun matériau.
+fn flat_background(size: Vec2) -> Sprite {
+    Sprite::from_color(SMALL.primary, size)
+}
+
+/// Le repli du fond : le quad perd maillage et matériau et porte l'aplat.
+fn flatten_background(commands: &mut Commands, quad: Entity, size: Vec2) {
+    commands
+        .entity(quad)
+        .remove::<(Mesh2d, MeshMaterial2d<BackgroundMaterial>)>()
+        .insert(flat_background(size));
+}
+
+/// Le retour du vortex : l'aplat tombe, maillage et matériau sont créés une
+/// fois ; rend le handle du matériau, pour le contrôleur de thème.
+fn restore_background(
+    commands: &mut Commands,
+    quad: Entity,
+    size: Vec2,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<BackgroundMaterial>,
+) -> Handle<BackgroundMaterial> {
+    let material = materials.add(starting_material());
+    commands.entity(quad).remove::<Sprite>().insert((
+        Mesh2d(meshes.add(background_mesh(size))),
+        MeshMaterial2d(material.clone()),
+    ));
+    material
 }
 
 /// Reconstruit le rectangle du fond en place sur `WindowResized`.
@@ -166,15 +239,52 @@ pub fn spawn_background_quad(
 /// n'est lu ni écrit.
 pub fn resize_background_quad(
     mut resized: MessageReader<WindowResized>,
-    quads: Query<&Mesh2d, With<BackgroundQuad>>,
+    mut quads: Query<(Option<&Mesh2d>, Option<&mut Sprite>), With<BackgroundQuad>>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let Some(last) = resized.read().last() else {
         return;
     };
-    for quad in &quads {
-        if let Some(mut mesh) = meshes.get_mut(&quad.0) {
-            *mesh = Mesh::from(Rectangle::new(last.width, last.height));
+    let size = Vec2::new(last.width, last.height);
+    for (quad, sprite) in &mut quads {
+        if let Some(quad) = quad
+            && let Some(mut mesh) = meshes.get_mut(&quad.0)
+        {
+            *mesh = background_mesh(size);
         }
+        if let Some(mut sprite) = sprite
+            && sprite.custom_size != Some(size)
+        {
+            sprite.custom_size = Some(size);
+        }
+    }
+}
+
+/// Le fond, sur changement du mode (TASK-92) : engagé, le quad perd
+/// maillage et matériau pour l'aplat et le contrôleur de thème tombe ;
+/// désengagé, l'aplat tombe, maillage et matériau reviennent, une fois, et
+/// le contrôleur renaît avec le handle. Rien n'est fait si l'état est déjà
+/// le bon : idempotent par constat, pas par mémoire.
+pub fn apply_safe_mode_to_background(
+    mut commands: Commands,
+    safe_mode: Res<SafeMode>,
+    window: Option<Single<&Window, With<PrimaryWindow>>>,
+    background: Query<(Entity, Has<Mesh2d>), With<BackgroundQuad>>,
+    controller: Option<Res<VisualThemeController>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<BackgroundMaterial>>,
+) {
+    let engaged = safe_mode.is_engaged();
+    let size = window_size(window);
+    for (quad, has_mesh) in &background {
+        if engaged && has_mesh {
+            flatten_background(&mut commands, quad, size);
+        } else if !engaged && !has_mesh {
+            let handle = restore_background(&mut commands, quad, size, &mut meshes, &mut materials);
+            commands.insert_resource(VisualThemeController::at_rest(*SMALL, handle));
+        }
+    }
+    if engaged && controller.is_some() {
+        commands.remove_resource::<VisualThemeController>();
     }
 }
