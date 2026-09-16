@@ -2142,6 +2142,11 @@ jobs:
           require "TASK-93  le total comparé à la cible"      -n '^if \[ "\$\{total\}" -gt "\$\{CIBLE_ABSOLUE\}" \]; then$' ci/check-wasm-size.sh
           require "TASK-93  la page charge le module"         -n '^\s+import init from "\./wasm_size\.js";$' ci/web/index.html
 
+          # TASK-94 : l'audit de clôture existe, et le bloc de glossaire qu'il
+          # relit est livré avec le code.
+          require "TASK-94  l'audit de l'étape existe"        --files crates/ui_and_juice/tests -g 'step7_audit.rs'
+          require "TASK-94  le bloc de glossaire livré"       -n '^## § 3 — Types canoniques, couche Bevy : lignes de l.Étape 7$' reports/glossaire-etape-7.md
+
           exit $status
 
       # ---- Passe rand 0.10 et Default (15 septembre 2026) ----
