@@ -24,19 +24,11 @@ bevy = { workspace = true, default-features = false, features = [
   "multi_threaded", "png", "x11", "webgl2",
 ] }
 
-[features]
-# Réserve la cible de mesure de taille WebAssembly. Voir `src/bin/wasm_size.rs`.
-measure = []
-
-# **La cible vit ici, et non dans `game_state`.** Elle doit monter le jeu
-# **entier** pour que la mesure veuille dire quelque chose, et `ui_and_juice`
-# est la seule crate qui dépende des deux autres. L'y laisser aurait fait
-# mesurer un binaire amputé de toute l'Étape 4 — mesuré à TASK-43 : la
-# migration du seul ressort avait déjà retiré 6 831 octets du binaire mesuré,
-# **à la baisse**, donc sans déclencher aucune alarme.
-[[bin]]
-name = "wasm_size"
-required-features = ["measure"]
+# **La cible de mesure WebAssembly ne vit plus ici.** Elle a suivi le sommet du
+# graphe dans `shop_system` (TASK-81 bis) : posée ici depuis TASK-40, elle
+# ignorait toute la boutique, et l'écart jouait à la baisse, donc sans
+# déclencher la porte de taille. Une seule cible dans le workspace, et la CI
+# interdit qu'une seconde se déclare ailleurs.
 
 # **Première et seule dépendance d'une crate de jeu vers le harnais, et
 # uniquement pour le test d'accord.** Une seconde ferait de l'instrument une
