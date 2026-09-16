@@ -8,7 +8,7 @@ pub use scaling::target_score;
 #[cfg(feature = "bevy")]
 use bevy_ecs::reflect::ReflectComponent;
 
-use rand::{Rng, RngExt};
+use rand::RngExt;
 use smallvec::SmallVec;
 
 use crate::hands::{HandGrid, YahtzeeHand};
@@ -167,8 +167,7 @@ impl BlindDefinition {
 ///
 /// Les rangs sortent **triés**, ce qui rend la liste comparable d'une run à
 /// l'autre sans dépendre de l'ordre du mélange.
-#[allow(clippy::implied_bounds_in_impls)]
-pub fn hidden_ranks(count: u8, total: usize, rng: &mut (impl Rng + RngExt)) -> Vec<usize> {
+pub fn hidden_ranks(count: u8, total: usize, rng: &mut impl RngExt) -> Vec<usize> {
     let vises = usize::from(count).min(total);
     let mut rangs: Vec<usize> = (0..total).collect();
 

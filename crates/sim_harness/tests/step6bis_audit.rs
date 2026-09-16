@@ -227,24 +227,37 @@ fn test_core_engine_is_untouched_and_missing_api_is_not_empty() {
     // **La comparaison porte sur le point de branchement**, jamais sur l'index :
     // un diff nu sur un arbre propre est vide par construction, donc incapable
     // d'échouer.
-    let base = Command::new("git")
-        .args(["merge-base", "origin/main", "HEAD"])
-        .current_dir(racine())
-        .output()
-        .expect("git merge-base");
-    let base = String::from_utf8_lossy(&base.stdout).trim().to_string();
+    //
+    // **Et elle porte sur les commits du harnais, pas sur l'arbre entier**,
+    // depuis la passe `rand` 0.10 du 15 septembre 2026. « Le moteur n'a pas
+    // bougé depuis qu'on a branché » était la forme de l'étape ; gardée après
+    // la clôture, elle interdisait tout changement du moteur sur n'importe
+    // quelle PR. La règle n°1 dit que le harnais ne modifie jamais le moteur :
+    // aucun commit au périmètre `(sim_harness)` ne touche `crates/core_engine/`.
+    let git = |args: &[&str]| {
+        let sortie = Command::new("git")
+            .args(args)
+            .current_dir(racine())
+            .output()
+            .expect("git");
+        String::from_utf8_lossy(&sortie.stdout).trim().to_string()
+    };
+    let base = git(&["merge-base", "origin/main", "HEAD"]);
     assert!(!base.is_empty(), "le point de branchement est introuvable");
-
-    let diff = Command::new("git")
-        .args(["diff", "--exit-code", &base, "--", "crates/core_engine/"])
-        .current_dir(racine())
-        .output()
-        .expect("git diff");
-    assert!(
-        diff.status.success(),
-        "le moteur a bougé depuis le point de branchement :\n{}",
-        String::from_utf8_lossy(&diff.stdout)
-    );
+    let plage = format!("{base}..HEAD");
+    for sha in git(&["rev-list", &plage]).lines() {
+        let sujet = git(&["log", "-1", "--format=%s", sha]);
+        if !sujet.contains("(sim_harness)") {
+            continue;
+        }
+        let fichiers = git(&["diff-tree", "--no-commit-id", "--name-only", "-r", sha]);
+        assert!(
+            !fichiers
+                .lines()
+                .any(|fichier| fichier.starts_with("crates/core_engine/")),
+            "le commit du harnais {sha} touche le moteur :\n{fichiers}"
+        );
+    }
 
     // **Le fichier des API absentes est non vide, et c'est un succès.** Un
     // fichier vide obtenu en élargissant une visibilité serait un échec : le
@@ -503,18 +516,20 @@ fn test_glossary_section_covers_every_harness_type() {
 fn test_ci_blocks_are_present_and_unamended() {
     let ci = lire(".github/workflows/ci.yml");
 
-    // Les blocs amont sont là, et celui de l'étape aussi.
+    // Les blocs amont sont là, et celui de l'étape aussi. L'Étape 7 a quitté
+    // la liste des absentes le 15 septembre 2026, à TASK-82 : son bloc existe.
     for bloc in [
         "---- Étape 3 :",
         "---- Étape 4 :",
         "---- Étape 5 :",
         "---- Étape 6 :",
         "---- Étape 6 bis :",
+        "---- Étape 7 :",
     ] {
         assert!(ci.contains(bloc), "le bloc « {bloc} » a disparu");
     }
     // Et aucun bloc d'une étape non livrée n'est inventé.
-    for absente in ["---- Étape 7 :", "---- Étape 8 :", "---- Étape 9 :"] {
+    for absente in ["---- Étape 8 :", "---- Étape 9 :"] {
         assert!(!ci.contains(absente), "un bloc « {absente} » est inventé");
     }
 

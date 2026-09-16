@@ -167,7 +167,11 @@ jobs:
           # sont légitimes ici : l'interdiction porte sur l'arithmétique de
           # score, tenue en point fixe, pas sur l'animation ». Un ressort a
           # besoin d'un seuil de repos, qui EST une comparaison approchée.
-          forbid  "critère 2  comparaison approchée"     -n 'assert_relative_eq|EPSILON|\bapprox::|abs\(\)\s*<' crates/ -g '!**/animation.rs'
+          # Même distinction pour l'interpolation de palettes de l'Étape 7,
+          # de l'animation au sens de TASK-30 : le test des cinq champs du
+          # thème et ceux de sa transition comparent des flottants à 1e-6 ;
+          # le code de jeu, lui, reste sous la garde.
+          forbid  "critère 2  comparaison approchée"     -n 'assert_relative_eq|EPSILON|\bapprox::|abs\(\)\s*<' crates/ -g '!**/animation.rs' -g '!**/graphics/theme.rs' -g '!**/tests/visual_effects.rs'
           require "critère 2  égalités exactes"          -n 'assert_eq!' "$SRC/scoring"
 
           # ---- Étape 3 : mise en place d'une manche (TASK-32) ----
@@ -1574,6 +1578,25 @@ jobs:
           # déclaration. Mesuré : une dépendance `kira` posée dans le manifeste
           # de la boutique fait tomber ces deux gardes-là.
 
+          # ---- Étape 6 : la cible de mesure suit le sommet du graphe (TASK-81 bis) ----
+          # La mesure WASM ne vaut que si son binaire monte le jeu entier, et le
+          # jeu entier n'est visible que depuis la crate dont toutes les autres
+          # sont des dépendances. Mesuré à TASK-81 : posée dans la crate de mise
+          # en scène, la cible ignorait toute la boutique, et l'écart jouait à la
+          # baisse, donc sans déclencher la porte de taille. La cible vit dans la
+          # crate du sommet, monte chacun des plugins, et il n'en existe qu'une :
+          # deux cibles feraient deux chiffres et deux références, donc aucune
+          # garde. Le jour où une crate s'ajoute au-dessus de la boutique, la
+          # cible y remonte et ces lignes suivent.
+          CIBLE_WASM=$BOUTIQUE/src/bin/wasm_size.rs
+          require "critère 8  cible de mesure au sommet du graphe" -n '^fn main\(\)' "$CIBLE_WASM"
+          require "critère 8  la cible monte les états"      -n '^\s+GameStatePlugin,$' "$CIBLE_WASM"
+          require "critère 8  la cible monte la mise en scène" -n '^\s+JuicePlugin,$' "$CIBLE_WASM"
+          require "critère 8  la cible monte la boutique"    -n '^\s+ShopPlugin,$' "$CIBLE_WASM"
+          require "critère 8  le script mesure la crate du sommet" -n '^\s+-p shop_system --features measure --bin' ci/measure-wasm.sh
+          forbid  "critère 8  seconde cible de mesure"       --files crates -g '**/src/bin/*.rs' -g '!**/shop_system/src/bin/wasm_size.rs'
+          forbid  "critère 8  cible restée en dessous du sommet" -n 'name = "wasm_size"' crates/ -g '!crates/shop_system/Cargo.toml'
+
           exit $status
 
       # ---- Étape 6 bis : le harnais de simulation (TASK-154) ----
@@ -1650,25 +1673,41 @@ jobs:
           forbid  "critère 6  paquet graphique dans l'arbre normal du harnais" -n 'bevy' arbre.txt
           rm -f arbre.txt
 
-          # **La règle n°1, sous la seule forme qui puisse échouer.** Un
-          # `git diff` nu sur un checkout frais est vide par construction : un
-          # contrôle incapable d'échouer, qui donne l'illusion que la règle est
-          # gardée. Et la base de la PR ne convient pas davantage : ce workflow
+          # **La règle n°1, sous la forme qui garde sans bloquer.** Jusqu'à la
+          # clôture de l'Étape 6 bis elle se lisait « le moteur n'a pas bougé
+          # depuis qu'on a branché », et c'était juste : aucun ticket de
+          # l'étape n'avait le droit d'y toucher. Gardée telle quelle après la
+          # clôture, elle interdisait tout changement du moteur sur n'importe
+          # quelle PR, Étape 9 comprise, et la passe `rand` 0.10 du
+          # 15 septembre 2026 s'y est heurtée la première. Or la règle dit
+          # autre chose : **le harnais ne modifie jamais le moteur.** Elle
+          # s'écrit donc au commit : depuis le point de branchement, aucun
+          # commit dont le sujet porte le périmètre `(sim_harness)` ne touche
+          # `crates/core_engine/`. Le moteur reste modifiable, sous son propre
+          # périmètre, dans son propre commit, revu comme tel.
+          #
+          # Le point de branchement plutôt que la base de la PR : ce workflow
           # se déclenche aussi sur un push, où elle est vide — mesuré,
           # `git diff origin/` rend « bad revision », code 128, à chaque
-          # exécution. Un rouge permanent ne se diagnostique pas, il se
-          # contourne, et le contournement évident est le `git diff` nu.
-          #
-          # Le point de branchement, lui, énonce la règle elle-même : le moteur
-          # n'a pas bougé depuis qu'on a branché.
+          # exécution. Sur `main`, la liste des commits est vide et la règle
+          # passe à vide : c'est le cas nominal, il n'y a rien à garder.
           git fetch --no-tags --depth=0 origin main 2>/dev/null || git fetch --no-tags origin main
           base=$(git merge-base origin/main HEAD)
-          if git diff --exit-code "$base" -- crates/core_engine/ > moteur.diff; then
-            printf '  ok    critère 6  le moteur n'"'"'a pas bougé depuis %s\n' "$base"
+          fautifs=''
+          for sha in $(git rev-list "$base..HEAD"); do
+            sujet=$(git log -1 --format=%s "$sha")
+            case "$sujet" in
+              *'(sim_harness)'*)
+                if git diff-tree --no-commit-id --name-only -r "$sha" | grep -q '^crates/core_engine/'; then
+                  fautifs="$fautifs$sha $sujet"$'\n'
+                fi ;;
+            esac
+          done
+          if [ -z "$fautifs" ]; then
+            printf '  ok    critère 6  aucun commit du harnais ne touche le moteur depuis %s\n' "$base"
           else
-            printf '  ECHEC critère 6  le moteur a bougé\n'; cat moteur.diff; status=1
+            printf '  ECHEC critère 6  un commit du harnais touche le moteur\n%s' "$fautifs"; status=1
           fi
-          rm -f moteur.diff
 
           # **Contre-épreuve de présence.** Les paniques se mécanisent par un
           # lint et non par une recherche textuelle : les tests unitaires du
@@ -1757,6 +1796,385 @@ jobs:
           # le bloc.
           exiger "critère 6  le bloc de glossaire est livré" -n \
                  'Types du harnais de simulation' reports/glossaire-sim-harness.md
+
+          exit $status
+
+      # ---- Étape 7 : direction artistique et shaders (TASK-82 et suivants) ----
+      #
+      # **L'étape est ouverte le 15 septembre 2026, avant les Étapes 10 et 9**,
+      # par dérogation à l'ADR-009 ; la dérogation est consignée dans la v2 du
+      # ticket et du backlog. TASK-82 n'a posé que l'infrastructure : un
+      # module, un plugin sans matériau, trois shaders qui rendent une couleur
+      # opaque.
+      #
+      # **Ancrer sur l'acte, jamais sur un nom nu.** La doc de module de
+      # `lib.rs` nomme les combinateurs disparus pour dire qu'ils n'existent
+      # plus : la garde nue du ticket ne peut pas être vide, et le volet 1
+      # interdit déjà `run_in(` sur l'appel et `RenderGraph|ViewNode` sur
+      # `crates/`. Ici ne restent que les noms sans aucun emploi légitime, y
+      # compris en commentaire, et `assets/` que le volet 1 ne couvre pas. La
+      # portée est `crates/` et `assets/`, **jamais `.`** : les tickets citent
+      # les orthographes proscrites pour les proscrire.
+      - name: Invariants normatifs Étape 7
+        run: |
+          set -euo pipefail
+          status=0
+          forbid() {
+            label=$1; shift
+            out=$(rg "$@" 2>&1) && rc=0 || rc=$?
+            case $rc in
+              1) printf '  ok    %s\n' "$label" ;;
+              0) printf '  ECHEC %s\n%s\n' "$label" "$out"; status=1 ;;
+              *) printf '  ECHEC %s : rg a échoué (code %s)\n%s\n' "$label" "$rc" "$out"; status=1 ;;
+            esac
+          }
+          require() {
+            label=$1; shift
+            out=$(rg "$@" 2>&1) && rc=0 || rc=$?
+            case $rc in
+              0) printf '  ok    %s\n' "$label" ;;
+              *) printf '  ECHEC %s : motif attendu absent (code %s)\n%s\n' "$label" "$rc" "$out"; status=1 ;;
+            esac
+          }
+
+          JUICE=crates/ui_and_juice
+          SHADERS=assets/shaders
+
+          # TASK-82 : le module et le plugin, déclarés là où le ticket les met.
+          # Un module de `ui_and_juice`, pas une crate de plus : le sens des
+          # dépendances est gardé par le volet 1, « dépendance inverse vers le
+          # juice ».
+          require "TASK-82  module graphics déclaré"      -n '^pub mod graphics;$' "$JUICE/src/lib.rs"
+          require "TASK-82  plugin ré-exporté"            -n '^pub use plugin::VisualEffectsPlugin;$' "$JUICE/src/graphics/mod.rs"
+          require "TASK-82  le plugin existe"             -n '^pub struct VisualEffectsPlugin;$' "$JUICE/src/graphics/plugin.rs"
+
+          # Les trois chemins sont publiés par le plugin, en une seule source,
+          # et les trois fichiers existent sous `assets/`. Un fichier vide
+          # serait « présent » et ferait quand même basculer le repli de
+          # TASK-92 : chaque shader porte son point d'entrée.
+          require "TASK-82  chemin du vortex publié"      -n '^pub const PSYCHE_BACKGROUND_SHADER: &str = "shaders/psyche_background\.wgsl";$' "$JUICE/src/graphics/plugin.rs"
+          require "TASK-82  chemin du filtre publié"      -n '^pub const CRT_POSTPROCESS_SHADER: &str = "shaders/crt_postprocess\.wgsl";$' "$JUICE/src/graphics/plugin.rs"
+          require "TASK-82  chemin du contour publié"     -n '^pub const HOLO_CARD_SHADER: &str = "shaders/holo_card\.wgsl";$' "$JUICE/src/graphics/plugin.rs"
+          require "critère 6  point d'entrée du vortex"   -n '^fn fragment\(' "$SHADERS/psyche_background.wgsl"
+          require "critère 6  point d'entrée du filtre"   -n '^fn fragment\(' "$SHADERS/crt_postprocess.wgsl"
+          require "critère 6  point d'entrée du contour"  -n '^fn fragment\(' "$SHADERS/holo_card.wgsl"
+
+          # Critère 1 : API de rendu 0.19. Ces noms n'ont plus aucun emploi,
+          # pas même pour expliquer la règle : c'est ce commentaire-ci qui
+          # l'explique, et il ne les nomme pas.
+          forbid  "critère 1  nœud cathodique de la v1"   -n 'CrtPostProcessNode' crates/ assets/
+          forbid  "critère 1  priorité wgpu renommée"     -n 'WgpuSettingsPriority::Compatibility' crates/ assets/
+          forbid  "critère 1  dépendances proscrites"     -n 'cosmic-text|bevy_scene' "$JUICE" assets/
+          forbid  "critère 1  graphe de rendu dans un shader" -n 'RenderGraph|ViewNode|\brun_(in|after|before)\b' assets/
+
+          # Critère 8 : la cible de mesure monte le plugin. Une cible qui
+          # l'omettrait mesurerait un binaire amputé, et l'écart jouerait à la
+          # baisse, sans déclencher la porte de taille.
+          require "critère 8  plugin monté dans la cible" -n '^\s+VisualEffectsPlugin,$' crates/shop_system/src/bin/wasm_size.rs
+
+          # TASK-83 : les réglages du filtre et le mode dégradé, déclarés dans
+          # `settings.rs` à côté de `JuiceSettings` (raccord B), posés par le
+          # plugin. Le `Default` du filtre est écrit à la main : un dérivé
+          # donnerait un filtre éteint sans la moindre erreur. `Resource` est
+          # un sous-trait de `Component` en 0.19, et un composant dans le
+          # module des réglages despawnerait les autres porteurs : ancré sur le
+          # dérivé et sur l'impl, jamais sur le nom, que la doc du module a le
+          # droit d'expliquer. Enfin « aucun booléen ne transite par
+          # l'uniforme » s'ancre sur le champ et sur la lecture, pas sur le
+          # mot : `graphics/` ne déclare, n'initialise ni ne lit jamais le
+          # drapeau, il passe par le prédicat `is_active`.
+          SETTINGS=$JUICE/src/settings.rs
+          require "TASK-83  réglages du filtre déclarés"    -n '^pub struct CrtSettings \{$' "$SETTINGS"
+          require "TASK-83  mode dégradé déclaré"           -n '^pub struct SafeMode \{$' "$SETTINGS"
+          require "TASK-83  Default du filtre écrit à la main" -n '^impl Default for CrtSettings \{$' "$SETTINGS"
+          require "TASK-83  prédicat de garde déclaré"      -n '^\s+pub fn is_active\(&self, safe_mode: &SafeMode\) -> bool \{$' "$SETTINGS"
+          require "TASK-83  le plugin pose les réglages"    -n '^\s+app\.init_resource::<CrtSettings>\(\);$' "$JUICE/src/graphics/plugin.rs"
+          require "TASK-83  le plugin pose le mode dégradé" -n '^\s+app\.init_resource::<SafeMode>\(\);$' "$JUICE/src/graphics/plugin.rs"
+          forbid  "TASK-83  Default dérivé sur le filtre"   -nU 'derive\([^)]*Default[^)]*\)\]\s*\npub struct CrtSettings\b' "$SETTINGS"
+          forbid  "TASK-83  composant dérivé dans les réglages" -n 'derive\([^)]*Component' "$SETTINGS"
+          forbid  "TASK-83  composant implémenté dans les réglages" -n '^impl Component for' "$SETTINGS"
+          forbid  "TASK-83  drapeau déclaré dans graphics"  -n '\benabled\s*:' "$JUICE/src/graphics"
+          forbid  "TASK-83  drapeau lu dans graphics"       -n '\.enabled\b' "$JUICE/src/graphics"
+
+          # TASK-84 : le premier matériau, forme A, et son bloc de 64 octets.
+          # Un seul `#[uniform(0)]` par matériau, ancré sur l'attribut en tête
+          # de ligne, la doc ayant le droit de le nommer ; jamais la forme B ;
+          # aucun champ `time`, le mot restant libre puisque le bloc verbatim
+          # l'emploie pour dire qu'il n'y en a pas ; ni `Component` ni
+          # `Resource` sur un matériau ; aucune couleur ni défaut ici, les
+          # palettes sont TASK-86, et le spawn en part depuis TASK-86 ; ni `Component`
+          # ni `Resource` sur le matériau ou son bloc, ancré sur le dérivé posé
+          # sur ces deux types, le marqueur du quad de TASK-85 étant un
+          # composant légitime du même fichier ; le remplissage explicite à
+          # l'offset 56 et
+          # les six offsets en commentaire, seule façon de relire les deux
+          # blocs côte à côte. Le chemin du shader est celui que le plugin
+          # publie, en une seule orthographe.
+          count() {
+            label=$1; expected=$2; shift 2
+            n=$( (rg "$@" || true) | wc -l | tr -d ' ')
+            if [ "$n" = "$expected" ]; then printf '  ok    %s\n' "$label"; else printf '  ECHEC %s : %s occurrence(s), %s attendue(s)\n' "$label" "$n" "$expected"; status=1; fi
+          }
+          BG=$JUICE/src/graphics/background.rs
+          require "TASK-84  module background déclaré"       -n '^pub mod background;$' "$JUICE/src/graphics/mod.rs"
+          require "TASK-84  le matériau est un Material2d"   -n '^impl Material2d for BackgroundMaterial \{$' "$BG"
+          require "TASK-84  shader désigné par la source unique" -n '^\s+PSYCHE_BACKGROUND_SHADER\.into\(\)$' "$BG"
+          require "TASK-84  le plugin enregistre le matériau" -n '^\s+app\.add_plugins\(Material2dPlugin::<BackgroundMaterial>::default\(\)\);$' "$JUICE/src/graphics/plugin.rs"
+          require "critère 2  remplissage explicite à l'offset 56" -n '^\s+pub _pad: Vec2,\s*// offset 56' "$BG"
+          count   "critère 2  six offsets en commentaire" 6 -o '// offset +(0|16|32|48|52|56),' "$BG"
+          count   "critère 2  un seul uniform(0) dans le matériau" 1 -n '^\s*#\[uniform\(0' "$BG"
+          forbid  "critère 2  forme B mélangée"              -n '^\s*#\[uniform\(0,' "$BG"
+          forbid  "TASK-84  champ time dans l'uniforme"      -n '^\s*(pub\s+)?time\s*:' "$BG"
+          forbid  "TASK-84  matériau composant ou ressource" -nU 'derive\([^)]*(Component|Resource)[^)]*\)\]\s*\npub struct Background(Material|Uniform)\b' "$BG"
+          forbid  "TASK-84  défaut ou couleur dans le matériau" -n '^impl Default for|Srgba::hex\(|LinearRgba::(new|rgb|rgba)\(|Color::' "$BG"
+
+          # TASK-85 : le shader du vortex, le quad et le redimensionnement.
+          # Les chemins d'import, le def de bind group et le champ de viewport
+          # sont ceux des sources 0.19.1, cités dans l'en-tête du shader. Le
+          # miroir des deux structs est une seule garde multiligne, appliquée
+          # au WGSL et au Rust : six champs, même ordre, mêmes offsets, ce
+          # qu'aucun test de taille ne voit. Le temps vient du GPU : aucun
+          # champ de temps dans le WGSL. Le quad est spawné au démarrage,
+          # derrière tout le reste ; le redimensionnement écoute la fenêtre et
+          # réécrit le maillage en place ; aucune écriture de Transform dans
+          # `graphics/`, ni de son échelle (raccord A).
+          WGSL=$SHADERS/psyche_background.wgsl
+          require "TASK-85  import de la sortie du vertex 2D" -n '^#import bevy_sprite::mesh2d_vertex_output::VertexOutput$' "$WGSL"
+          require "TASK-85  import des bindings de vue 2D"    -n '^#import bevy_sprite::mesh2d_view_bindings::\{globals, view\}$' "$WGSL"
+          require "TASK-85  bind group du matériau par le def" -n '^@group\(#\{MATERIAL_BIND_GROUP\}\) @binding\(0\) var<uniform> material: BackgroundUniform;$' "$WGSL"
+          require "TASK-85  le temps vient du GPU"            -n 'globals\.time \* material\.speed' "$WGSL"
+          require "critère 8  correction d'aspect"            -n 'let aspect = view\.viewport\.z / view\.viewport\.w;' "$WGSL"
+          forbid  "TASK-85  champ de temps dans le WGSL"      -n '^\s*time\s*:' "$WGSL"
+          MIROIR='(?s)primary_color.*?// offset +0\b.*?secondary_color.*?// offset 16.*?accent_color.*?// offset 32.*?\bspeed\b.*?// offset 48.*?swirl_factor.*?// offset 52.*?_pad.*?// offset 56'
+          require "critère 2  miroir WGSL, six champs dans l'ordre" -U "$MIROIR" "$WGSL"
+          require "critère 2  miroir Rust, six champs dans l'ordre" -U "$MIROIR" "$BG"
+          require "TASK-85  le quad derrière tout le reste"   -n 'Transform::from_xyz\(0\.0, 0\.0, -100\.0\)' "$BG"
+          require "TASK-85  le spawn tourne au démarrage"     -n '^\s+app\.add_systems\(Startup, \(spawn_background_quad, init_visual_theme\)\.chain\(\)\);$' "$JUICE/src/graphics/plugin.rs"
+          require "TASK-85  le redimensionnement est ordonnancé" -n '^\s+app\.add_systems\(Update, resize_background_quad\);$' "$JUICE/src/graphics/plugin.rs"
+          require "TASK-85  le redimensionnement écoute la fenêtre" -n 'MessageReader<WindowResized>' "$BG"
+          require "TASK-85  le maillage est réécrit en place" -n 'meshes\.get_mut\(' "$BG"
+          forbid  "critère 4  écriture de Transform dans graphics" -n '&mut Transform' "$JUICE/src/graphics"
+          forbid  "critère 4  échelle de Transform écrite"    -n '\.scale\s*=|Transform::from_scale|with_scale\(' "$JUICE/src/graphics"
+
+          # TASK-86 : les quatre palettes, sRGB converti une seule fois. Douze
+          # appels `Srgba::hex("#…")`, un par couleur, et aucune composante
+          # linéaire écrite à la main. Des `static LazyLock`, jamais un `const`
+          # inliné à chaque usage. La moitié système du même fichier est TASK-87,
+          # gardée plus bas. La boutique prime sur le type de blind, par la
+          # place du bras, ancrée
+          # sur le premier `match` du corps de la fonction : mesuré, un `match`
+          # inversé garde un `match phase` interne que la garde non ancrée
+          # acceptait ; le
+          # spawn du fond part de la Petite Mise, et le remplissage neutre de
+          # TASK-85 a disparu.
+          THEME=$JUICE/src/graphics/theme.rs
+          require "TASK-86  module theme déclaré"            -n '^pub mod theme;$' "$JUICE/src/graphics/mod.rs"
+          count   "TASK-86  quatre palettes statiques" 4     -n '^pub static (SMALL|BIG|BOSS|SHOP): LazyLock<ThemePalette> = LazyLock::new\(' "$THEME"
+          count   "TASK-86  douze conversions sRGB" 12       -n 'Srgba::hex\("#[0-9A-F]{6}"\)' "$THEME"
+          forbid  "TASK-86  composante linéaire à la main"   -n 'LinearRgba::(new|rgb|rgba)\(' "$THEME"
+          forbid  "TASK-86  palette en const LazyLock"       -n 'const [A-Z_]+: *LazyLock' "$JUICE/src"
+          forbid  "TASK-86  palette composant ou ressource"  -nU 'derive\([^)]*(Component|Resource)[^)]*\)\]\s*\npub struct ThemePalette\b' "$THEME"
+          require "TASK-86  la boutique prime"               -U 'fn target_palette\([^{]*\{\n\s*match phase \{\n\s*RunPhase::Shop => \*SHOP,' "$THEME"
+          require "TASK-86  sans blind, la Petite Mise"      -n '^\s+_ => \*SMALL,$' "$THEME"
+          forbid  "TASK-86  remplissage neutre resté dans le spawn" -n 'const [A-Z_]+: BackgroundUniform' "$BG"
+          require "TASK-86  le spawn part de la Petite Mise" -n 'BackgroundUniform::from\(\*SMALL\)' "$BG"
+
+          # TASK-87 : le contrôleur de thème, raccord D. Un seul `get_mut` dans
+          # le thème, et le `return` sur le minuteur terminé le précède ; les
+          # ressources de manche et de phase toujours sous `Option`, un `Res`
+          # nu faisant écarter le système en silence au menu ; le contrôleur
+          # est une ressource, jamais un composant ; le minuteur fait 1,5 s et
+          # naît terminé ; le matériau du fond n'a qu'un écrivain, ce
+          # contrôleur, le spawn ne faisant que le créer ; aucun champ de temps
+          # dans un uniforme, ancré sur `time: f32`, le paramètre `time:
+          # Res<Time>` du contrôleur étant légitime ; le contrôleur naît après
+          # le quad et tourne en Update.
+          count   "TASK-87  un seul get_mut dans le thème" 1 -n 'get_mut\(' "$THEME"
+          require "TASK-87  le retour précède l'écriture"     -U 'timer\.is_finished\(\) \{\n\s*return;\n\s*\}[\s\S]*?materials\.get_mut\(' "$THEME"
+          forbid  "TASK-87  ressource de manche ou de phase nue" -n '[^<]Res<BlindContext>|[^<]Res<State<RunPhase>>' "$JUICE/src"
+          require "TASK-87  contrôleur ressource"             -U '#\[derive\(Resource[^)]*\)\]\s*\npub struct VisualThemeController \{' "$THEME"
+          forbid  "TASK-87  contrôleur composant"             -nU 'derive\([^)]*Component[^)]*\)\]\s*\npub struct VisualThemeController\b' "$THEME"
+          require "TASK-87  minuteur de 1,5 s"                -n 'Timer::from_seconds\(1\.5, TimerMode::Once\)' "$THEME"
+          require "TASK-87  minuteur terminé à l'insertion"   -n 'timer\.set_elapsed\(timer\.duration\(\)\)' "$THEME"
+          forbid  "TASK-87  second écrivain du matériau"      -n 'ResMut<Assets<BackgroundMaterial>>' "$JUICE/src" -g '!**/graphics/theme.rs' -g '!**/graphics/background.rs'
+          forbid  "TASK-87  le spawn écrit le matériau"       -n 'materials\.get_mut\(' "$BG"
+          forbid  "TASK-87  champ de temps dans un uniforme"  -n '^\s*(pub\s+)?time\s*:\s*f32\b' "$JUICE/src/graphics"
+          require "TASK-87  le contrôleur est animé"          -n '^\s+app\.add_systems\(Update, animate_visual_theme\);$' "$JUICE/src/graphics/plugin.rs"
+
+          # TASK-88 : le filtre cathodique, un `FullscreenMaterial` en 2D, set
+          # `PostProcess` après le tonemapping, jamais le set précoce ni la
+          # prépasse. Le trait impose un composant porteur de l'uniforme : ni
+          # `Asset`, ni `AsBindGroup`, ni `Resource` dérivés dans le fichier,
+          # aucun remplissage, aucun champ booléen. La passe n'existe que pour
+          # les caméras qui portent le composant, décidé par la condition pure
+          # de TASK-83 ; l'écriture est gardée par `is_changed`, et `intensity`
+          # multiplie les quatre champs. Le miroir des quatre champs, offsets
+          # compris, attend son pendant WGSL à TASK-89. « Après le tonemapping »
+          # s'ancre sur l'appel chaîné complet : mesuré, la doc du fichier cite
+          # `.after(tonemapping)` et satisfaisait la garde nue.
+          CRT=$JUICE/src/graphics/crt.rs
+          require "TASK-88  module crt déclaré"               -n '^pub mod crt;$' "$JUICE/src/graphics/mod.rs"
+          require "TASK-88  le plugin enregistre le filtre"   -n '^\s+app\.add_plugins\(FullscreenMaterialPlugin::<CrtMaterial>::default\(\)\);$' "$JUICE/src/graphics/plugin.rs"
+          require "TASK-88  la synchronisation est ordonnancée" -n '^\s+app\.add_systems\(Update, sync_crt_material\);$' "$JUICE/src/graphics/plugin.rs"
+          require "TASK-88  le filtre est un FullscreenMaterial" -n '^impl FullscreenMaterial for CrtMaterial \{$' "$CRT"
+          require "TASK-88  la passe vit dans Core2d"         -U 'fn schedule\(\) -> impl ScheduleLabel \+ Clone \{\n\s*Core2d\n' "$CRT"
+          require "critère 1  set PostProcess de la 2D"       -n '\.in_set\(Core2dSystems::PostProcess\)' "$CRT"
+          require "critère 1  après le tonemapping"           -U 'system\s*\.in_set\(Core2dSystems::PostProcess\)\s*\.after\(tonemapping\)' "$CRT"
+          forbid  "critère 1  set précoce ou prépasse"        -n 'EarlyPostProcess|Prepass' "$JUICE/src"
+          forbid  "TASK-88  passe 3D"                         -n '\bCore3d' "$CRT"
+          forbid  "TASK-88  matériau asset, bind group ou ressource" -n 'derive\([^)]*(Asset|AsBindGroup|Resource)' "$CRT"
+          forbid  "TASK-88  remplissage dans l'uniforme"      -n '_pad' "$CRT"
+          forbid  "TASK-88  booléen dans le filtre"           -n '^\s*(pub\s+)?\w+\s*:\s*bool\b' "$CRT"
+          require "critère 2  miroir Rust du CRT, quatre champs" -U '(?s)curvature.*?// offset +0\b.*?scanline_intensity.*?// offset +4\b.*?vignette_roundness.*?// offset +8\b.*?chromatic_aberration.*?// offset 12' "$CRT"
+          require "TASK-88  shader désigné par la source unique" -n '^\s+CRT_POSTPROCESS_SHADER\.into\(\)$' "$CRT"
+          require "TASK-88  la condition pure de TASK-83"     -n 'settings\.is_active\(&safe_mode\)' "$CRT"
+          require "TASK-88  écriture gardée par is_changed"   -n 'settings\.is_changed\(\)' "$CRT"
+          count   "critère 5  intensity multiplie les quatre champs" 4 -n '\* settings\.intensity' "$CRT"
+
+          # TASK-89 : le WGSL du filtre. Les trois déclarations de bindings et
+          # l'import, à la lettre des sources ; le miroir WGSL des quatre
+          # champs, pendant de la garde Rust de TASK-88 ; aucune horloge du GPU
+          # dans ce shader, seul de l'étape ; rien qui ne passe pas sous
+          # webgl2 dans aucun shader ; le noir hors du tube avant le premier
+          # échantillonnage, et rien avant lui ; la densité des scanlines lue
+          # sur la cible ; trois échantillonnages, pas un de plus.
+          CRTW=$SHADERS/crt_postprocess.wgsl
+          require "TASK-89  import du triangle plein écran"   -n '^#import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput$' "$CRTW"
+          require "TASK-89  texture d'écran en 0"             -n '^@group\(0\) @binding\(0\) var screen_texture: texture_2d<f32>;$' "$CRTW"
+          require "TASK-89  sampler en 1"                     -n '^@group\(0\) @binding\(1\) var screen_sampler: sampler;$' "$CRTW"
+          require "TASK-89  uniforme en 2"                    -n '^@group\(0\) @binding\(2\) var<uniform> settings: CrtUniform;$' "$CRTW"
+          require "critère 2  miroir WGSL du CRT, quatre champs" -U '(?s)curvature.*?// offset +0\b.*?scanline_intensity.*?// offset +4\b.*?vignette_roundness.*?// offset +8\b.*?chromatic_aberration.*?// offset 12' "$CRTW"
+          forbid  "critère 5  horloge du GPU dans le filtre"  -n '\bglobals\b' "$CRTW"
+          forbid  "critère 8  hors webgl2"                    -n 'textureStore|var<storage|@compute|@workgroup_size' "$SHADERS"
+          require "TASK-89  noir hors du tube avant l'échantillonnage" -U 'if \(uv\.x < 0\.0 \|\| uv\.x > 1\.0 \|\| uv\.y < 0\.0 \|\| uv\.y > 1\.0\) \{\s*return vec4<f32>\(0\.0, 0\.0, 0\.0, 1\.0\);\s*\}[\s\S]*?textureSample' "$CRTW"
+          forbid  "TASK-89  échantillonnage avant le garde"   -U '(?s)textureSample.*?if \(uv\.x < 0\.0' "$CRTW"
+          require "TASK-89  densité des scanlines lue sur la cible" -n 'textureDimensions\(screen_texture\)' "$CRTW"
+          count   "TASK-89  trois échantillonnages"   3        -n 'textureSample' "$CRTW"
+
+          # TASK-90 : le contour holographique et sa banque. Forme A, un seul
+          # `#[uniform(0)]` en tête de ligne, texture en 1 et sampler en 2
+          # comme le `ColorMaterial` de Bevy ; trente-deux octets, cinq champs
+          # dans l'ordre, offsets en commentaire, remplissage à 28, masque de
+          # face en `f32` ; aucun champ de temps ; aucun composant dérivé, une
+          # seule ressource, la banque ; les quatre index d'état à leurs
+          # valeurs ; aucune écriture de matériau après construction ; quatre
+          # couleurs de départ converties une fois depuis le sRGB.
+          HOLO=$JUICE/src/graphics/holo.rs
+          require "TASK-90  module holo déclaré"              -n '^pub mod holo;$' "$JUICE/src/graphics/mod.rs"
+          require "TASK-90  le plugin enregistre le contour"  -n '^\s+app\.add_plugins\(Material2dPlugin::<HoloOutlineMaterial>::default\(\)\);$' "$JUICE/src/graphics/plugin.rs"
+          require "TASK-90  la banque se construit au démarrage" -n '^\s+app\.add_systems\(Startup, build_holo_bank\);$' "$JUICE/src/graphics/plugin.rs"
+          require "TASK-90  le contour est un Material2d"     -n '^impl Material2d for HoloOutlineMaterial \{$' "$HOLO"
+          require "TASK-90  shader désigné par la source unique" -n '^\s+HOLO_CARD_SHADER\.into\(\)$' "$HOLO"
+          count   "critère 2  un seul uniform(0) dans le contour" 1 -n '^\s*#\[uniform\(0' "$HOLO"
+          require "TASK-90  texture en 1"                     -n '^\s*#\[texture\(1\)\]$' "$HOLO"
+          require "TASK-90  sampler en 2"                     -n '^\s*#\[sampler\(2\)\]$' "$HOLO"
+          forbid  "TASK-90  champ de temps dans l'uniforme"   -n '^\s*(pub\s+)?time\s*:' "$HOLO"
+          forbid  "TASK-90  composant dérivé dans le contour" -n 'derive\([^)]*Component' "$HOLO"
+          count   "TASK-90  une seule ressource, la banque" 1 -n 'derive\([^)]*Resource' "$HOLO"
+          require "TASK-90  la banque est la ressource"       -U 'derive\(Resource[^)]*\)\]\s*\npub struct HoloMaterials \{' "$HOLO"
+          require "critère 2  miroir Rust du contour, cinq champs" -U '(?s)outline_color.*?// offset +0\b.*?outline_width.*?// offset 16.*?rainbow_shift.*?// offset 20.*?mask_face.*?// offset 24.*?_pad.*?// offset 28' "$HOLO"
+          require "TASK-90  remplissage explicite à l'offset 28" -n '^\s+pub _pad: f32,\s*// offset 28' "$HOLO"
+          require "TASK-90  masque de face en f32"            -n '^\s+pub mask_face: f32,' "$HOLO"
+          require "TASK-90  index des états"                  -U 'pub const IDLE: usize = 0;[\s\S]*?pub const HOVER: usize = 1;[\s\S]*?pub const SCORING: usize = 2;[\s\S]*?pub const HIDDEN: usize = 3;' "$HOLO"
+          forbid  "TASK-90  matériau écrit après sa construction" -n 'get_mut\(' "$HOLO"
+          count   "TASK-90  quatre couleurs de départ" 4      -n 'Srgba::hex\("#[0-9A-F]{6}"\)' "$HOLO"
+
+          # TASK-91 : le shader du contour et l'échange de handle. Imports et
+          # bindings à la lettre ; le miroir WGSL des cinq champs ; l'horloge
+          # du GPU pour la pulsation et le balayage, aucun champ de temps ; la
+          # face jamais échantillonnée sous le masque ; la valeur d'un dé jamais
+          # lue par le rendu ; les noms proscrits absents de tout ; le masquage
+          # premier dans l'état de contour ; le survol par `Interaction` ; les
+          # dés habillés puis suivis ; le handle réécrit seulement s'il diffère.
+          HW=$SHADERS/holo_card.wgsl
+          require "TASK-91  import de la sortie du vertex 2D"  -n '^#import bevy_sprite::mesh2d_vertex_output::VertexOutput$' "$HW"
+          require "TASK-91  import de l'horloge du GPU"        -n '^#import bevy_sprite::mesh2d_view_bindings::globals$' "$HW"
+          require "TASK-91  pulsation et balayage sur l'horloge" -n 'globals\.time' "$HW"
+          require "TASK-91  uniforme en 0"                     -n '^@group\(#\{MATERIAL_BIND_GROUP\}\) @binding\(0\) var<uniform> material: HoloUniform;$' "$HW"
+          require "TASK-91  texture de face en 1"              -n '^@group\(#\{MATERIAL_BIND_GROUP\}\) @binding\(1\) var face_texture: texture_2d<f32>;$' "$HW"
+          require "TASK-91  sampler en 2"                      -n '^@group\(#\{MATERIAL_BIND_GROUP\}\) @binding\(2\) var face_sampler: sampler;$' "$HW"
+          require "critère 2  miroir WGSL du contour, cinq champs" -U '(?s)outline_color.*?// offset +0\b.*?outline_width.*?// offset 16.*?rainbow_shift.*?// offset 20.*?mask_face.*?// offset 24.*?_pad.*?// offset 28' "$HW"
+          forbid  "TASK-91  champ de temps dans le WGSL"       -n '^\s*time\s*:' "$HW"
+          require "critère 7  la face n'est pas échantillonnée sous le masque" -U 'if \(material\.mask_face > 0\.5\) \{[^}]*\} else \{[^}]*textureSample\(face_texture' "$HW"
+          forbid  "critère 7  la valeur du dé lue par le rendu" -n 'current_value' "$JUICE/src/graphics"
+          forbid  "critère 7  noms proscrits"                  -n '\b(DieComponent|DieEntity|SelectedForScore|HiddenDie|ScoringDie)\b' crates/ assets/
+          require "TASK-91  le masquage prime"                 -U 'fn outline_state\(hidden: bool, scoring: bool, hovered: bool\) -> usize \{\n\s*if hidden \{\n\s*return HoloMaterials::HIDDEN;' "$HOLO"
+          require "TASK-91  survol par Interaction"            -n 'Option<&.a Interaction>' "$HOLO"
+          require "TASK-91  les dés sont habillés puis suivis" -n '^\s+app\.add_systems\(Update, \(dress_dice, sync_die_outline\)\.chain\(\)\);$' "$JUICE/src/graphics/plugin.rs"
+          require "TASK-91  handle réécrit seulement s'il diffère" -n 'material\.0\.id\(\) != target\.id\(\)' "$HOLO"
+
+          # TASK-92 : le mode dégradé. Un seul `SafeMode`, dans les réglages,
+          # jamais un module ; `graphics/` ne passe que par ses méthodes (les
+          # gardes TASK-83 sur le drapeau restent) ; l'argument de ligne de
+          # commande lu dans build ; l'échec d'un shader écouté, journalisé,
+          # engagé, jamais une panique ; la réconciliation sur changement
+          # seulement ; fond et dés plats par un Sprite uni ; la banque et le
+          # quad ne se construisent pas en mode dégradé ; le masque de face
+          # n'est lu que par le contour.
+          PLG=$JUICE/src/graphics/plugin.rs
+          forbid  "TASK-92  panique dans le plugin"            -n 'panic!|\.unwrap\(\)|\.expect\(' "$PLG"
+          count   "TASK-92  un seul SafeMode" 1                -n '^pub struct SafeMode \{$' "$JUICE/src"
+          forbid  "TASK-92  module du mode dégradé"            -n '^\s*(pub(\(crate\))? )?mod safe_mode' "$JUICE/src"
+          require "TASK-92  l'argument de ligne de commande"   -n '^\s+if SafeMode::requested_by\(std::env::args\(\)\) \{$' "$PLG"
+          require "TASK-92  l'échec d'un shader est écouté"    -n 'MessageReader<AssetLoadFailedEvent<Shader>>' "$PLG"
+          require "TASK-92  l'échec est journalisé puis engagé" -U 'fn engage_safe_mode_on_shader_failure\([^{]*\{\n\s*for failure in failures\.read\(\) \{\n\s*warn!\(' "$PLG"
+          require "TASK-92  la bascule est gardée par le changement" -n '^\s+\.run_if\(resource_changed::<SafeMode>\),$' "$PLG"
+          require "TASK-92  le mode se lit par sa méthode"     -n 'is_engaged\(\)' "$JUICE/src/graphics"
+          require "TASK-92  fond plat"                          -n 'Sprite::from_color\(SMALL\.primary, size\)' "$BG"
+          require "TASK-92  le fond ne se dresse pas en mode dégradé" -U 'fn spawn_background_quad\([^{]*\{\n[^}]*?if safe_mode\.is_engaged\(\) \{' "$BG"
+          require "TASK-92  dés plats"                          -n 'Sprite::from_color\(outline_color\(state\), Vec2::splat\(DIE_QUAD_SIZE\)\)' "$HOLO"
+          require "TASK-92  la banque absente est le mode dégradé des dés" -n 'bank: Option<Res<HoloMaterials>>' "$HOLO"
+          require "TASK-92  la banque ne se construit pas en mode dégradé" -U 'fn build_holo_bank\([^{]*\{\n\s*if safe_mode\.is_engaged\(\) \{\n\s*return;' "$HOLO"
+          forbid  "TASK-92  masque de face lu hors du contour" -n 'mask_face' "$JUICE/src" -g '!**/graphics/holo.rs'
+          forbid  "TASK-92  le contrôleur exigé sans fond"     -n 'mut controller: ResMut<VisualThemeController>' "$THEME"
+
+          # TASK-93 : le Web. La configuration de rendu demande les limites
+          # réelles de l'adaptateur (`Functionality`) ; `WebGL2`, l'héritière
+          # de `Compatibility` déjà proscrite, fige des minima qu'un écran à
+          # facteur 2 dépasse, mesuré : proscrite aussi. La cible de mesure
+          # monte la configuration, le script de contrôle pèse les assets et
+          # compare le total à la cible, la page de chargement charge le module.
+          require "TASK-93  les limites de l'adaptateur"       -n '^\s+priority: WgpuSettingsPriority::Functionality,$' "$PLG"
+          forbid  "TASK-93  limites minimales WebGL2 figées"   -n 'WgpuSettingsPriority::(WebGL2|WebGPU)\b' crates/ -g '!**/graphics/plugin.rs'
+          forbid  "TASK-93  limites figées dans la configuration" -n 'priority: WgpuSettingsPriority::(WebGL2|WebGPU)' "$PLG"
+          require "TASK-93  la cible monte la configuration de rendu" -n '^\s+DefaultPlugins\.set\(render_plugin\(\)\),$' crates/shop_system/src/bin/wasm_size.rs
+          require "TASK-93  les assets pesés"                 -n '^assets=\$\(find assets -type f -exec cat \{\} \+ \| wc -c' ci/check-wasm-size.sh
+          require "TASK-93  le total comparé à la cible"      -n '^if \[ "\$\{total\}" -gt "\$\{CIBLE_ABSOLUE\}" \]; then$' ci/check-wasm-size.sh
+          require "TASK-93  la page charge le module"         -n '^\s+import init from "\./wasm_size\.js";$' ci/web/index.html
+
+          # TASK-94 : l'audit de clôture existe, et le bloc de glossaire qu'il
+          # relit est livré avec le code.
+          require "TASK-94  l'audit de l'étape existe"        --files crates/ui_and_juice/tests -g 'step7_audit.rs'
+          require "TASK-94  le bloc de glossaire livré"       -n '^## § 3 — Types canoniques, couche Bevy : lignes de l.Étape 7$' reports/glossaire-etape-7.md
+
+          exit $status
+
+      # ---- Passe rand 0.10 et Default (15 septembre 2026) ----
+      #
+      # Deux défauts du corpus, corrigés dans vingt tickets le 15 septembre
+      # 2026 : la double borne sur le générateur, que le corpus imposait
+      # verbatim et que clippy refuse sous `-D warnings`, et une méthode qui
+      # n'existe plus en `rand` 0.10. Le dépôt portait la première en treize
+      # signatures, sous treize attributs de complaisance. Les gardes sont
+      # ancrées sur la signature et sur l'attribut, jamais sur le nom nu : la
+      # prose garde le droit de dire « la double borne ».
+      - name: Invariants de la passe rand 0.10
+        run: |
+          set -euo pipefail
+          status=0
+          forbid() {
+            label=$1; shift
+            out=$(rg "$@" 2>&1) && rc=0 || rc=$?
+            case $rc in
+              1) printf '  ok    %s\n' "$label" ;;
+              0) printf '  ECHEC %s\n%s\n' "$label" "$out"; status=1 ;;
+              *) printf '  ECHEC %s : rg a échoué (code %s)\n%s\n' "$label" "$rc" "$out"; status=1 ;;
+            esac
+          }
+
+          forbid  "passe rand  double borne sur le générateur"  -n 'impl Rng \+ RngExt' crates/
+          forbid  "passe rand  attribut de complaisance"         -n 'allow\(clippy::implied_bounds_in_impls\)' crates/
+          forbid  "passe rand  méthode disparue de rand 0.10"    -n '\bgen_range\(' crates/
 
           exit $status
 

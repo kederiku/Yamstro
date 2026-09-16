@@ -36,6 +36,7 @@
 
 pub mod animation;
 pub mod events;
+pub mod graphics;
 pub mod queue;
 pub mod settings;
 
