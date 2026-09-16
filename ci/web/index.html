@@ -1,0 +1,39 @@
+<!doctype html>
+<!--
+  Page de chargement de la cible de mesure WebAssembly (TASK-93).
+
+  Elle sert à vérifier dans un navigateur que le jeu démarre sous WebGL2 avec
+  ses trois shaders, et que le mode dégradé se produit quand l'un d'eux manque.
+  Assemblage, depuis la racine du dépôt, après `ci/measure-wasm.sh dist` :
+
+      mkdir -p web && cp ci/web/index.html dist/wasm_size.js web/
+      cp dist/wasm_size_bg.opt.wasm web/wasm_size_bg.wasm
+      cp -R assets web/assets
+      python3 -m http.server 8093 --directory web
+
+  Le module `wasm-bindgen` cherche `wasm_size_bg.wasm` à côté de lui : c'est
+  l'artefact **optimisé** qui est servi sous ce nom, celui qui est mesuré. Pour
+  provoquer le repli, retirer un shader de `web/assets/shaders/` et recharger.
+  `App::run` sur le Web rend la main par une exception de contrôle de flux,
+  qui n'est pas une erreur : elle est filtrée, tout le reste est journalisé.
+-->
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>Yamstro — cible de mesure</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+    canvas { display: block; outline: none; }
+  </style>
+</head>
+<body>
+  <script type="module">
+    import init from "./wasm_size.js";
+    init().catch((erreur) => {
+      if (!`${erreur}`.includes("Using exceptions for control flow")) {
+        console.error(erreur);
+      }
+    });
+  </script>
+</body>
+</html>

@@ -64,6 +64,8 @@
 use bevy::asset::AssetLoadFailedEvent;
 use bevy::core_pipeline::fullscreen_material::FullscreenMaterialPlugin;
 use bevy::prelude::*;
+use bevy::render::RenderPlugin;
+use bevy::render::settings::{RenderCreation, WgpuSettings, WgpuSettingsPriority};
 use bevy::shader::Shader;
 use bevy::sprite_render::Material2dPlugin;
 use log::warn;
@@ -99,6 +101,39 @@ pub const SHADER_PATHS: [&str; 3] = [
     CRT_POSTPROCESS_SHADER,
     HOLO_CARD_SHADER,
 ];
+
+/// La configuration de rendu du jeu (TASK-93) : la priorité `Functionality`,
+/// les fonctionnalités et limites **réelles de l'adaptateur**, écrite ici une
+/// fois, et gardée.
+///
+/// En 0.19.1 les variantes sont `WebGPU`, `Functionality` et `WebGL2`
+/// (`bevy_render-0.19.1/src/settings.rs:20-27`) ; l'ancienne `Compatibility`
+/// est devenue `WebGL2`, pas `WebGPU`. Seule `Functionality` prend les limites
+/// de l'adaptateur (`renderer/mod.rs:300-310`) ; les deux autres demandent au
+/// périphérique des limites fixes : `WebGL2` les minima WebGL2, dont une
+/// texture maximale de 2048 px, `WebGPU` les défauts WebGPU, qu'un adaptateur
+/// WebGL2 n'a pas. **Mesuré dans un navigateur** : la fenêtre de 1280 × 720
+/// fait 2560 × 1440 pixels physiques à un facteur d'échelle de 2, la surface
+/// ne se configure pas sous `WebGL2`, et le premier rendu panique
+/// (`Surface is not configured for presentation`). Sur wasm32 avec `webgl2`
+/// et sans `webgpu`, le backend est GL quoi qu'il arrive (`settings.rs:34`),
+/// et les shaders de l'étape s'en tiennent aux uniformes et à
+/// l'échantillonnage, gardé par la CI : c'est cela, pas une priorité, qui
+/// tient la portabilité. Le reste des réglages vient de
+/// `WgpuSettings::default()`, qui lit l'environnement.
+///
+/// La cible de mesure monte `DefaultPlugins.set(render_plugin())`, et le
+/// binaire du jeu fera de même.
+#[must_use]
+pub fn render_plugin() -> RenderPlugin {
+    RenderPlugin {
+        render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
+            priority: WgpuSettingsPriority::Functionality,
+            ..WgpuSettings::default()
+        })),
+        ..RenderPlugin::default()
+    }
+}
 
 /// Plugin des effets visuels.
 ///

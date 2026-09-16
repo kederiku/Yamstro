@@ -21,6 +21,7 @@ use bevy::color::{LinearRgba, Srgba};
 use bevy::mesh::{MeshPlugin, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::render::render_resource::ShaderType;
+use bevy::render::settings::{RenderCreation, WgpuSettingsPriority};
 use bevy::render::sync_world::SyncWorldPlugin;
 use bevy::shader::Shader;
 use bevy::sprite::Sprite;
@@ -40,7 +41,7 @@ use ui_and_juice::graphics::crt::{CrtMaterial, CrtUniform, crt_pass_wanted};
 use ui_and_juice::graphics::holo::{
     HoloMaterials, HoloOutlineMaterial, HoloUniform, outline_state,
 };
-use ui_and_juice::graphics::plugin::SHADER_PATHS;
+use ui_and_juice::graphics::plugin::{SHADER_PATHS, render_plugin};
 use ui_and_juice::graphics::theme::{BIG, BOSS, SHOP, SMALL, ThemePalette, VisualThemeController};
 use ui_and_juice::settings::{CrtSettings, JuiceSettings, SafeMode};
 
@@ -1550,5 +1551,55 @@ fn test_flat_background_follows_target_palette() {
     assert_eq!(
         sprite_of(&app, quad).expect("un aplat").color,
         Color::from(SHOP.primary)
+    );
+}
+
+// ------------------------------------------------------------ TASK-93
+
+/// La configuration de rendu demande les limites réelles de l'adaptateur :
+/// `Functionality`, la seule priorité qui tient sur un écran à facteur 2 sous
+/// WebGL2 (mesuré : 2560 px de large contre 2048 de limite minimale).
+#[test]
+fn test_render_config_uses_functionality_priority() {
+    let plugin = render_plugin();
+    let RenderCreation::Automatic(settings) = plugin.render_creation else {
+        panic!("création automatique attendue");
+    };
+    assert!(matches!(
+        settings.priority,
+        WgpuSettingsPriority::Functionality
+    ));
+}
+
+/// Le poids d'un dossier, fichiers de tous les sous-dossiers compris.
+fn dir_size(dir: &Path) -> u64 {
+    let mut total = 0;
+    for entry in std::fs::read_dir(dir).expect("un dossier lisible") {
+        let entry = entry.expect("une entrée lisible");
+        let meta = entry.metadata().expect("des métadonnées");
+        total += if meta.is_dir() {
+            dir_size(&entry.path())
+        } else {
+            meta.len()
+        };
+    }
+    total
+}
+
+/// Le budget Web tient assets compris : la référence du `.wasm` optimisé plus
+/// le poids d'`assets/` reste sous les 25 Mo, la cible absolue du projet.
+#[test]
+fn test_web_budget_holds_with_assets() {
+    let racine = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let reference: u64 = std::fs::read_to_string(racine.join("ci/wasm-size-baseline.txt"))
+        .expect("la référence")
+        .trim()
+        .parse()
+        .expect("un entier");
+    let assets = dir_size(&racine.join("assets"));
+    assert!(assets > 0, "les shaders pèsent quelque chose");
+    assert!(
+        reference + assets < 26_214_400,
+        "{reference} + {assets} octets dépassent la cible de 25 Mo"
     );
 }

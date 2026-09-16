@@ -1,8 +1,10 @@
 //! Cible de mesure de la taille du binaire WebAssembly.
 //!
 //! **De l'outillage, pas du code de jeu.** Aucune règle, aucune constante de
-//! gameplay, aucun système propre : elle monte l'`App` avec la liste de plugins
-//! et de features réelles, et c'est tout.
+//! gameplay : elle monte l'`App` avec la liste de plugins et de features
+//! réelles, la configuration de rendu du jeu (`render_plugin`, TASK-93), et une
+//! caméra 2D d'observation, pour que ce qu'elle rend soit visible dans un
+//! navigateur ; le jeu montera la sienne.
 //!
 //! # Elle vit dans la crate du sommet du graphe, et elle y remonte quand le sommet change
 //!
@@ -38,15 +40,23 @@ use game_state::GameStatePlugin;
 use shop_system::ShopPlugin;
 use ui_and_juice::JuicePlugin;
 use ui_and_juice::graphics::VisualEffectsPlugin;
+use ui_and_juice::graphics::plugin::render_plugin;
 
 fn main() {
     App::new()
         .add_plugins((
-            DefaultPlugins,
+            DefaultPlugins.set(render_plugin()),
             GameStatePlugin,
             JuicePlugin,
             VisualEffectsPlugin,
             ShopPlugin,
         ))
+        .add_systems(Startup, spawn_camera)
         .run();
+}
+
+/// La caméra d'observation : sans elle, rien n'est rendu et rien ne se
+/// vérifie dans un navigateur.
+fn spawn_camera(mut commands: Commands) {
+    commands.spawn(Camera2d);
 }
