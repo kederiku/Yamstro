@@ -14,14 +14,21 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use bevy::asset::AssetPlugin;
+use std::time::Duration;
+
+use bevy::asset::{AssetEvent, AssetPlugin};
 use bevy::mesh::{MeshPlugin, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::render::render_resource::ShaderType;
+use bevy::time::TimeUpdateStrategy;
 use bevy::window::{PrimaryWindow, WindowPlugin, WindowResized};
+use core_engine::blinds::{BlindContext, BlindDefinition, BlindType};
+use core_engine::hands::HandGrid;
+use game_state::RunPhase;
 use ui_and_juice::graphics::VisualEffectsPlugin;
 use ui_and_juice::graphics::background::{BackgroundMaterial, BackgroundQuad, BackgroundUniform};
 use ui_and_juice::graphics::plugin::SHADER_PATHS;
+use ui_and_juice::graphics::theme::{BOSS, SHOP, SMALL, ThemePalette, VisualThemeController};
 use ui_and_juice::settings::{CrtSettings, JuiceSettings, SafeMode};
 
 /// Trois mises à jour, aucune panique : le plugin se monte sans rendu, avec le
@@ -330,4 +337,239 @@ fn test_window_resize_keeps_mesh_handle() {
     assert_eq!(avant, apres, "le handle du maillage ne change pas");
     assert_eq!(app.world().resource::<Assets<Mesh>>().len(), combien);
     assert_eq!(taille, Vec2::new(640.0, 480.0), "idempotent");
+}
+
+/// Le pas de temps des tests du thème : 10 ms par mise à jour, exacts en
+/// nanosecondes, donc 150 pas font exactement 1,5 s.
+const STEP: Duration = Duration::from_millis(10);
+
+/// Le nombre de `Modified` du matériau du fond lus depuis la dernière remise
+/// à zéro, par un lecteur dédié qui voit chaque message exactement une fois.
+///
+/// Mesuré : lire `Messages` « de la frame courante » ne marche pas ici, le
+/// renouvellement des messages étant cadencé par `TimePlugin` sur le pas fixe
+/// (`bevy_time-0.19.1/src/lib.rs:98`), si bien que les mêmes messages
+/// restent visibles plusieurs frames. Un lecteur, lui, a son curseur.
+#[derive(Resource, Default)]
+struct ModifiedCount(usize);
+
+fn count_modified(
+    mut reader: MessageReader<AssetEvent<BackgroundMaterial>>,
+    mut count: ResMut<ModifiedCount>,
+) {
+    count.0 += reader
+        .read()
+        .filter(|e| matches!(e, AssetEvent::Modified { .. }))
+        .count();
+}
+
+/// Une application headless, démarrée, au temps piloté par pas de 10 ms, avec
+/// le compteur de `Modified` remis à zéro après la frame de démarrage : la
+/// création du matériau émet un `Added` **et** un `Modified`
+/// (`bevy_asset-0.19.1/src/assets.rs:391`), qui ne comptent pas comme une
+/// écriture au repos.
+fn app_stepped() -> App {
+    let mut app = app_headless();
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+    app.init_resource::<ModifiedCount>();
+    app.add_systems(Last, count_modified);
+    app.update();
+    app.world_mut().resource_mut::<ModifiedCount>().0 = 0;
+    app
+}
+
+/// La palette portée par le matériau du fond, lue dans `Assets`.
+fn material_palette(app: &App) -> ThemePalette {
+    let controller = app.world().resource::<VisualThemeController>();
+    let materials = app.world().resource::<Assets<BackgroundMaterial>>();
+    let params = &materials
+        .get(&controller.handle)
+        .expect("le matériau du fond existe")
+        .params;
+    ThemePalette {
+        primary: params.primary_color,
+        secondary: params.secondary_color,
+        accent: params.accent_color,
+        speed: params.speed,
+        swirl_factor: params.swirl_factor,
+    }
+}
+
+/// Entre en run avec une manche du type donné, en phase `Roll`.
+fn enter_blind(app: &mut App, kind: BlindType) {
+    app.insert_resource(State::new(RunPhase::Roll));
+    app.insert_resource(BlindContext {
+        blind: BlindDefinition {
+            kind,
+            target_score: 300,
+            reward: 3,
+            modifier: None,
+        },
+        target_score: 300,
+        current_score: 0,
+        hands_remaining: 4,
+        used_hands: HandGrid::default(),
+    });
+}
+
+/// Les `Modified` comptés depuis le dernier appel, et remise à zéro.
+fn take_modified(app: &mut App) -> usize {
+    std::mem::take(&mut app.world_mut().resource_mut::<ModifiedCount>().0)
+}
+
+fn elapsed_secs(app: &App) -> f32 {
+    app.world()
+        .resource::<VisualThemeController>()
+        .timer
+        .elapsed_secs()
+}
+
+/// Cent vingt frames sans changement de manche : zéro `Modified` sur le
+/// matériau du fond. Le contrôleur naît au repos, le minuteur terminé, et le
+/// système rend la main avant tout `get_mut`.
+#[test]
+fn test_no_material_write_when_idle() {
+    let mut app = app_stepped();
+    for _ in 0..120 {
+        app.update();
+    }
+    assert_eq!(take_modified(&mut app), 0);
+    assert!(
+        app.world()
+            .resource::<VisualThemeController>()
+            .timer
+            .is_finished()
+    );
+}
+
+/// Cible changée à `t = 0`, frames avancées : à 1,49 s la palette diffère de
+/// la cible ; à exactement 1,5 s elle l'atteint ; ensuite, plus une écriture.
+#[test]
+fn test_palette_transition_lasts_1_5s() {
+    let mut app = app_stepped();
+    enter_blind(&mut app, BlindType::Boss);
+
+    for _ in 0..149 {
+        app.update();
+    }
+    assert!((elapsed_secs(&app) - 1.49).abs() < 1e-6);
+    assert_ne!(material_palette(&app), *BOSS, "pas avant 1,5 s");
+    assert_eq!(
+        take_modified(&mut app),
+        149,
+        "une écriture par frame de transition"
+    );
+
+    app.update();
+    assert!((elapsed_secs(&app) - 1.5).abs() < 1e-6);
+    assert_eq!(material_palette(&app), *BOSS, "exactement à 1,5 s");
+    assert_eq!(take_modified(&mut app), 1, "la dernière écriture");
+
+    for _ in 0..60 {
+        app.update();
+    }
+    assert_eq!(
+        take_modified(&mut app),
+        0,
+        "plus aucune écriture une fois le minuteur terminé"
+    );
+}
+
+/// Au menu principal, sans `BlindContext` ni `State<RunPhase>`, le système
+/// tourne et retombe sur la Petite Mise : parti d'une Boss, il y revient.
+#[test]
+fn test_theme_controller_survives_missing_blind_context() {
+    let mut app = app_stepped();
+    assert!(!app.world().contains_resource::<BlindContext>());
+    assert!(!app.world().contains_resource::<State<RunPhase>>());
+    {
+        let mut controller = app.world_mut().resource_mut::<VisualThemeController>();
+        controller.from = *BOSS;
+        controller.to = *BOSS;
+    }
+
+    app.update();
+    let controller = app.world().resource::<VisualThemeController>();
+    assert_eq!(
+        controller.to, *SMALL,
+        "le système a tourné et visé la Petite Mise"
+    );
+    assert_eq!(controller.from, *BOSS);
+
+    for _ in 0..160 {
+        app.update();
+    }
+    assert_eq!(material_palette(&app), *SMALL);
+}
+
+/// Petite → Boss, 0,5 s, puis → Boutique : le nouveau `from` est la palette
+/// courante à 0,5 s, pas l'ancien `from`, et le matériau ne saute pas.
+#[test]
+fn test_interrupted_transition_restarts_from_current() {
+    let mut app = app_stepped();
+    enter_blind(&mut app, BlindType::Boss);
+    for _ in 0..50 {
+        app.update();
+    }
+    assert!((elapsed_secs(&app) - 0.5).abs() < 1e-6);
+    let courante = app.world().resource::<VisualThemeController>().current();
+    assert_ne!(courante, *SMALL);
+    assert_ne!(courante, *BOSS);
+    assert_eq!(material_palette(&app), courante);
+
+    app.insert_resource(State::new(RunPhase::Shop));
+    app.update();
+
+    let controller = app.world().resource::<VisualThemeController>();
+    assert_eq!(controller.to, *SHOP);
+    assert_eq!(controller.from, courante, "repart de la palette affichée");
+    let ecart = (material_palette(&app).speed - courante.speed).abs();
+    assert!(ecart < 0.01, "aucun saut : {ecart}");
+}
+
+/// Petite → Boss, transition complète : `swirl_factor` passe de 0,9 à 2,1 et
+/// vaut 1,5 à mi-parcours.
+#[test]
+fn test_small_to_boss_varies_swirl() {
+    let mut app = app_stepped();
+    assert_eq!(material_palette(&app).swirl_factor, 0.9);
+    enter_blind(&mut app, BlindType::Boss);
+    for _ in 0..75 {
+        app.update();
+    }
+    assert!((elapsed_secs(&app) - 0.75).abs() < 1e-6);
+    assert!((material_palette(&app).swirl_factor - 1.5).abs() <= 1e-6);
+    for _ in 0..75 {
+        app.update();
+    }
+    assert_eq!(material_palette(&app).swirl_factor, 2.1);
+}
+
+/// À `t = 0,5`, chaque canal et chaque `f32` du matériau valent la moyenne
+/// de `from` et `to`, en espace linéaire.
+#[test]
+fn test_interpolation_is_linear_in_linear_space() {
+    let mut app = app_stepped();
+    enter_blind(&mut app, BlindType::Boss);
+    for _ in 0..75 {
+        app.update();
+    }
+    let milieu = material_palette(&app);
+    let moyenne = |a: f32, b: f32| (a + b) / 2.0;
+    let canaux = |c: LinearRgba| [c.red, c.green, c.blue, c.alpha];
+    for (couleur, de, vers) in [
+        (milieu.primary, SMALL.primary, BOSS.primary),
+        (milieu.secondary, SMALL.secondary, BOSS.secondary),
+        (milieu.accent, SMALL.accent, BOSS.accent),
+    ] {
+        for ((x, a), b) in canaux(couleur).iter().zip(canaux(de)).zip(canaux(vers)) {
+            assert!(
+                (x - moyenne(a, b)).abs() <= 1e-6,
+                "{x} contre {}",
+                moyenne(a, b)
+            );
+        }
+    }
+    assert!((milieu.speed - moyenne(SMALL.speed, BOSS.speed)).abs() <= 1e-6);
+    assert!((milieu.swirl_factor - moyenne(SMALL.swirl_factor, BOSS.swirl_factor)).abs() <= 1e-6);
 }

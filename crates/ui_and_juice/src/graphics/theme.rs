@@ -1,6 +1,36 @@
-//! Les quatre palettes de manche et leur conversion : la moitié données du
-//! thème (TASK-86). L'interpolation, le contrôleur de thème et son minuteur
-//! sont TASK-87, l'autre moitié de ce module.
+//! Les quatre palettes de manche, leur conversion, et le contrôleur qui les
+//! fait se succéder : la moitié données (TASK-86) et la moitié système
+//! (TASK-87) du thème.
+//!
+//! # Raccord D : aucune écriture de matériau au repos
+//!
+//! Le contrôleur n'écrit dans `Assets<BackgroundMaterial>` que pendant les
+//! 1,5 s d'une transition. Chaque frame, il calcule la palette cible ; si elle
+//! diffère de `to`, la transition repart de la palette **courante**, celle qui
+//! est affichée, jamais de l'ancien `from`, sinon la couleur saute en arrière.
+//! Une fois le minuteur terminé et la cible inchangée, le système rend la main
+//! **avant tout `get_mut`** : une partie complète produit quelques dizaines
+//! d'`AssetEvent::Modified`, pas soixante par seconde. La frame où le minuteur
+//! franchit 1,5 s écrit une dernière fois, à la fraction 1, donc exactement
+//! `to`. À l'insertion, `from == to` et le minuteur est déjà terminé : rien
+//! n'est écrit au lancement. L'animation continue, elle, vient de
+//! `globals.time` côté WGSL.
+//!
+//! # Interpolation
+//!
+//! En espace linéaire, sur les cinq champs, par `Mix::mix` de `bevy::color`
+//! (`bevy_color-0.19.1/src/color_ops.rs:33`, ré-exporté à la racine) pour les
+//! couleurs, et par la même formule à deux termes `a·(1−t) + b·t` pour les
+//! deux `f32` : à `t = 1` elle rend exactement `b`, à `t = 0,5` exactement la
+//! moyenne, là où `a + (b − a)·t` peut rater `b` d'un ulp.
+//!
+//! # Paramètres faillibles
+//!
+//! `BlindContext` n'existe pas hors d'une run, et `State<RunPhase>` non plus,
+//! `RunPhase` étant un sous-état de `AppState::InRun`. Un `Res` nu ferait
+//! écarter le système en silence au menu principal, et le fond resterait
+//! figé sans la moindre erreur. Les deux sont des `Option<Res<…>>` ; phase
+//! absente, la cible est `SMALL`, et le système tourne.
 //!
 //! # Une seule conversion, dans un seul sens
 //!
@@ -31,12 +61,14 @@
 
 use std::sync::LazyLock;
 
-use bevy::color::{LinearRgba, Srgba};
+use bevy::color::{LinearRgba, Mix, Srgba};
 use bevy::math::Vec2;
-use core_engine::blinds::{BlindDefinition, BlindType};
+use bevy::prelude::*;
+use bevy::sprite_render::MeshMaterial2d;
+use core_engine::blinds::{BlindContext, BlindDefinition, BlindType};
 use game_state::RunPhase;
 
-use super::background::BackgroundUniform;
+use super::background::{BackgroundMaterial, BackgroundQuad, BackgroundUniform};
 
 /// Une palette : trois couleurs linéaires, vitesse, distorsion.
 ///
@@ -127,6 +159,103 @@ impl From<ThemePalette> for BackgroundUniform {
             swirl_factor: palette.swirl_factor,
             _pad: Vec2::ZERO,
         }
+    }
+}
+
+/// La transition de palette en cours, et le matériau qu'elle écrit.
+///
+/// **`Resource` uniquement** : en 0.19, `Resource` est un sous-trait de
+/// `Component`, dériver les deux ne compile pas, et un composant posé par
+/// mégarde sur un type déjà inséré en ressource despawnerait des entités.
+#[derive(Resource, Debug, Clone)]
+pub struct VisualThemeController {
+    /// La palette de départ de la transition en cours.
+    pub from: ThemePalette,
+    /// La palette cible.
+    pub to: ThemePalette,
+    /// 1,5 s, `TimerMode::Once`.
+    pub timer: Timer,
+    /// Le matériau du quad de fond, le seul que ce contrôleur écrit.
+    pub handle: Handle<BackgroundMaterial>,
+}
+
+impl VisualThemeController {
+    /// Un contrôleur au repos sur une palette : `from == to`, minuteur
+    /// terminé. Sans cela, l'application écrirait le matériau pendant les
+    /// 1,5 premières secondes de chaque lancement.
+    #[must_use]
+    pub fn at_rest(palette: ThemePalette, handle: Handle<BackgroundMaterial>) -> Self {
+        let mut timer = Timer::from_seconds(1.5, TimerMode::Once);
+        timer.set_elapsed(timer.duration());
+        Self {
+            from: palette,
+            to: palette,
+            timer,
+            handle,
+        }
+    }
+
+    /// La palette affichée à l'instant présent : `from` et `to` interpolées à
+    /// la fraction du minuteur.
+    #[must_use]
+    pub fn current(&self) -> ThemePalette {
+        blend(self.from, self.to, self.timer.fraction())
+    }
+}
+
+/// Deux palettes interpolées en espace linéaire sur les cinq champs.
+fn blend(from: ThemePalette, to: ThemePalette, t: f32) -> ThemePalette {
+    let t = t.clamp(0.0, 1.0);
+    let two_terms = |a: f32, b: f32| a * (1.0 - t) + b * t;
+    ThemePalette {
+        primary: from.primary.mix(&to.primary, t),
+        secondary: from.secondary.mix(&to.secondary, t),
+        accent: from.accent.mix(&to.accent, t),
+        speed: two_terms(from.speed, to.speed),
+        swirl_factor: two_terms(from.swirl_factor, to.swirl_factor),
+    }
+}
+
+/// Insère le contrôleur au repos sur la Petite Mise, avec le handle du quad.
+///
+/// Chaîné après le spawn du quad : sans quad, rien n'est inséré, et TASK-92
+/// gardera la chaîne entière derrière le mode dégradé. Au démarrage, ni
+/// phase ni manche n'existent : la cible est `SMALL`.
+pub fn init_visual_theme(
+    mut commands: Commands,
+    quad: Option<Single<&MeshMaterial2d<BackgroundMaterial>, With<BackgroundQuad>>>,
+) {
+    let Some(material) = quad else {
+        return;
+    };
+    commands.insert_resource(VisualThemeController::at_rest(*SMALL, material.0.clone()));
+}
+
+/// Anime la transition de palette et écrit le matériau du fond pendant ses
+/// 1,5 s, et seulement pendant.
+pub fn animate_visual_theme(
+    blind: Option<Res<BlindContext>>,
+    phase: Option<Res<State<RunPhase>>>,
+    time: Res<Time>,
+    mut controller: ResMut<VisualThemeController>,
+    mut materials: ResMut<Assets<BackgroundMaterial>>,
+) {
+    let target = match phase {
+        Some(phase) => target_palette(*phase.get(), blind.as_deref().map(|b| &b.blind)),
+        None => *SMALL,
+    };
+    if target != controller.to {
+        controller.from = controller.current();
+        controller.to = target;
+        controller.timer.reset();
+    }
+    if controller.timer.is_finished() {
+        return;
+    }
+    controller.timer.tick(time.delta());
+    let palette = controller.current();
+    if let Some(mut material) = materials.get_mut(&controller.handle) {
+        material.params = BackgroundUniform::from(palette);
     }
 }
 
@@ -231,6 +360,34 @@ mod tests {
                 assert_eq!(couleur.alpha, 1.0);
             }
         }
+    }
+
+    /// À `t = 0,5`, chaque canal et chaque `f32` valent la moyenne de `from`
+    /// et `to` ; à `t = 1`, exactement `to` ; à `t = 0`, exactement `from`.
+    #[test]
+    fn test_blend_is_linear_and_exact_at_ends() {
+        let milieu = blend(*SMALL, *BOSS, 0.5);
+        let moyenne = |a: f32, b: f32| (a + b) / 2.0;
+        for (x, a, b) in [
+            (milieu.primary.red, SMALL.primary.red, BOSS.primary.red),
+            (
+                milieu.secondary.green,
+                SMALL.secondary.green,
+                BOSS.secondary.green,
+            ),
+            (milieu.accent.blue, SMALL.accent.blue, BOSS.accent.blue),
+            (milieu.speed, SMALL.speed, BOSS.speed),
+            (milieu.swirl_factor, SMALL.swirl_factor, BOSS.swirl_factor),
+        ] {
+            assert!(
+                (x - moyenne(a, b)).abs() <= 1e-6,
+                "{x} contre {}",
+                moyenne(a, b)
+            );
+        }
+        assert_eq!(blend(*SMALL, *BOSS, 1.0), *BOSS);
+        assert_eq!(blend(*SMALL, *BOSS, 0.0), *SMALL);
+        assert_eq!(blend(*SMALL, *BOSS, 7.0), *BOSS, "fraction bornée");
     }
 
     /// La conversion vers l'uniforme recopie les cinq champs et met le

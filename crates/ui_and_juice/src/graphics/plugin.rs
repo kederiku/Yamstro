@@ -44,6 +44,7 @@ use bevy::prelude::*;
 use bevy::sprite_render::Material2dPlugin;
 
 use super::background::{BackgroundMaterial, resize_background_quad, spawn_background_quad};
+use super::theme::{animate_visual_theme, init_visual_theme};
 use crate::settings::{CrtSettings, SafeMode};
 
 /// Le vortex d'arrière-plan, rendu en `MainPass` sur le quad de fond.
@@ -92,7 +93,10 @@ impl Plugin for VisualEffectsPlugin {
 
         // Le quad de fond (TASK-85) : spawné une fois au démarrage, redimensionné
         // en place sur `WindowResized`, sans jamais réécrire son `Transform`.
-        app.add_systems(Startup, spawn_background_quad);
+        // Le contrôleur de thème (TASK-87) naît juste après, avec le handle du
+        // quad : la chaîne pose un point de synchronisation entre les deux.
+        app.add_systems(Startup, (spawn_background_quad, init_visual_theme).chain());
         app.add_systems(Update, resize_background_quad);
+        app.add_systems(Update, animate_visual_theme);
     }
 }

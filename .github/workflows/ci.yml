@@ -1945,7 +1945,7 @@ jobs:
           require "critère 2  miroir WGSL, six champs dans l'ordre" -U "$MIROIR" "$WGSL"
           require "critère 2  miroir Rust, six champs dans l'ordre" -U "$MIROIR" "$BG"
           require "TASK-85  le quad derrière tout le reste"   -n 'Transform::from_xyz\(0\.0, 0\.0, -100\.0\)' "$BG"
-          require "TASK-85  le spawn tourne au démarrage"     -n '^\s+app\.add_systems\(Startup, spawn_background_quad\);$' "$JUICE/src/graphics/plugin.rs"
+          require "TASK-85  le spawn tourne au démarrage"     -n '^\s+app\.add_systems\(Startup, \(spawn_background_quad, init_visual_theme\)\.chain\(\)\);$' "$JUICE/src/graphics/plugin.rs"
           require "TASK-85  le redimensionnement est ordonnancé" -n '^\s+app\.add_systems\(Update, resize_background_quad\);$' "$JUICE/src/graphics/plugin.rs"
           require "TASK-85  le redimensionnement écoute la fenêtre" -n 'MessageReader<WindowResized>' "$BG"
           require "TASK-85  le maillage est réécrit en place" -n 'meshes\.get_mut\(' "$BG"
@@ -1955,9 +1955,9 @@ jobs:
           # TASK-86 : les quatre palettes, sRGB converti une seule fois. Douze
           # appels `Srgba::hex("#…")`, un par couleur, et aucune composante
           # linéaire écrite à la main. Des `static LazyLock`, jamais un `const`
-          # inliné à chaque usage. Aucune logique de transition dans la moitié
-          # données, ancrée sur les types et les appels, pas sur les mots. La
-          # boutique prime sur le type de blind, par la place du bras, ancrée
+          # inliné à chaque usage. La moitié système du même fichier est TASK-87,
+          # gardée plus bas. La boutique prime sur le type de blind, par la
+          # place du bras, ancrée
           # sur le premier `match` du corps de la fonction : mesuré, un `match`
           # inversé garde un `match phase` interne que la garde non ancrée
           # acceptait ; le
@@ -1970,11 +1970,32 @@ jobs:
           forbid  "TASK-86  composante linéaire à la main"   -n 'LinearRgba::(new|rgb|rgba)\(' "$THEME"
           forbid  "TASK-86  palette en const LazyLock"       -n 'const [A-Z_]+: *LazyLock' "$JUICE/src"
           forbid  "TASK-86  palette composant ou ressource"  -nU 'derive\([^)]*(Component|Resource)[^)]*\)\]\s*\npub struct ThemePalette\b' "$THEME"
-          forbid  "TASK-86  transition dans la moitié données" -n '\bTimer\b|Assets<|\.lerp\(|\bmix\(|fn \w+_system' "$THEME"
           require "TASK-86  la boutique prime"               -U 'fn target_palette\([^{]*\{\n\s*match phase \{\n\s*RunPhase::Shop => \*SHOP,' "$THEME"
           require "TASK-86  sans blind, la Petite Mise"      -n '^\s+_ => \*SMALL,$' "$THEME"
           forbid  "TASK-86  remplissage neutre resté dans le spawn" -n 'const [A-Z_]+: BackgroundUniform' "$BG"
           require "TASK-86  le spawn part de la Petite Mise" -n 'BackgroundUniform::from\(\*SMALL\)' "$BG"
+
+          # TASK-87 : le contrôleur de thème, raccord D. Un seul `get_mut` dans
+          # le thème, et le `return` sur le minuteur terminé le précède ; les
+          # ressources de manche et de phase toujours sous `Option`, un `Res`
+          # nu faisant écarter le système en silence au menu ; le contrôleur
+          # est une ressource, jamais un composant ; le minuteur fait 1,5 s et
+          # naît terminé ; le matériau du fond n'a qu'un écrivain, ce
+          # contrôleur, le spawn ne faisant que le créer ; aucun champ de temps
+          # dans un uniforme, ancré sur `time: f32`, le paramètre `time:
+          # Res<Time>` du contrôleur étant légitime ; le contrôleur naît après
+          # le quad et tourne en Update.
+          count   "TASK-87  un seul get_mut dans le thème" 1 -n 'get_mut\(' "$THEME"
+          require "TASK-87  le retour précède l'écriture"     -U 'timer\.is_finished\(\) \{\n\s*return;\n\s*\}[\s\S]*?materials\.get_mut\(' "$THEME"
+          forbid  "TASK-87  ressource de manche ou de phase nue" -n '[^<]Res<BlindContext>|[^<]Res<State<RunPhase>>' "$JUICE/src"
+          require "TASK-87  contrôleur ressource"             -U '#\[derive\(Resource[^)]*\)\]\s*\npub struct VisualThemeController \{' "$THEME"
+          forbid  "TASK-87  contrôleur composant"             -nU 'derive\([^)]*Component[^)]*\)\]\s*\npub struct VisualThemeController\b' "$THEME"
+          require "TASK-87  minuteur de 1,5 s"                -n 'Timer::from_seconds\(1\.5, TimerMode::Once\)' "$THEME"
+          require "TASK-87  minuteur terminé à l'insertion"   -n 'timer\.set_elapsed\(timer\.duration\(\)\)' "$THEME"
+          forbid  "TASK-87  second écrivain du matériau"      -n 'ResMut<Assets<BackgroundMaterial>>' "$JUICE/src" -g '!**/graphics/theme.rs' -g '!**/graphics/background.rs'
+          forbid  "TASK-87  le spawn écrit le matériau"       -n 'materials\.get_mut\(' "$BG"
+          forbid  "TASK-87  champ de temps dans un uniforme"  -n '^\s*(pub\s+)?time\s*:\s*f32\b' "$JUICE/src/graphics"
+          require "TASK-87  le contrôleur est animé"          -n '^\s+app\.add_systems\(Update, animate_visual_theme\);$' "$JUICE/src/graphics/plugin.rs"
 
           exit $status
 
