@@ -1868,6 +1868,30 @@ jobs:
           # baisse, sans déclencher la porte de taille.
           require "critère 8  plugin monté dans la cible" -n '^\s+VisualEffectsPlugin,$' crates/shop_system/src/bin/wasm_size.rs
 
+          # TASK-83 : les réglages du filtre et le mode dégradé, déclarés dans
+          # `settings.rs` à côté de `JuiceSettings` (raccord B), posés par le
+          # plugin. Le `Default` du filtre est écrit à la main : un dérivé
+          # donnerait un filtre éteint sans la moindre erreur. `Resource` est
+          # un sous-trait de `Component` en 0.19, et un composant dans le
+          # module des réglages despawnerait les autres porteurs : ancré sur le
+          # dérivé et sur l'impl, jamais sur le nom, que la doc du module a le
+          # droit d'expliquer. Enfin « aucun booléen ne transite par
+          # l'uniforme » s'ancre sur le champ et sur la lecture, pas sur le
+          # mot : `graphics/` ne déclare, n'initialise ni ne lit jamais le
+          # drapeau, il passe par le prédicat `is_active`.
+          SETTINGS=$JUICE/src/settings.rs
+          require "TASK-83  réglages du filtre déclarés"    -n '^pub struct CrtSettings \{$' "$SETTINGS"
+          require "TASK-83  mode dégradé déclaré"           -n '^pub struct SafeMode \{$' "$SETTINGS"
+          require "TASK-83  Default du filtre écrit à la main" -n '^impl Default for CrtSettings \{$' "$SETTINGS"
+          require "TASK-83  prédicat de garde déclaré"      -n '^\s+pub fn is_active\(&self, safe_mode: &SafeMode\) -> bool \{$' "$SETTINGS"
+          require "TASK-83  le plugin pose les réglages"    -n '^\s+app\.init_resource::<CrtSettings>\(\);$' "$JUICE/src/graphics/plugin.rs"
+          require "TASK-83  le plugin pose le mode dégradé" -n '^\s+app\.init_resource::<SafeMode>\(\);$' "$JUICE/src/graphics/plugin.rs"
+          forbid  "TASK-83  Default dérivé sur le filtre"   -nU 'derive\([^)]*Default[^)]*\)\]\s*\npub struct CrtSettings\b' "$SETTINGS"
+          forbid  "TASK-83  composant dérivé dans les réglages" -n 'derive\([^)]*Component' "$SETTINGS"
+          forbid  "TASK-83  composant implémenté dans les réglages" -n '^impl Component for' "$SETTINGS"
+          forbid  "TASK-83  drapeau déclaré dans graphics"  -n '\benabled\s*:' "$JUICE/src/graphics"
+          forbid  "TASK-83  drapeau lu dans graphics"       -n '\.enabled\b' "$JUICE/src/graphics"
+
           exit $status
 
       # ---- Passe rand 0.10 et Default (15 septembre 2026) ----

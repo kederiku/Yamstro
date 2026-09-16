@@ -1,6 +1,10 @@
 //! `VisualEffectsPlugin` : le point d'ancrage des effets visuels.
 //!
-//! # Trois responsabilités, aucune encore peuplée
+//! Depuis TASK-83, il pose les deux ressources de réglages de l'étape,
+//! `CrtSettings` et `SafeMode`, déclarées dans `settings.rs` à côté de
+//! `JuiceSettings` : il ne les possède pas, il les insère.
+//!
+//! # Trois responsabilités de rendu, aucune encore peuplée
 //!
 //! 1. **Les trois shaders.** Le plugin publie leurs chemins, relatifs à la
 //!    racine `assets/` du dépôt, en une seule source : les matériaux de
@@ -34,6 +38,8 @@
 
 use bevy::prelude::*;
 
+use crate::settings::{CrtSettings, SafeMode};
+
 /// Le vortex d'arrière-plan, rendu en `MainPass` sur le quad de fond.
 pub const PSYCHE_BACKGROUND_SHADER: &str = "shaders/psyche_background.wgsl";
 
@@ -57,13 +63,21 @@ pub const SHADER_PATHS: [&str; 3] = [
 
 /// Plugin des effets visuels.
 ///
-/// Il se monte seul, sans état, sans assets et sans rendu : le test headless de
-/// l'étape le vérifie sous `MinimalPlugins`.
+/// Il se monte seul, sans assets et sans rendu : le test headless de l'étape
+/// le vérifie sous `MinimalPlugins`. Son seul état est les deux ressources de
+/// réglages qu'il insère.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct VisualEffectsPlugin;
 
 impl Plugin for VisualEffectsPlugin {
-    fn build(&self, _app: &mut App) {
+    fn build(&self, app: &mut App) {
+        // Les deux ressources de réglages de l'étape, dès maintenant : le
+        // filtre allumé à pleine intensité, le mode dégradé éteint. TASK-88 et
+        // TASK-92 les lisent par le prédicat `is_active`, jamais par le
+        // drapeau lui-même.
+        app.init_resource::<CrtSettings>();
+        app.init_resource::<SafeMode>();
+
         // Point d'enregistrement des `Material2dPlugin` : posé, pas peuplé.
         // Aucun matériau n'existe encore, et `Material2dPlugin::<X>` sans `X`
         // ne compile pas. TASK-84, TASK-88 et TASK-90 le peuplent, chacun
