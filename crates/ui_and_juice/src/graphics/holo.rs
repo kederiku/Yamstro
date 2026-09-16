@@ -1,7 +1,34 @@
-//! Le matériau de contour holographique, son bloc d'uniformes et la banque de
-//! variantes pré-construites (TASK-90). Le shader et l'échange de handle sont
-//! TASK-91, le contour uni du mode dégradé TASK-92. Aucun système de réaction
-//! ici, ni sur `Scoring`, ni sur `Hidden`, ni sur le survol.
+//! Le matériau de contour holographique, son bloc d'uniformes, la banque de
+//! variantes pré-construites (TASK-90), l'habillage des dés et le choix de
+//! leur variante par échange de handle (TASK-91). Le contour uni du mode
+//! dégradé est TASK-92.
+//!
+//! # Raccord C : le rendu ne lit jamais la valeur d'un dé
+//!
+//! Le choix de variante lit les marqueurs `Hidden` et `Scoring`, le survol,
+//! le sceau et les modificateurs du dé : jamais sa valeur, ni pour choisir une
+//! texture, ni pour teinter, ni pour journaliser, et la CI l'interdit dans
+//! tout `graphics/`. Sous le masque, c'est le shader qui dessine un dos
+//! neutre sans échantillonner la face. Le masquage prime sur tout : un dé
+//! caché et scoré reste caché, quel que soit l'ordre des marqueurs.
+//!
+//! # L'échange
+//!
+//! Les dés n'ont aucun composant visuel à leur spawn (`game_state`, qui ne
+//! connaît pas cette crate) : `dress_dice` pose sur chaque `DieView` un quad
+//! partagé et le handle de sa variante, sans écrire de `Transform`, celui que
+//! `Mesh2d` requiert naissant à l'identité, la disposition des dés n'étant pas
+//! de cette étape. `sync_die_outline` réconcilie ensuite chaque frame la
+//! variante voulue avec le handle porté, et n'écrit le composant que si le
+//! handle diffère : la pose et le retrait de `Scoring`, `Hidden` et le survol
+//! sont suivis par construction, la restauration est gratuite, et rien ne
+//! bouge au repos. Un écrit de composant, jamais un `AssetEvent::Modified`.
+//! Le survol est `bevy_ui::Interaction`, l'API des cartes de relique, sans
+//! feature de plus : le système de focus ne touche pas les entités sans
+//! `Node`, un futur picking ou une couche UI la posera.
+//!
+//! Les cartes de relique sont des nœuds UI : un `Material2d` ne les habille
+//! pas, et « un handle par carte » attendra un rendu qui l'admette.
 //!
 //! # Forme A, et une texture de face
 //!
@@ -48,11 +75,16 @@
 
 use bevy::asset::Asset;
 use bevy::color::{LinearRgba, Srgba};
+use bevy::math::primitives::Rectangle;
+use bevy::mesh::Mesh2d;
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
-use bevy::sprite_render::Material2d;
+use bevy::sprite_render::{Material2d, MeshMaterial2d};
+use bevy::ui::Interaction;
+use core_engine::dice::Die;
+use game_state::{DieView, Hidden, Scoring};
 
 use super::plugin::HOLO_CARD_SHADER;
 
@@ -162,4 +194,96 @@ pub fn build_holo_bank(mut commands: Commands, mut materials: ResMut<Assets<Holo
         })
     });
     commands.insert_resource(HoloMaterials { dice });
+}
+
+/// Le côté du quad d'un dé, en pixels logiques : une valeur de départ, la
+/// disposition des dés n'étant pas de cette étape.
+pub const DIE_QUAD_SIZE: f32 = 64.0;
+
+/// L'état de contour d'un dé, dans l'ordre de priorité : le masquage d'abord,
+/// toujours, puis le marqueur de score, puis le survol.
+#[must_use]
+pub fn outline_state(hidden: bool, scoring: bool, hovered: bool) -> usize {
+    if hidden {
+        return HoloMaterials::HIDDEN;
+    }
+    if scoring {
+        return HoloMaterials::SCORING;
+    }
+    if hovered {
+        HoloMaterials::HOVER
+    } else {
+        HoloMaterials::IDLE
+    }
+}
+
+/// Un dé porte le balayage irisé s'il a un sceau ou un modificateur.
+#[must_use]
+pub fn is_iridescent(die: &Die) -> bool {
+    die.seal.is_some() || !die.modifiers.is_empty()
+}
+
+fn is_hovered(interaction: Option<&Interaction>) -> bool {
+    matches!(
+        interaction,
+        Some(Interaction::Hovered | Interaction::Pressed)
+    )
+}
+
+/// Ce que lit le choix de variante : les deux marqueurs et le survol, tous
+/// optionnels, et jamais la valeur du dé.
+type OutlineInputs<'a> = (
+    Option<&'a Hidden>,
+    Option<&'a Scoring>,
+    Option<&'a Interaction>,
+);
+
+/// Un dé vu mais pas encore habillé.
+type Undressed = (With<DieView>, Without<Mesh2d>);
+
+fn state_of((hidden, scoring, interaction): OutlineInputs<'_>) -> usize {
+    outline_state(hidden.is_some(), scoring.is_some(), is_hovered(interaction))
+}
+
+/// Habille chaque dé nouvellement vu : un quad partagé, bâti une fois, et le
+/// handle de sa variante. Aucun `Transform` n'est écrit.
+pub fn dress_dice(
+    mut commands: Commands,
+    bank: Res<HoloMaterials>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut quad: Local<Option<Handle<Mesh>>>,
+    dice: Query<(Entity, &Die, OutlineInputs<'_>), Undressed>,
+) {
+    for (entity, die, inputs) in &dice {
+        let quad = quad
+            .get_or_insert_with(|| {
+                meshes.add(Mesh::from(Rectangle::new(DIE_QUAD_SIZE, DIE_QUAD_SIZE)))
+            })
+            .clone();
+        let material = bank.die(state_of(inputs), is_iridescent(die)).clone();
+        commands
+            .entity(entity)
+            .insert((Mesh2d(quad), MeshMaterial2d(material)));
+    }
+}
+
+/// Réconcilie la variante de chaque dé avec ses marqueurs et son survol, et
+/// n'écrit le handle que s'il diffère.
+pub fn sync_die_outline(
+    bank: Res<HoloMaterials>,
+    mut dice: Query<
+        (
+            &Die,
+            &mut MeshMaterial2d<HoloOutlineMaterial>,
+            OutlineInputs<'_>,
+        ),
+        With<DieView>,
+    >,
+) {
+    for (die, mut material, inputs) in &mut dice {
+        let target = bank.die(state_of(inputs), is_iridescent(die));
+        if material.0.id() != target.id() {
+            material.0 = target.clone();
+        }
+    }
 }

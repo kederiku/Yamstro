@@ -22,17 +22,21 @@ use bevy::prelude::*;
 use bevy::render::render_resource::ShaderType;
 use bevy::render::sync_world::SyncWorldPlugin;
 use bevy::time::TimeUpdateStrategy;
+use bevy::ui::Interaction;
 use bevy::window::{PrimaryWindow, WindowPlugin, WindowResized};
 use core_engine::blinds::{BlindContext, BlindDefinition, BlindType};
+use core_engine::dice::{Die, DieId, DieSeal};
 use core_engine::hands::HandGrid;
-use game_state::RunPhase;
+use game_state::{DieView, Hidden, RunPhase, Scoring};
 use naga_oil::compose::{
     ComposableModuleDescriptor, Composer, NagaModuleDescriptor, ShaderDefValue, ShaderLanguage,
 };
 use ui_and_juice::graphics::VisualEffectsPlugin;
 use ui_and_juice::graphics::background::{BackgroundMaterial, BackgroundQuad, BackgroundUniform};
 use ui_and_juice::graphics::crt::{CrtMaterial, CrtUniform, crt_pass_wanted};
-use ui_and_juice::graphics::holo::{HoloMaterials, HoloOutlineMaterial, HoloUniform};
+use ui_and_juice::graphics::holo::{
+    HoloMaterials, HoloOutlineMaterial, HoloUniform, outline_state,
+};
 use ui_and_juice::graphics::plugin::SHADER_PATHS;
 use ui_and_juice::graphics::theme::{BOSS, SHOP, SMALL, ThemePalette, VisualThemeController};
 use ui_and_juice::settings::{CrtSettings, JuiceSettings, SafeMode};
@@ -996,4 +1000,235 @@ fn test_holo_bank_is_never_modified() {
     let events = app.world().resource::<HoloEvents>();
     assert_eq!(events.added, 8);
     assert_eq!(events.modified, 0);
+}
+
+/// Un dé spawné comme `game_state` le fait, sans composant visuel.
+fn spawn_die(app: &mut App, seal: Option<DieSeal>) -> Entity {
+    let mut die = Die::new(DieId(1), 6);
+    die.seal = seal;
+    app.world_mut().spawn((die, DieView { order: 0 })).id()
+}
+
+/// L'identifiant du matériau porté par un dé.
+fn die_material(app: &App, die: Entity) -> AssetId<HoloOutlineMaterial> {
+    app.world()
+        .get::<MeshMaterial2d<HoloOutlineMaterial>>(die)
+        .expect("le dé porte un matériau")
+        .0
+        .id()
+}
+
+fn bank_id(app: &App, state: usize, iridescent: bool) -> AssetId<HoloOutlineMaterial> {
+    app.world()
+        .resource::<HoloMaterials>()
+        .die(state, iridescent)
+        .id()
+}
+
+/// Un `DieView` sans composant visuel reçoit un quad et la variante au repos ;
+/// un dé scellé reçoit la variante irisée ; deux dés partagent le quad.
+#[test]
+fn test_die_view_gets_mesh_and_material() {
+    let mut app = app_headless();
+    app.update();
+    let uni = spawn_die(&mut app, None);
+    let scelle = spawn_die(&mut app, Some(DieSeal::Gold));
+    app.update();
+
+    assert_eq!(
+        die_material(&app, uni),
+        bank_id(&app, HoloMaterials::IDLE, false)
+    );
+    assert_eq!(
+        die_material(&app, scelle),
+        bank_id(&app, HoloMaterials::IDLE, true)
+    );
+    let quad_uni = app.world().get::<Mesh2d>(uni).expect("un quad").0.id();
+    let quad_scelle = app.world().get::<Mesh2d>(scelle).expect("un quad").0.id();
+    assert_eq!(quad_uni, quad_scelle, "un seul quad partagé");
+    assert_eq!(
+        app.world().resource::<Assets<Mesh>>().len(),
+        2,
+        "le fond et le quad des dés"
+    );
+}
+
+/// Poser `Scoring` sur un `DieView` échange le handle vers la variante
+/// scorée ; le retirer le restaure au repos.
+#[test]
+fn test_scoring_marker_switches_material_handle() {
+    let mut app = app_headless();
+    app.update();
+    let die = spawn_die(&mut app, None);
+    app.update();
+    assert_eq!(
+        die_material(&app, die),
+        bank_id(&app, HoloMaterials::IDLE, false)
+    );
+
+    app.world_mut().entity_mut(die).insert(Scoring);
+    app.update();
+    assert_eq!(
+        die_material(&app, die),
+        bank_id(&app, HoloMaterials::SCORING, false)
+    );
+
+    app.world_mut().entity_mut(die).remove::<Scoring>();
+    app.update();
+    assert_eq!(
+        die_material(&app, die),
+        bank_id(&app, HoloMaterials::IDLE, false),
+        "restauré"
+    );
+}
+
+/// Un `DieView` portant `Hidden` reçoit la variante masquée, celle dont
+/// `mask_face == 1.0`.
+#[test]
+fn test_hidden_die_uses_back_variant() {
+    let mut app = app_headless();
+    app.update();
+    let die = spawn_die(&mut app, None);
+    app.world_mut().entity_mut(die).insert(Hidden);
+    app.update();
+
+    let handle = bank_id(&app, HoloMaterials::HIDDEN, false);
+    assert_eq!(die_material(&app, die), handle);
+    let materials = app.world().resource::<Assets<HoloOutlineMaterial>>();
+    assert_eq!(
+        materials
+            .get(handle)
+            .expect("variante masquée")
+            .params
+            .mask_face,
+        1.0
+    );
+}
+
+/// Un dé masqué et scoré reste masqué, quel que soit l'ordre de pose des
+/// marqueurs.
+#[test]
+fn test_hidden_wins_over_scoring() {
+    let mut app = app_headless();
+    app.update();
+    let cache_puis_score = spawn_die(&mut app, None);
+    let score_puis_cache = spawn_die(&mut app, Some(DieSeal::Red));
+    app.update();
+
+    app.world_mut().entity_mut(cache_puis_score).insert(Hidden);
+    app.update();
+    app.world_mut().entity_mut(cache_puis_score).insert(Scoring);
+    app.update();
+    assert_eq!(
+        die_material(&app, cache_puis_score),
+        bank_id(&app, HoloMaterials::HIDDEN, false)
+    );
+
+    app.world_mut().entity_mut(score_puis_cache).insert(Scoring);
+    app.update();
+    app.world_mut().entity_mut(score_puis_cache).insert(Hidden);
+    app.update();
+    assert_eq!(
+        die_material(&app, score_puis_cache),
+        bank_id(&app, HoloMaterials::HIDDEN, true)
+    );
+}
+
+/// Cent vingt frames de survol alterné : le handle alterne entre survol et
+/// repos, et aucun matériau n'est jamais modifié.
+#[test]
+fn test_no_material_write_on_hover() {
+    let mut app = app_headless();
+    app.init_resource::<HoloEvents>();
+    app.add_systems(Last, count_holo_events);
+    app.update();
+    let die = spawn_die(&mut app, None);
+    app.world_mut().entity_mut(die).insert(Interaction::None);
+    app.update();
+
+    for frame in 0..120 {
+        let interaction = if frame % 2 == 0 {
+            Interaction::Hovered
+        } else {
+            Interaction::None
+        };
+        app.world_mut().entity_mut(die).insert(interaction);
+        app.update();
+        let attendu = if frame % 2 == 0 {
+            HoloMaterials::HOVER
+        } else {
+            HoloMaterials::IDLE
+        };
+        assert_eq!(die_material(&app, die), bank_id(&app, attendu, false));
+    }
+    let events = app.world().resource::<HoloEvents>();
+    assert_eq!(events.modified, 0);
+    assert_eq!(events.added, 8, "la banque, et rien d'autre");
+}
+
+/// Le nombre de dés dont le matériau a été écrit dans la frame, compté en
+/// `Last` : un écrit de composant, ce que ne voit aucun `AssetEvent`.
+#[derive(Resource, Default)]
+struct DieWrites(usize);
+
+fn count_die_writes(
+    mut writes: ResMut<DieWrites>,
+    dice: Query<(), (With<DieView>, Changed<MeshMaterial2d<HoloOutlineMaterial>>)>,
+) {
+    writes.0 += dice.iter().count();
+}
+
+/// Au repos, le handle n'est jamais réécrit : cent vingt frames sans un seul
+/// écrit de composant ; un changement d'état, un seul écrit.
+#[test]
+fn test_no_component_write_at_rest() {
+    let mut app = app_headless();
+    app.init_resource::<DieWrites>();
+    app.add_systems(Last, count_die_writes);
+    app.update();
+    let die = spawn_die(&mut app, None);
+    app.world_mut()
+        .entity_mut(die)
+        .insert((Interaction::None, Scoring));
+    app.update();
+    assert_eq!(app.world().resource::<DieWrites>().0, 1, "habillé une fois");
+
+    app.world_mut().resource_mut::<DieWrites>().0 = 0;
+    for _ in 0..120 {
+        app.update();
+    }
+    assert_eq!(app.world().resource::<DieWrites>().0, 0, "rien au repos");
+
+    app.world_mut().entity_mut(die).remove::<Scoring>();
+    for _ in 0..10 {
+        app.update();
+    }
+    assert_eq!(
+        app.world().resource::<DieWrites>().0,
+        1,
+        "un seul écrit sur changement"
+    );
+}
+
+/// L'état de contour : le masquage prime sur tout, puis le score, puis le
+/// survol, puis le repos.
+#[test]
+fn test_outline_state_priority() {
+    assert_eq!(outline_state(true, true, true), HoloMaterials::HIDDEN);
+    assert_eq!(outline_state(true, false, false), HoloMaterials::HIDDEN);
+    assert_eq!(outline_state(false, true, true), HoloMaterials::SCORING);
+    assert_eq!(outline_state(false, false, true), HoloMaterials::HOVER);
+    assert_eq!(outline_state(false, false, false), HoloMaterials::IDLE);
+}
+
+/// Le shader du contour compose avec les bibliothèques 2D, le def de bind
+/// group valant 2, et passe le validateur.
+#[test]
+fn test_holo_shader_composes_and_validates() {
+    let module = compose_and_validate(
+        "shaders/holo_card.wgsl",
+        &[MESH2D_VERTEX_OUTPUT_STUB, MESH2D_VIEW_BINDINGS_STUB],
+        &[("MATERIAL_BIND_GROUP", 2)],
+    );
+    assert!(has_fragment_entry(&module));
 }

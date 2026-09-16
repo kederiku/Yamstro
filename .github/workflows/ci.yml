@@ -2075,6 +2075,30 @@ jobs:
           forbid  "TASK-90  matériau écrit après sa construction" -n 'get_mut\(' "$HOLO"
           count   "TASK-90  quatre couleurs de départ" 4      -n 'Srgba::hex\("#[0-9A-F]{6}"\)' "$HOLO"
 
+          # TASK-91 : le shader du contour et l'échange de handle. Imports et
+          # bindings à la lettre ; le miroir WGSL des cinq champs ; l'horloge
+          # du GPU pour la pulsation et le balayage, aucun champ de temps ; la
+          # face jamais échantillonnée sous le masque ; la valeur d'un dé jamais
+          # lue par le rendu ; les noms proscrits absents de tout ; le masquage
+          # premier dans l'état de contour ; le survol par `Interaction` ; les
+          # dés habillés puis suivis ; le handle réécrit seulement s'il diffère.
+          HW=$SHADERS/holo_card.wgsl
+          require "TASK-91  import de la sortie du vertex 2D"  -n '^#import bevy_sprite::mesh2d_vertex_output::VertexOutput$' "$HW"
+          require "TASK-91  import de l'horloge du GPU"        -n '^#import bevy_sprite::mesh2d_view_bindings::globals$' "$HW"
+          require "TASK-91  pulsation et balayage sur l'horloge" -n 'globals\.time' "$HW"
+          require "TASK-91  uniforme en 0"                     -n '^@group\(#\{MATERIAL_BIND_GROUP\}\) @binding\(0\) var<uniform> material: HoloUniform;$' "$HW"
+          require "TASK-91  texture de face en 1"              -n '^@group\(#\{MATERIAL_BIND_GROUP\}\) @binding\(1\) var face_texture: texture_2d<f32>;$' "$HW"
+          require "TASK-91  sampler en 2"                      -n '^@group\(#\{MATERIAL_BIND_GROUP\}\) @binding\(2\) var face_sampler: sampler;$' "$HW"
+          require "critère 2  miroir WGSL du contour, cinq champs" -U '(?s)outline_color.*?// offset +0\b.*?outline_width.*?// offset 16.*?rainbow_shift.*?// offset 20.*?mask_face.*?// offset 24.*?_pad.*?// offset 28' "$HW"
+          forbid  "TASK-91  champ de temps dans le WGSL"       -n '^\s*time\s*:' "$HW"
+          require "critère 7  la face n'est pas échantillonnée sous le masque" -U 'if \(material\.mask_face > 0\.5\) \{[^}]*\} else \{[^}]*textureSample\(face_texture' "$HW"
+          forbid  "critère 7  la valeur du dé lue par le rendu" -n 'current_value' "$JUICE/src/graphics"
+          forbid  "critère 7  noms proscrits"                  -n '\b(DieComponent|DieEntity|SelectedForScore|HiddenDie|ScoringDie)\b' crates/ assets/
+          require "TASK-91  le masquage prime"                 -U 'fn outline_state\(hidden: bool, scoring: bool, hovered: bool\) -> usize \{\n\s*if hidden \{\n\s*return HoloMaterials::HIDDEN;' "$HOLO"
+          require "TASK-91  survol par Interaction"            -n 'Option<&.a Interaction>' "$HOLO"
+          require "TASK-91  les dés sont habillés puis suivis" -n '^\s+app\.add_systems\(Update, \(dress_dice, sync_die_outline\)\.chain\(\)\);$' "$JUICE/src/graphics/plugin.rs"
+          require "TASK-91  handle réécrit seulement s'il diffère" -n 'material\.0\.id\(\) != target\.id\(\)' "$HOLO"
+
           exit $status
 
       # ---- Passe rand 0.10 et Default (15 septembre 2026) ----

@@ -48,7 +48,7 @@ use bevy::sprite_render::Material2dPlugin;
 
 use super::background::{BackgroundMaterial, resize_background_quad, spawn_background_quad};
 use super::crt::{CrtMaterial, sync_crt_material};
-use super::holo::{HoloOutlineMaterial, build_holo_bank};
+use super::holo::{HoloOutlineMaterial, build_holo_bank, dress_dice, sync_die_outline};
 use super::theme::{animate_visual_theme, init_visual_theme};
 use crate::settings::{CrtSettings, SafeMode};
 
@@ -98,8 +98,12 @@ impl Plugin for VisualEffectsPlugin {
         app.add_plugins(Material2dPlugin::<HoloOutlineMaterial>::default());
 
         // La banque des contours (TASK-90) : huit handles bâtis une fois au
-        // démarrage, jamais réécrits, seulement échangés par TASK-91.
+        // démarrage, jamais réécrits, seulement échangés.
         app.add_systems(Startup, build_holo_bank);
+
+        // Les dés (TASK-91) : habillés à leur apparition, puis leur variante
+        // réconciliée chaque frame, le handle réécrit seulement s'il diffère.
+        app.add_systems(Update, (dress_dice, sync_die_outline).chain());
 
         // Le filtre cathodique (TASK-88) : présent sur la caméra 2D quand il
         // est actif, absent sinon, réécrit seulement quand les réglages
