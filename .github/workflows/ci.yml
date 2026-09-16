@@ -2047,6 +2047,34 @@ jobs:
           require "TASK-89  densité des scanlines lue sur la cible" -n 'textureDimensions\(screen_texture\)' "$CRTW"
           count   "TASK-89  trois échantillonnages"   3        -n 'textureSample' "$CRTW"
 
+          # TASK-90 : le contour holographique et sa banque. Forme A, un seul
+          # `#[uniform(0)]` en tête de ligne, texture en 1 et sampler en 2
+          # comme le `ColorMaterial` de Bevy ; trente-deux octets, cinq champs
+          # dans l'ordre, offsets en commentaire, remplissage à 28, masque de
+          # face en `f32` ; aucun champ de temps ; aucun composant dérivé, une
+          # seule ressource, la banque ; les quatre index d'état à leurs
+          # valeurs ; aucune écriture de matériau après construction ; quatre
+          # couleurs de départ converties une fois depuis le sRGB.
+          HOLO=$JUICE/src/graphics/holo.rs
+          require "TASK-90  module holo déclaré"              -n '^pub mod holo;$' "$JUICE/src/graphics/mod.rs"
+          require "TASK-90  le plugin enregistre le contour"  -n '^\s+app\.add_plugins\(Material2dPlugin::<HoloOutlineMaterial>::default\(\)\);$' "$JUICE/src/graphics/plugin.rs"
+          require "TASK-90  la banque se construit au démarrage" -n '^\s+app\.add_systems\(Startup, build_holo_bank\);$' "$JUICE/src/graphics/plugin.rs"
+          require "TASK-90  le contour est un Material2d"     -n '^impl Material2d for HoloOutlineMaterial \{$' "$HOLO"
+          require "TASK-90  shader désigné par la source unique" -n '^\s+HOLO_CARD_SHADER\.into\(\)$' "$HOLO"
+          count   "critère 2  un seul uniform(0) dans le contour" 1 -n '^\s*#\[uniform\(0' "$HOLO"
+          require "TASK-90  texture en 1"                     -n '^\s*#\[texture\(1\)\]$' "$HOLO"
+          require "TASK-90  sampler en 2"                     -n '^\s*#\[sampler\(2\)\]$' "$HOLO"
+          forbid  "TASK-90  champ de temps dans l'uniforme"   -n '^\s*(pub\s+)?time\s*:' "$HOLO"
+          forbid  "TASK-90  composant dérivé dans le contour" -n 'derive\([^)]*Component' "$HOLO"
+          count   "TASK-90  une seule ressource, la banque" 1 -n 'derive\([^)]*Resource' "$HOLO"
+          require "TASK-90  la banque est la ressource"       -U 'derive\(Resource[^)]*\)\]\s*\npub struct HoloMaterials \{' "$HOLO"
+          require "critère 2  miroir Rust du contour, cinq champs" -U '(?s)outline_color.*?// offset +0\b.*?outline_width.*?// offset 16.*?rainbow_shift.*?// offset 20.*?mask_face.*?// offset 24.*?_pad.*?// offset 28' "$HOLO"
+          require "TASK-90  remplissage explicite à l'offset 28" -n '^\s+pub _pad: f32,\s*// offset 28' "$HOLO"
+          require "TASK-90  masque de face en f32"            -n '^\s+pub mask_face: f32,' "$HOLO"
+          require "TASK-90  index des états"                  -U 'pub const IDLE: usize = 0;[\s\S]*?pub const HOVER: usize = 1;[\s\S]*?pub const SCORING: usize = 2;[\s\S]*?pub const HIDDEN: usize = 3;' "$HOLO"
+          forbid  "TASK-90  matériau écrit après sa construction" -n 'get_mut\(' "$HOLO"
+          count   "TASK-90  quatre couleurs de départ" 4      -n 'Srgba::hex\("#[0-9A-F]{6}"\)' "$HOLO"
+
           exit $status
 
       # ---- Passe rand 0.10 et Default (15 septembre 2026) ----

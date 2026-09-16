@@ -32,6 +32,7 @@ use naga_oil::compose::{
 use ui_and_juice::graphics::VisualEffectsPlugin;
 use ui_and_juice::graphics::background::{BackgroundMaterial, BackgroundQuad, BackgroundUniform};
 use ui_and_juice::graphics::crt::{CrtMaterial, CrtUniform, crt_pass_wanted};
+use ui_and_juice::graphics::holo::{HoloMaterials, HoloOutlineMaterial, HoloUniform};
 use ui_and_juice::graphics::plugin::SHADER_PATHS;
 use ui_and_juice::graphics::theme::{BOSS, SHOP, SMALL, ThemePalette, VisualThemeController};
 use ui_and_juice::settings::{CrtSettings, JuiceSettings, SafeMode};
@@ -899,4 +900,100 @@ fn test_scanline_is_identity_at_zero() {
         assert_eq!(facteur(uv_y, 720.0, 0.0).to_bits(), 1.0_f32.to_bits());
     }
     assert!(facteur(0.5, 720.0, 0.25) <= 1.0);
+}
+
+/// Les `Added` et `Modified` des contours lus par un lecteur dédié, chaque
+/// message une fois.
+#[derive(Resource, Default)]
+struct HoloEvents {
+    added: usize,
+    modified: usize,
+}
+
+fn count_holo_events(
+    mut reader: MessageReader<AssetEvent<HoloOutlineMaterial>>,
+    mut count: ResMut<HoloEvents>,
+) {
+    for event in reader.read() {
+        match event {
+            AssetEvent::Added { .. } => count.added += 1,
+            AssetEvent::Modified { .. } => count.modified += 1,
+            _ => {}
+        }
+    }
+}
+
+/// Le bloc du contour fait 32 octets, multiple de 16 : une couleur, trois
+/// `f32`, et le remplissage explicite. Les deux assertions, pas la première
+/// seule.
+#[test]
+fn test_holo_uniform_is_16_byte_aligned() {
+    let taille = HoloUniform::min_size().get();
+    assert_eq!(taille % 16, 0, "bloc non aligné sur 16 octets : {taille}");
+    assert_eq!(taille, 32, "bloc de {taille} octets, 32 attendus");
+}
+
+/// Après le démarrage, la banque porte exactement huit handles deux à deux
+/// distincts, tous présents dans `Assets`, indexés par état et balayage : la
+/// seule variante masquée est `HIDDEN`, et l'irisé ne diffère que par
+/// `rainbow_shift`.
+#[test]
+fn test_holo_bank_has_eight_distinct_die_handles() {
+    let mut app = app_headless();
+    app.update();
+
+    let bank = app.world().resource::<HoloMaterials>().clone();
+    let ids: BTreeSet<_> = bank.dice.iter().map(|h| h.id()).collect();
+    assert_eq!(ids.len(), 8, "huit handles deux à deux distincts");
+
+    let materials = app.world().resource::<Assets<HoloOutlineMaterial>>();
+    assert_eq!(materials.len(), 8);
+    for state in HoloMaterials::IDLE..=HoloMaterials::HIDDEN {
+        for iridescent in [false, true] {
+            let material = materials
+                .get(bank.die(state, iridescent))
+                .expect("chaque variante est dans Assets");
+            let params = &material.params;
+            assert_eq!(params.rainbow_shift, if iridescent { 1.0 } else { 0.0 });
+            assert_eq!(
+                params.mask_face,
+                if state == HoloMaterials::HIDDEN {
+                    1.0
+                } else {
+                    0.0
+                }
+            );
+            assert_eq!(params._pad, 0.0);
+            assert!(params.outline_width > 0.0);
+            assert_eq!(params.outline_color.alpha, 1.0);
+            assert!(material.texture.is_none(), "aucun atlas n'existe encore");
+        }
+    }
+    let uni = &materials
+        .get(bank.die(HoloMaterials::SCORING, false))
+        .unwrap()
+        .params;
+    let irise = &materials
+        .get(bank.die(HoloMaterials::SCORING, true))
+        .unwrap()
+        .params;
+    assert_eq!(uni.outline_color, irise.outline_color);
+    assert_eq!(uni.outline_width, irise.outline_width);
+}
+
+/// Huit `Added` au démarrage, et zéro `Modified` sur 120 frames : la banque
+/// est construite une fois et jamais réécrite.
+#[test]
+fn test_holo_bank_is_never_modified() {
+    let mut app = app_headless();
+    app.init_resource::<HoloEvents>();
+    app.add_systems(Last, count_holo_events);
+    app.update();
+    assert_eq!(app.world().resource::<HoloEvents>().added, 8);
+    for _ in 0..120 {
+        app.update();
+    }
+    let events = app.world().resource::<HoloEvents>();
+    assert_eq!(events.added, 8);
+    assert_eq!(events.modified, 0);
 }

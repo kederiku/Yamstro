@@ -17,9 +17,9 @@
 //!    quand il traite l'événement d'échec d'un type inconnu. Retenir les
 //!    poignées et lire `LoadState::Failed` appartient à TASK-92.
 //! 2. **L'enregistrement des matériaux.** `build` est le point
-//!    d'enregistrement des matériaux : le fond y est branché (TASK-84), le
-//!    filtre cathodique aussi (TASK-88, par `FullscreenMaterialPlugin`),
-//!    TASK-90 y branche le contour.
+//!    d'enregistrement des matériaux : le fond (TASK-84), le filtre
+//!    cathodique (TASK-88, par `FullscreenMaterialPlugin`) et le contour
+//!    (TASK-90) y sont branchés.
 //!    Chaque matériau est un `Asset`, et `Material2dPlugin::build` appelle
 //!    `init_asset`, qui lit `AssetServer`
 //!    (`bevy_asset-0.19.1/src/lib.rs:639`) : **ce plugin exige le serveur
@@ -48,6 +48,7 @@ use bevy::sprite_render::Material2dPlugin;
 
 use super::background::{BackgroundMaterial, resize_background_quad, spawn_background_quad};
 use super::crt::{CrtMaterial, sync_crt_material};
+use super::holo::{HoloOutlineMaterial, build_holo_bank};
 use super::theme::{animate_visual_theme, init_visual_theme};
 use crate::settings::{CrtSettings, SafeMode};
 
@@ -91,10 +92,14 @@ impl Plugin for VisualEffectsPlugin {
         app.init_resource::<SafeMode>();
 
         // Point d'enregistrement des matériaux, une ligne par matériau : le
-        // fond (TASK-84), le filtre cathodique (TASK-88) ; TASK-90 y branche le
-        // contour.
+        // fond (TASK-84), le filtre cathodique (TASK-88), le contour (TASK-90).
         app.add_plugins(Material2dPlugin::<BackgroundMaterial>::default());
         app.add_plugins(FullscreenMaterialPlugin::<CrtMaterial>::default());
+        app.add_plugins(Material2dPlugin::<HoloOutlineMaterial>::default());
+
+        // La banque des contours (TASK-90) : huit handles bâtis une fois au
+        // démarrage, jamais réécrits, seulement échangés par TASK-91.
+        app.add_systems(Startup, build_holo_bank);
 
         // Le filtre cathodique (TASK-88) : présent sur la caméra 2D quand il
         // est actif, absent sinon, réécrit seulement quand les réglages
