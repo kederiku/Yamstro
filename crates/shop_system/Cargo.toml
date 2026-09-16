@@ -29,3 +29,17 @@ bevy = { workspace = true, default-features = false, features = [
   "bevy_ui", "bevy_window", "bevy_winit",
   "multi_threaded", "png", "x11", "webgl2",
 ] }
+
+[features]
+# Réserve la cible de mesure de taille WebAssembly. Voir `src/bin/wasm_size.rs`.
+measure = []
+
+# **La cible vit dans la crate du sommet du graphe, et y remonte quand le
+# sommet change.** `shop_system` est aujourd'hui la seule crate qui dépende des
+# trois autres ; la laisser en dessous ferait mesurer un binaire amputé, et
+# l'écart jouerait à la baisse, donc sans déclencher la garde de CI. Mesuré à
+# TASK-81 : posée dans `ui_and_juice`, la cible ne comptait pas un octet de
+# cette crate. Toute crate ajoutée au-dessus hérite de cette cible.
+[[bin]]
+name = "wasm_size"
+required-features = ["measure"]

@@ -1574,6 +1574,25 @@ jobs:
           # déclaration. Mesuré : une dépendance `kira` posée dans le manifeste
           # de la boutique fait tomber ces deux gardes-là.
 
+          # ---- Étape 6 : la cible de mesure suit le sommet du graphe (TASK-81 bis) ----
+          # La mesure WASM ne vaut que si son binaire monte le jeu entier, et le
+          # jeu entier n'est visible que depuis la crate dont toutes les autres
+          # sont des dépendances. Mesuré à TASK-81 : posée dans la crate de mise
+          # en scène, la cible ignorait toute la boutique, et l'écart jouait à la
+          # baisse, donc sans déclencher la porte de taille. La cible vit dans la
+          # crate du sommet, monte chacun des plugins, et il n'en existe qu'une :
+          # deux cibles feraient deux chiffres et deux références, donc aucune
+          # garde. Le jour où une crate s'ajoute au-dessus de la boutique, la
+          # cible y remonte et ces lignes suivent.
+          CIBLE_WASM=$BOUTIQUE/src/bin/wasm_size.rs
+          require "critère 8  cible de mesure au sommet du graphe" -n '^fn main\(\)' "$CIBLE_WASM"
+          require "critère 8  la cible monte les états"      -n '^\s+GameStatePlugin,$' "$CIBLE_WASM"
+          require "critère 8  la cible monte la mise en scène" -n '^\s+JuicePlugin,$' "$CIBLE_WASM"
+          require "critère 8  la cible monte la boutique"    -n '^\s+ShopPlugin,$' "$CIBLE_WASM"
+          require "critère 8  le script mesure la crate du sommet" -n '^\s+-p shop_system --features measure --bin' ci/measure-wasm.sh
+          forbid  "critère 8  seconde cible de mesure"       --files crates -g '**/src/bin/*.rs' -g '!**/shop_system/src/bin/wasm_size.rs'
+          forbid  "critère 8  cible restée en dessous du sommet" -n 'name = "wasm_size"' crates/ -g '!crates/shop_system/Cargo.toml'
+
           exit $status
 
       # ---- Étape 6 bis : le harnais de simulation (TASK-154) ----
@@ -1847,7 +1866,7 @@ jobs:
           # Critère 8 : la cible de mesure monte le plugin. Une cible qui
           # l'omettrait mesurerait un binaire amputé, et l'écart jouerait à la
           # baisse, sans déclencher la porte de taille.
-          require "critère 8  plugin monté dans la cible" -n '^\s+VisualEffectsPlugin,$' "$JUICE/src/bin/wasm_size.rs"
+          require "critère 8  plugin monté dans la cible" -n '^\s+VisualEffectsPlugin,$' crates/shop_system/src/bin/wasm_size.rs
 
           exit $status
 
