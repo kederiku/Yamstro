@@ -18,7 +18,8 @@ mod offline;
 use std::sync::{Mutex, Once};
 
 use audio_system::{
-    AdaptiveMusicManager, AudioBackendHandle, AudioBusVolumes, Bus, SoundEffectBank,
+    AdaptiveMusicManager, AudioBackendHandle, AudioBusVolumes, Bus, PitchScaleTracker,
+    SoundEffectBank,
     bus::{local_gain, music_gain, sfx_volume},
     music::STEM_PATHS,
 };
@@ -721,4 +722,31 @@ fn test_a_missing_stem_is_said_once() {
         "la bande-son est partie sans ses quatre couches"
     );
     assert!(players(&mut app).is_empty());
+}
+
+// ------------------------------------------------------------------ TASK-104
+
+/// TASK-104 : **la hauteur au plafond se joue vraiment.** Vingt-quatre demi-tons, c'est quatre
+/// fois la vitesse de lecture, et TASK-97 n'avait écouté que l'octave : un backend qui bornerait
+/// la vitesse rendrait le haut de la gamme faux, sans une erreur. Le coup dure quatre fois moins.
+#[test]
+fn test_the_capped_pitch_is_played() {
+    let mut tracker = PitchScaleTracker::default();
+    for _ in 0..40 {
+        tracker.advance();
+    }
+    let length = |signal: &[f32]| {
+        signal
+            .iter()
+            .rposition(|v| v.abs() > 1e-4)
+            .expect("silence")
+            + 1
+    };
+    let reference = render_hit(Bus::Sfx, 1.0, 1.0, UNITY);
+    let top = render_hit(Bus::Sfx, 1.0, tracker.pitch(), UNITY);
+    let quartered = per_mille(length(&top) as f32, length(&reference) as f32);
+    assert!(
+        (225..=275).contains(&quartered),
+        "au plafond, le coup dure {quartered} pour mille de sa durée nominale"
+    );
 }

@@ -2579,6 +2579,34 @@ jobs:
           forbid  "TASK-103 son d'état transposé"                  -n '^[^/]*PitchScaleTracker' "$SFX"
           forbid  "TASK-103 clip sans geste câblé de force"        -n '^[^/]*bank\.(ui_hover|ui_click|coin)' "$AUDIO/src"
 
+          # TASK-104 : le demi-ton tempéré, **seul modèle de hauteur du projet**.
+          # Trois champs, `Resource` seule, `Default` écrit à la main (dérivé, il
+          # rendrait une hauteur de base nulle et un plafond à zéro).
+          PITCH=$AUDIO/src/pitch.rs
+          require "TASK-104 trois champs, Resource seule"          -U -n '^#\[derive\(Resource\)\]\npub struct PitchScaleTracker \{\n\s+pub base_pitch: f32, // 1\.0\n\s+pub current_semitone: i32,\n\s+pub max_semitone: i32, // 24\n\}$' "$PITCH"
+          count   "TASK-104 un seul modèle de hauteur" 1           -n '^pub struct PitchScaleTracker \{$' crates/
+          require "TASK-104 Default écrit à la main"               -n '^impl Default for PitchScaleTracker \{$' "$PITCH"
+          require "TASK-104 valeurs d'ouverture"                   -U -n '^\s+base_pitch: 1\.0,\n\s+current_semitone: 0,\n\s+max_semitone: 24,$' "$PITCH"
+
+          # **Une seule formule dans tout le dépôt**, écrite une fois : aucun
+          # appelant ne la recalcule, et le modèle linéaire de la v1 n'existe
+          # nulle part. Ancrées sur l'acte : le `0.05` nu que réclamait le corpus
+          # mord deux bornes de ressort sans rapport avec le son.
+          require "TASK-104 le demi-ton tempéré"                   -n '^\s+self\.base_pitch \* 2\.0_f32\.powf\(self\.current_semitone as f32 / 12\.0\)$' "$PITCH"
+          count   "TASK-104 une seule puissance dans pitch.rs" 1   -n '^[^/]*powf' "$PITCH"
+          forbid  "TASK-104 formule de hauteur recopiée ailleurs"  -n '^[^/]*(2\.0_f32\.powf|as f32 / 12\.0)' crates/ -g '!**/audio_system/src/pitch.rs'
+          forbid  "TASK-104 modèle de hauteur linéaire"            -n '^[^/]*pitch\s*\+=' crates/
+
+          # Deux octaves, et le plafond est dans `advance()`, par le champ. Le
+          # reset est à l'**entrée** du décompte, sans garde de réentrance : il
+          # est idempotent.
+          require "TASK-104 plafond dans advance, par le champ"    -n '^\s+self\.current_semitone = \(self\.current_semitone \+ 1\)\.min\(self\.max_semitone\); // 24$' "$PITCH"
+          require "TASK-104 reset à l'entrée du décompte"          -n '^\s+\.add_systems\(OnEnter\(RunPhase::Scoring\), reset_pitch_on_scoring_entry\);$' "$PITCH"
+          forbid  "TASK-104 reset à la sortie du décompte"         -n '^[^/]*OnExit\(' "$PITCH"
+          forbid  "TASK-104 garde de réentrance"                   -n '^[^/]*(Local<bool>|already_reset)' "$PITCH"
+          require "TASK-104 build branche la hauteur"              -n '^\s+pitch::pitch_plugin\(app\);$' "$LIB"
+          require "TASK-104 le plafond s'écoute sur le son rendu"  -n '^fn test_the_capped_pitch_is_played\(\) \{$' "$AUDIO/tests/real_backend.rs"
+
           exit $status
 
       # ---- Passe rand 0.10 et Default (15 septembre 2026) ----

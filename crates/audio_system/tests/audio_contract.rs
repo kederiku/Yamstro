@@ -6,7 +6,7 @@ use std::{collections::BTreeSet, path::PathBuf, process::Command, time::Duration
 
 use audio_system::{
     AdaptiveMusicManager, AudioBackendHandle, AudioBusVolumes, AudioClip, BackendKind, Bus,
-    GameAudioPlugin, NullBackend, PlayedSound, SoundEffectBank,
+    GameAudioPlugin, NullBackend, PitchScaleTracker, PlayedSound, SoundEffectBank,
     backend::resolve_kind,
     bus::{layer_gain, local_gain, music_gain, sfx_volume},
     music::{
@@ -1789,4 +1789,165 @@ fn test_state_driven_sounds_never_advance_run_rng() {
         .dice
         .next_u64();
     assert_ne!(octets_du_generateur(&app), avant);
+}
+
+// ------------------------------------------------------------------ TASK-104
+
+/// Une hauteur, en millionièmes entiers : les références s'écrivent en clair, jamais recalculées
+/// par la formule sous test, et se comparent à des entiers.
+fn millioniemes(hauteur: f32) -> i64 {
+    (f64::from(hauteur) * 1_000_000.0).round() as i64
+}
+
+fn a_la_hauteur(demi_tons: i32) -> PitchScaleTracker {
+    PitchScaleTracker {
+        current_semitone: demi_tons,
+        ..Default::default()
+    }
+}
+
+fn hauteur_courante(app: &App) -> i32 {
+    app.world().resource::<PitchScaleTracker>().current_semitone
+}
+
+fn monter(app: &mut App, paliers: usize) {
+    let mut tracker = app.world_mut().resource_mut::<PitchScaleTracker>();
+    for _ in 0..paliers {
+        tracker.advance();
+    }
+}
+
+#[test]
+fn test_pitch_semitone_formula() {
+    // L'unisson, l'octave, la double octave : exacts.
+    assert_eq!(millioniemes(a_la_hauteur(0).pitch()), 1_000_000);
+    assert_eq!(millioniemes(a_la_hauteur(12).pitch()), 2_000_000);
+    assert_eq!(millioniemes(a_la_hauteur(24).pitch()), 4_000_000);
+
+    // **Entre deux octaves** : le demi-ton et la quinte. Les trois points ci-dessus sont aveugles
+    // à une division entière de l'exposant, qui rend 1, 2 et 4 aux octaves et reste à 1 entre.
+    let demi_ton = millioniemes(a_la_hauteur(1).pitch());
+    let quinte = millioniemes(a_la_hauteur(7).pitch());
+    assert!((1_059_462..=1_059_464).contains(&demi_ton), "{demi_ton}");
+    assert!((1_498_306..=1_498_308).contains(&quinte), "{quinte}");
+
+    // La hauteur de base multiplie : à une octave d'une base de 0,5, on retrouve 1.
+    let grave = PitchScaleTracker {
+        base_pitch: 0.5,
+        ..a_la_hauteur(12)
+    };
+    assert_eq!(millioniemes(grave.pitch()), 1_000_000);
+}
+
+#[test]
+fn test_pitch_is_capped() {
+    let mut tracker = PitchScaleTracker::default();
+    let mut precedente = millioniemes(tracker.pitch());
+    for palier in 1..=40 {
+        tracker.advance();
+        let hauteur = millioniemes(tracker.pitch());
+        if palier <= 24 {
+            assert!(
+                hauteur > precedente,
+                "palier {palier} : la gamme ne monte pas"
+            );
+        } else {
+            assert_eq!(hauteur, precedente, "palier {palier} : au-delà du plafond");
+        }
+        precedente = hauteur;
+    }
+    assert_eq!(tracker.current_semitone, 24);
+    assert_eq!(millioniemes(tracker.pitch()), 4_000_000);
+    for _ in 0..40 {
+        tracker.advance();
+    }
+    assert_eq!(tracker.current_semitone, 24);
+
+    // Le plafond est le **champ**, lu par `advance()`, pas un littéral recopié.
+    let mut court = PitchScaleTracker {
+        max_semitone: 12,
+        ..Default::default()
+    };
+    for _ in 0..40 {
+        court.advance();
+    }
+    assert_eq!(court.current_semitone, 12);
+}
+
+#[test]
+fn test_pitch_resets_on_scoring_entry() {
+    let mut app = headless_app();
+    entrer_en_run(&mut app, RunPhase::Roll);
+    // La seconde main part de ce que la première a laissé : trois demi-tons, voir plus bas.
+    for (main, depart) in [(0, 0), (1, 3)] {
+        assert_eq!(hauteur_courante(&app), depart);
+        monter(&mut app, 7);
+        images(&mut app, 3);
+        assert_eq!(
+            hauteur_courante(&app),
+            depart + 7,
+            "main {main} : remise à zéro hors du décompte"
+        );
+
+        vers_phase(&mut app, RunPhase::Scoring, false);
+        assert_eq!(
+            hauteur_courante(&app),
+            0,
+            "main {main} : le décompte ne repart pas de zéro"
+        );
+
+        // La montée du décompte survit à sa **sortie** : le reset est à l'entrée, pas à la fin.
+        monter(&mut app, 3);
+        vers_phase(&mut app, RunPhase::RoundEnd, false);
+        assert_eq!(
+            hauteur_courante(&app),
+            3,
+            "main {main} : remise à zéro à la sortie"
+        );
+        vers_phase(&mut app, RunPhase::Roll, false);
+        assert_eq!(hauteur_courante(&app), 3);
+    }
+}
+
+#[test]
+fn test_reset_is_idempotent() {
+    let mut tracker = a_la_hauteur(9);
+    for _ in 0..5 {
+        tracker.reset();
+        assert_eq!(tracker.current_semitone, 0);
+        assert_eq!((tracker.base_pitch, tracker.max_semitone), (1.0, 24));
+    }
+
+    // Une entrée réflexive dans le décompte rejoue le reset : inoffensif, et aucune garde de
+    // réentrance ne l'en empêche. Chaque entrée remet à zéro, la première comme les suivantes.
+    let mut app = headless_app();
+    entrer_en_run(&mut app, RunPhase::Scoring);
+    for _ in 0..3 {
+        monter(&mut app, 5);
+        assert_eq!(hauteur_courante(&app), 5);
+        vers_phase(&mut app, RunPhase::Scoring, true);
+        assert_eq!(hauteur_courante(&app), 0);
+    }
+}
+
+#[test]
+fn test_tracker_is_resource_only() {
+    // Insérée par le plugin, dès sa construction, avec ses valeurs d'ouverture.
+    let app = headless_app();
+    let tracker = app.world().resource::<PitchScaleTracker>();
+    assert_eq!(
+        (
+            tracker.base_pitch,
+            tracker.current_semitone,
+            tracker.max_semitone
+        ),
+        (1.0, 0, 24)
+    );
+
+    let source = lire("crates/audio_system/src/pitch.rs");
+    assert!(
+        source.contains("#[derive(Resource)]\npub struct PitchScaleTracker {"),
+        "la ressource ne dérive pas `Resource` seule"
+    );
+    assert!(source.contains("impl Default for PitchScaleTracker {"));
 }
