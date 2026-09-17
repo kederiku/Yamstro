@@ -32,6 +32,16 @@ jobs:
           rustup show active-toolchain
           cargo --version
 
+      # TASK-96 : la crate audio lie `cpal`, qui se lie à `libasound` sous Linux.
+      # Sans ces en-têtes, le workspace ne compile plus sur le runner, et
+      # `--all-features` compile le backend quoi qu'on fasse. Le job de taille
+      # WASM et la campagne nocturne ne compilent pas cette crate : ils s'en
+      # passent. Avant le premier `cargo`, jamais après.
+      - name: ALSA (cpal se lie à libasound sous Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev
+
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
@@ -356,7 +366,13 @@ jobs:
           # que le commentaire du manifeste qui dit qu'on n'en veut pas, et le
           # `//!` qui explique que ces combinateurs n'existent plus. Vingt-
           # deuxième et vingt-troisième fois dans ce projet.
-          forbid  "critère 4  dépendance de tweening ou audio" -n '^\s*[a-z0-9_-]*(tween|kira|rodio|audio|vorbis|symphonia|seedling)[a-z0-9_-]*\s*=|"(bevy_audio|vorbis)"' --glob '**/Cargo.toml' crates/
+          # **Exclusion nominative, depuis TASK-96** : la crate audio est la seule
+          # qui ait le droit de déclarer un backend, et son manifeste sort de la
+          # portée par son nom, jamais par son répertoire. Tout le reste y demeure,
+          # y compris une ligne `audio_system = …` dans un manifeste amont, que ce
+          # motif attrape. Les features son de Bevy y sont interdites par le bloc
+          # de l'Étape 8.
+          forbid  "critère 4  dépendance de tweening ou audio" -n '^\s*[a-z0-9_-]*(tween|kira|rodio|audio|vorbis|symphonia|seedling)[a-z0-9_-]*\s*=|"(bevy_audio|vorbis)"' --glob '**/Cargo.toml' -g '!**/audio_system/Cargo.toml' crates/
           # Ancrée sur l'**acte** — la ligne de manifeste, l'import, le chemin —
           # et non sur le nom : la note qui explique pourquoi ce site d'appel
           # n'ordonne rien côté juice doit pouvoir le nommer. Vingt-quatrième
@@ -2239,6 +2255,32 @@ jobs:
           count   "TASK-95  trois critères, trois verdicts" 3       -n '^\| [123] \| .* \| \*\*passe\*\* \|$' "$ADDENDUM"
           count   "TASK-95  trois rectifications de l'ADR-006" 3    -n '^- \*\*Rectification [123]\.\*\*' "$ADDENDUM"
           forbid  "TASK-95  valeur estimée dans l'addendum"        -n -i '\benviron\b|a priori|à peu près|~ ?[0-9]' "$ADDENDUM"
+
+          # TASK-96 : la crate audio entre dans le workspace, sixième membre, à
+          # sa place dans le graphe : après sa sœur la boutique, avant le harnais.
+          # Son manifeste applique la branche A de l'addendum, **sans les défauts
+          # du backend**, pesés à ce ticket : le décodeur OGG, la sortie audio, et
+          # le seul nœud de réverbération pris dans le moteur.
+          AUDIO=crates/audio_system
+          require "TASK-96  six membres, dans l'ordre du graphe"   -U -n 'members = \[\n  "crates/core_engine",\n  "crates/game_state",\n  "crates/ui_and_juice",\n  "crates/shop_system",\n  "crates/audio_system",\n  "crates/sim_harness",\n\]' Cargo.toml
+          require "TASK-96  backend épinglé, sans ses défauts"     -n '^bevy_seedling = \{ version = "=0\.8\.0", default-features = false, features = \["ogg", "cpal"\] \}$' "$AUDIO/Cargo.toml"
+          require "TASK-96  le seul nœud de réverbération"         -n '^firewheel = \{ version = "0\.12", default-features = false, features = \["freeverb_node"\] \}$' "$AUDIO/Cargo.toml"
+          forbid  "TASK-96  feature son de Bevy dans la crate audio" -n '"(audio|bevy_audio|vorbis|symphonia-[a-z]+|flac|mp3|wav)"' "$AUDIO/Cargo.toml"
+          forbid  "TASK-96  dépendance inverse vers la crate audio" -n '^\s*audio_system\s*=' crates/core_engine/Cargo.toml crates/game_state/Cargo.toml crates/ui_and_juice/Cargo.toml crates/shop_system/Cargo.toml crates/sim_harness/Cargo.toml
+          require "TASK-96  le plugin vit dans lib.rs"             -n '^pub struct GameAudioPlugin;$' "$AUDIO/src/lib.rs"
+          count   "TASK-96  cinq modules posés une fois pour toutes" 5 -n '^pub mod (backend|bus|music|pitch|sfx);$' "$AUDIO/src/lib.rs"
+          require "TASK-96  le contrat de la crate existe"         --files "$AUDIO/tests" -g 'audio_contract.rs'
+
+          # Les licences constatées à TASK-95 entrent dans la politique du dépôt
+          # sous la même forme que dans le banc : neuf exceptions nommées.
+          count   "TASK-96  neuf exceptions MPL-2.0 à la racine" 9 -n '^\s+\{ allow = \["MPL-2\.0"\], crate = "(symphonia(-[a-z-]+)?|triple_buffer)" \},$' deny.toml
+          count   "TASK-96  aucune autre exception à la racine" 9  -n '^\s+\{ allow = ' deny.toml
+          forbid  "TASK-96  MPL dans la liste globale du dépôt"    -U -n '^allow = \[[^\]]*MPL' deny.toml
+
+          # Le runner doit porter les en-têtes ALSA tant que le backend lie cpal,
+          # et les porter avant le premier cargo du job.
+          require "TASK-96  ALSA installé sur le runner"           -n '^\s+sudo apt-get install -y libasound2-dev$' .github/workflows/ci.yml
+          require "TASK-96  ALSA avant le premier cargo"           -U -n 'libasound2-dev\n\n      - run: cargo fmt --check' .github/workflows/ci.yml
 
           exit $status
 

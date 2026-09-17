@@ -1,0 +1,40 @@
+# crates/audio_system/Cargo.toml
+[package]
+name = "audio_system"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+# Aligné sur les autres crates : sans cela, `cargo deny` compte la crate comme
+# non licenciée, `deny.toml` n'ignorant que les paquets privés.
+publish = false
+
+[dependencies]
+# La version accompagne le chemin, sur les trois : une dépendance de chemin nue
+# est comptée comme une dépendance joker, que `deny.toml` refuse.
+core_engine = { path = "../core_engine", version = "0.1.0", features = ["bevy"] }
+game_state = { path = "../game_state", version = "0.1.0" }
+# **Le sens est fixé, et il est acyclique** (raccord B du backlog) : l'événement
+# que cette crate consomme et le set après lequel elle s'ordonne vivent dans la
+# crate de mise en scène. Jamais l'inverse : une seule ligne nommant cette crate
+# dans un manifeste amont ferme un cycle.
+ui_and_juice = { path = "../ui_and_juice", version = "0.1.0" }
+# Liste strictement identique à celle de la boutique, sans une feature de plus.
+# **Aucune feature son de Bevy** : la branche A de l'addendum à l'ADR-006 décode
+# et joue seule, et le backend retenu refuse de cohabiter avec le lecteur de Bevy.
+bevy = { workspace = true, default-features = false, features = [
+  "bevy_asset", "bevy_color", "bevy_core_pipeline",
+  "bevy_render", "bevy_sprite", "bevy_state", "bevy_text",
+  "bevy_ui", "bevy_window", "bevy_winit",
+  "multi_threaded", "png", "x11", "webgl2",
+] }
+# Branche A, épinglée au signe égal : 0.8.0 est la seule version qui cible Bevy
+# 0.19. **Sans les défauts de la crate**, pesés à TASK-96 : le décodeur OGG et
+# la sortie audio, rien d'autre. Les défauts et tous les nœuds d'effets coûtent
+# 419 137 octets de plus sur le Web, pour une marge de 3 117 113.
+bevy_seedling = { version = "=0.8.0", default-features = false, features = ["ogg", "cpal"] }
+# Une seule raison d'être : activer le nœud de réverbération, et lui seul, sur le
+# moteur que le backend lie déjà. TASK-97 l'enregistre à la main.
+firewheel = { version = "0.12", default-features = false, features = ["freeverb_node"] }
+# `SmallRng` est exporté sans feature en 0.10 : celle que le ticket nommait
+# n'existe pas. Le générateur local de la banque de sons arrive à TASK-102.
+rand = { workspace = true }

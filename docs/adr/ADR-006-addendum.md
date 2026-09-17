@@ -45,11 +45,27 @@ passer par le décodeur mesuré. L'instrument est éprouvé à chaque lancement 
 
 | Ligne du manifeste d'`audio_system` | Branche A |
 | :-- | :-- |
-| `bevy_seedling` | `{ version = "=0.8.0", features = ["effects"] }` ; `effects` expose le `FreeverbNode` |
+| `bevy_seedling` | `{ version = "=0.8.0", default-features = false, features = ["ogg", "cpal"] }` : le décodeur OGG et la sortie audio, **sans les défauts de la crate** |
+| `firewheel` | `{ version = "0.12", default-features = false, features = ["freeverb_node"] }` : le seul nœud de réverbération, que TASK-97 enregistre par `register_node::<FreeverbNode>()` |
 | feature Bevy `bevy_audio` | non |
 | feature Bevy `vorbis` | non |
 | feature Bevy `symphonia-vorbis` | jamais |
-| cible `wasm32` | `getrandom = { version = "0.4", features = ["wasm_js"] }` tant que la feature `rand` de `bevy_seedling` est active |
+| cible `wasm32` | rien à ajouter : `game_state` active déjà `getrandom` avec `wasm_js` |
+
+Révisé à TASK-96, le 17 septembre 2026, après pesée de quatre jeux de features par la chaîne WASM
+du dépôt. La première version de cette table écrivait `features = ["effects"]` avec les défauts de
+la crate, la ligne la plus lourde. Le jeu retenu a été rejoué dans le banc : queue de réverbération
+à −22,9 dBFS, bus indépendants, à l'identique. Il n'apporte aucune licence nouvelle.
+
+| Jeu de features de `bevy_seedling` | Backend seul, en octets | Marge restante |
+| :-- | --: | --: |
+| `ogg`, `cpal`, sans réverbération | 2 363 412 | 753 701 |
+| **`ogg`, `cpal`, et `freeverb_node` pris dans `firewheel`** (retenu) | **2 495 750** | **621 363** |
+| `ogg`, `cpal`, `effects`, qui lie tous les nœuds | 2 737 135 | 379 978 |
+| le précédent plus `wav`, `rand`, `reflect`, `diagnostics` | 2 914 887 | 202 226 |
+
+Le WAV n'a pas d'usage (les assets sont en OGG, le bip de secours de TASK-102 se synthétise en
+mémoire), ni `rand` (la banque de sons tient son propre générateur), ni `reflect`, ni `diagnostics`.
 
 **Licences.** Neuf crates de l'arbre sont sous MPL-2.0, copyleft faible à l'échelle du fichier :
 `symphonia`, `symphonia-codec-pcm`, `symphonia-codec-vorbis`, `symphonia-common`,
@@ -97,9 +113,9 @@ exige nightly, `atomics` et des en-têtes COOP et COEP.
 | branche A, `bevy_seedling` 0.8.0 avec `effects` | 5 497 260 | **2 942 310** |
 | branche B, `bevy_audio` avec `vorbis` | 4 598 293 | 2 043 343 |
 
-La marge du projet sous les 26 214 400 octets est de 3 117 113 octets, assets compris. La branche A
-en laisse 174 803 avant le premier fichier son, et la porte de +5 % (24 242 759) sera franchie :
-23 088 342 + 2 942 310 = 26 030 652. TASK-108 réécrit la référence à la main et doit regagner de
-la place ; leviers à mesurer : les features par défaut de `bevy_seedling` dont le jeu n'a pas
-l'usage (`wav`, `rand`, `reflect`, `diagnostics`) et `effects`, qui lie tous les nœuds de
-Firewheel pour n'employer que la réverbération.
+La marge du projet sous les 26 214 400 octets est de 3 117 113 octets, assets compris. Ces trois
+lignes pèsent le banc tel qu'il a mesuré les critères, avec `effects` et les défauts de la crate.
+TASK-96 a pesé des jeux plus étroits et retenu 2 495 750 octets, voir plus haut : il reste 621 363
+octets avant le premier fichier son. La porte de +5 % (24 242 759) sera franchie quand la cible de
+mesure liera le backend : 23 088 342 + 2 495 750 = 25 584 092. TASK-108 réécrit la référence à la
+main et tient le budget des stems dans ce qui reste.
