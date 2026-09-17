@@ -523,12 +523,14 @@ fn test_new_invariant_block_is_wired() {
     // Les blocs amont sont là, et aucun bloc d'une étape non livrée n'est
     // inventé : leurs tickets ne sont pas écrits. L'Étape 7 a quitté la liste
     // des absentes le 15 septembre 2026, à TASK-82 : son bloc existe depuis.
+    // L'Étape 8 l'a quittée le 17 septembre 2026, à TASK-95, par l'ADR-012.
     for etape_amont in [
         "---- Étape 3 :",
         "---- Étape 4 :",
         "---- Étape 5 :",
         "---- Étape 6 :",
         "---- Étape 7 :",
+        "---- Étape 8 :",
     ] {
         assert!(
             yaml.contains(etape_amont),
@@ -538,7 +540,7 @@ fn test_new_invariant_block_is_wired() {
     // Ancré sur l'**en-tête de bloc**. Les étapes aval sont nommées neuf fois
     // dans les commentaires du volet 1, légitimement : c'est déclarer un bloc
     // qui est proscrit, pas prononcer le nom.
-    for absente in ["---- Étape 8 :", "---- Étape 9 :"] {
+    for absente in ["---- Étape 9 :", "---- Étape 10 :", "---- Étape 11 :"] {
         assert!(
             !yaml.contains(absente),
             "un bloc « {absente} » est inventé : son ticket n'est pas livré"

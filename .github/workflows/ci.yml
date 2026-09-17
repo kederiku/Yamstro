@@ -41,6 +41,16 @@ jobs:
       - name: cargo deny
         uses: EmbarkStudios/cargo-deny-action@v2
 
+      # TASK-95 : le banc d'essai audio est détaché du workspace, donc hors du
+      # `cargo deny` ci-dessus. Sa politique reprend celle du dépôt, plus neuf
+      # exceptions MPL-2.0 nommées ; elle se vérifie ici, sur son propre verrou.
+      # Le banc n'est **pas compilé** en CI : ce serait une seconde compilation
+      # complète de Bevy, avec ALSA, pour un paquet qui ne survit pas à l'étape.
+      - name: cargo deny (banc audio détaché)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: tools/audio_probe/Cargo.toml
+
       # Le volet 1 emploie les commandes du corpus **telles qu'elles sont
       # écrites**, en rg. ripgrep n'est préinstallé sur aucune image de runner
       # Ubuntu ; noble le fournit dans universe, activé par défaut ici. Une
@@ -2146,6 +2156,89 @@ jobs:
           # relit est livré avec le code.
           require "TASK-94  l'audit de l'étape existe"        --files crates/ui_and_juice/tests -g 'step7_audit.rs'
           require "TASK-94  le bloc de glossaire livré"       -n '^## § 3 — Types canoniques, couche Bevy : lignes de l.Étape 7$' reports/glossaire-etape-7.md
+
+          exit $status
+
+      # ---- Étape 8 : audio dynamique et musique adaptative (TASK-95 et suivants) ----
+      #
+      # **L'étape est ouverte le 17 septembre 2026, avant les Étapes 10 et 9**,
+      # par l'ADR-012 : l'audio est un pur lecteur d'état, il ne doit rien au
+      # recalibrage. TASK-95 n'écrit aucune ligne dans `crates/` : un banc
+      # d'essai **détaché du workspace** mesure les trois critères de la tâche 0
+      # et l'addendum à l'ADR-006 consigne la branche retenue.
+      #
+      # **Ancrer sur l'acte.** Les manifestes des crates de jeu nomment
+      # `bevy_seedling` en commentaire pour dire qu'il arrive à cette étape :
+      # la garde porte sur une ligne de dépendance, jamais sur le nom nu.
+      - name: Invariants normatifs Étape 8
+        run: |
+          set -euo pipefail
+          status=0
+          forbid() {
+            label=$1; shift
+            out=$(rg "$@" 2>&1) && rc=0 || rc=$?
+            case $rc in
+              1) printf '  ok    %s\n' "$label" ;;
+              0) printf '  ECHEC %s\n%s\n' "$label" "$out"; status=1 ;;
+              *) printf '  ECHEC %s : rg a échoué (code %s)\n%s\n' "$label" "$rc" "$out"; status=1 ;;
+            esac
+          }
+          require() {
+            label=$1; shift
+            out=$(rg "$@" 2>&1) && rc=0 || rc=$?
+            case $rc in
+              0) printf '  ok    %s\n' "$label" ;;
+              *) printf '  ECHEC %s : motif attendu absent (code %s)\n%s\n' "$label" "$rc" "$out"; status=1 ;;
+            esac
+          }
+          count() {
+            label=$1; expected=$2; shift 2
+            n=$( (rg "$@" || true) | wc -l | tr -d ' ')
+            if [ "$n" = "$expected" ]; then printf '  ok    %s\n' "$label"; else printf '  ECHEC %s : %s occurrence(s), %s attendue(s)\n' "$label" "$n" "$expected"; status=1; fi
+          }
+
+          PROBE=tools/audio_probe
+          ADDENDUM=docs/adr/ADR-006-addendum.md
+
+          # TASK-95 : le banc est une racine de workspace à lui seul. La table
+          # vide suffit ; le manifeste racine ne le nomme pas, et la résolution
+          # du workspace ne le voit pas. `cargo metadata` est interrogé, pas un
+          # fichier : c'est la sortie de l'outil qui fait foi.
+          require "TASK-95  le banc porte sa table workspace vide" -n '^\[workspace\]( #.*)?$' "$PROBE/Cargo.toml"
+          forbid  "TASK-95  le manifeste racine nomme le banc"     -n 'audio_probe' Cargo.toml
+          meta=$(cargo metadata --format-version 1 --locked) || { printf '  ECHEC TASK-95  cargo metadata a échoué\n'; status=1; meta=audio_probe; }
+          if printf '%s' "$meta" | rg -q 'audio_probe'; then
+            printf '  ECHEC TASK-95  le banc est visible de cargo metadata à la racine\n'; status=1
+          else
+            printf '  ok    TASK-95  le banc est invisible de cargo metadata à la racine\n'
+          fi
+
+          # Les deux épingles, au signe égal. 0.8.0 est la seule version de
+          # `bevy_seedling` qui cible Bevy 0.19.
+          require "TASK-95  bevy épinglée dans le banc"            -n '^bevy = \{ version = "=0\.19\.1", default-features = false' "$PROBE/Cargo.toml"
+          require "TASK-95  bevy_seedling épinglée au signe égal"  -n '^bevy_seedling = \{ version = "=0\.8\.0"' "$PROBE/Cargo.toml"
+          forbid  "TASK-95  bevy_audio activée dans le banc"       -n '^\s*"[^#]*"bevy_audio"|^\s*"bevy_audio"' "$PROBE/Cargo.toml"
+
+          # Licences : la liste globale reste permissive, MPL-2.0 n'y entre
+          # pas, neuf exceptions nommées et rien d'autre, aucun copyleft fort.
+          count   "TASK-95  neuf exceptions MPL-2.0 nommées" 9     -n '^\s+\{ allow = \["MPL-2\.0"\], crate = "(symphonia(-[a-z-]+)?|triple_buffer)" \},$' "$PROBE/deny.toml"
+          count   "TASK-95  aucune autre exception" 9              -n '^\s+\{ allow = ' "$PROBE/deny.toml"
+          forbid  "TASK-95  MPL dans la liste globale du banc"     -U -n '^allow = \[[^\]]*MPL' "$PROBE/deny.toml"
+          forbid  "TASK-95  copyleft fort dans une politique"      -n 'GPL' "$PROBE/deny.toml" deny.toml
+          require "TASK-95  cargo deny tourne dans le banc"        -n '^\s+manifest-path: tools/audio_probe/Cargo\.toml$' .github/workflows/ci.yml
+
+          # Aucun DSP maison : le banc n'implémente aucun nœud Firewheel, il
+          # monte ceux de la crate. Et aucun backend audio n'entre dans une
+          # crate amont, ni maintenant ni après TASK-96.
+          forbid  "TASK-95  nœud audio écrit à la main dans le banc" -n 'impl\s+(AudioNode|AudioNodeProcessor)\b' "$PROBE/src"
+          forbid  "TASK-95  backend audio dans une crate amont"    -n '^\s*(bevy_seedling|firewheel|kira|rodio)\s*=' Cargo.toml crates/core_engine/Cargo.toml crates/game_state/Cargo.toml crates/ui_and_juice/Cargo.toml crates/shop_system/Cargo.toml crates/sim_harness/Cargo.toml
+
+          # L'addendum : la branche, la version, les trois rectifications, et
+          # des chiffres. « Environ » n'est pas une mesure.
+          require "TASK-95  l'addendum nomme la branche et la version" -n '^\*\*Branche retenue : A, `bevy_seedling` `=0\.8\.0`' "$ADDENDUM"
+          count   "TASK-95  trois critères, trois verdicts" 3       -n '^\| [123] \| .* \| \*\*passe\*\* \|$' "$ADDENDUM"
+          count   "TASK-95  trois rectifications de l'ADR-006" 3    -n '^- \*\*Rectification [123]\.\*\*' "$ADDENDUM"
+          forbid  "TASK-95  valeur estimée dans l'addendum"        -n -i '\benviron\b|a priori|à peu près|~ ?[0-9]' "$ADDENDUM"
 
           exit $status
 

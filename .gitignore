@@ -3,3 +3,4 @@
 .DS_Store
 CLAUDE.md
 /dist
+/tools/audio_probe/target

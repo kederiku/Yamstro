@@ -1,0 +1,30 @@
+# Politique de TASK-01, reprise telle quelle, plus les exceptions que le banc a mesurées.
+# MPL-2.0 est un copyleft faible, à l'échelle du fichier : sur des crates non modifiées,
+# l'obligation est de laisser leur source accessible, ce que crates.io fait. Elle n'entre pas
+# dans la liste globale : neuf exceptions nommées, et rien d'autre. Jamais de copyleft fort.
+[licenses]
+allow = [
+  "MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "Unicode-3.0", "CC0-1.0",
+  "MIT-0",
+]
+private = { ignore = true }
+exceptions = [
+  { allow = ["MPL-2.0"], crate = "symphonia" },
+  { allow = ["MPL-2.0"], crate = "symphonia-codec-pcm" },
+  { allow = ["MPL-2.0"], crate = "symphonia-codec-vorbis" },
+  { allow = ["MPL-2.0"], crate = "symphonia-common" },
+  { allow = ["MPL-2.0"], crate = "symphonia-core" },
+  { allow = ["MPL-2.0"], crate = "symphonia-format-ogg" },
+  { allow = ["MPL-2.0"], crate = "symphonia-format-riff" },
+  { allow = ["MPL-2.0"], crate = "symphonia-metadata" },
+  { allow = ["MPL-2.0"], crate = "triple_buffer" },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
