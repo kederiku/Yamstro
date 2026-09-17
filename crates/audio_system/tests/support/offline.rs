@@ -7,7 +7,7 @@ use std::{num::NonZeroU32, sync::Mutex, time::Duration};
 
 use audio_system::GameAudioPlugin;
 use audioadapter_buffers::direct::InterleavedSlice;
-use bevy::{prelude::*, time::TimeUpdateStrategy};
+use bevy::{prelude::*, state::app::StatesPlugin, time::TimeUpdateStrategy};
 use bevy_seedling::{
     context::SampleRate,
     firewheel::{
@@ -17,6 +17,7 @@ use bevy_seedling::{
     platform::initialize_stream,
     prelude::*,
 };
+use game_state::states::{AppState, RunPhase};
 
 pub const RATE: usize = 48_000;
 const BLOCK: usize = 128;
@@ -61,30 +62,25 @@ fn start_stream(
     initialize_stream(SampleRate::new(rate), commands);
 }
 
-/// Une application sans fenêtre ni périphérique, avec le **backend réel** et les fichiers de
-/// `tests/assets`. Les quatre couches y portent leurs noms de production : le jeu les charge
-/// lui-même au démarrage, aucun test ne le fait à sa place.
+/// Une application sans fenêtre ni périphérique, avec le **backend réel**, la machine à états
+/// du jeu, que le plugin audio exige, et les fichiers de `tests/assets`. Les quatre couches y
+/// portent leurs noms de production : le jeu les charge lui-même au démarrage, aucun test ne le
+/// fait à sa place.
 pub fn offline_app() -> App {
-    offline_app_with(|_| {})
-}
-
-/// La même, avec ce que `extend` y monte avant la clôture des plugins : après elle, plus aucun
-/// plugin ne s'ajoute.
-pub fn offline_app_with(extend: impl FnOnce(&mut App)) -> App {
     let mut app = App::new();
     app.add_plugins((
         MinimalPlugins,
+        StatesPlugin,
         AssetPlugin {
             file_path: "tests/assets".to_string(),
             ..Default::default()
         },
-        GameAudioPlugin::offline(),
-        OfflinePlatformPlugin,
-    ))
-    .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
-        16,
-    )));
-    extend(&mut app);
+    ));
+    app.init_state::<AppState>().add_sub_state::<RunPhase>();
+    app.add_plugins((GameAudioPlugin::offline(), OfflinePlatformPlugin))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            16,
+        )));
     app.finish();
     app.cleanup();
     app

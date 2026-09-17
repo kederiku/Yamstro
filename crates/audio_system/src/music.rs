@@ -48,6 +48,28 @@
 //! n'est qu'un cas du précédent. `tests/real_backend.rs` fait le tour complet des états sur le
 //! son rendu, sortie de run et transition réflexive comprises.
 //!
+//! # Le seul système qui fait sonner la musique
+//!
+//! `update_music_gains` tourne **partout**, menu compris, sans condition d'état : il lit l'état,
+//! demande ses cibles à [`target_gains`] par [`blind_in_play`], interpole, et pousse les quatre
+//! gains, **à chaque image**. Aucune garde de changement : un gain de couche est une fonction
+//! continue du temps, une garde figerait le fondu à sa première valeur.
+//!
+//! L'interpolation est exponentielle : l'écart à la cible est multiplié par `e^(-k·dt)` à chaque
+//! pas, donc par `e^(-k·D)` au bout d'une durée `D`, **quel que soit le découpage en images**.
+//! Un pas fixe par image ferait durer le fondu deux fois plus longtemps à 30 images par seconde
+//! qu'à 60. C'est une asymptote : la cible n'est jamais atteinte en flottant exact.
+//!
+//! **Ce qui part à la façade ne porte aucun volume utilisateur** : le poids de la couche et le
+//! ducking, par `layer_gain`. Les curseurs s'appliquent sur les bus (voir `bus.rs`) ; les
+//! remettre ici les ferait sortir au carré. Le ducking est lu, jamais écrit : il appartient à
+//! TASK-106.
+//!
+//! La phase de run et le contexte de blind sont optionnels : la première n'existe qu'en run. En
+//! 0.19 un système dont une ressource manque n'est pas écarté en silence, il panique : pris nus,
+//! ces deux paramètres feraient tomber le jeu au menu principal. L'état de l'application, lui,
+//! existe toujours : `GameAudioPlugin::build` l'exige.
+//!
 //! # [`music_plugin`], le point d'enregistrement de ce fichier
 //!
 //! `GameAudioPlugin::build` l'appelle, et les systèmes de ce fichier s'y branchent : ceux de
@@ -61,6 +83,7 @@ use core_engine::blinds::{BlindContext, BlindType};
 use game_state::states::{AppState, RunPhase};
 
 use crate::backend::{AudioBackendHandle, LayerHandle};
+use crate::bus::layer_gain;
 
 pub const CLIMAX_THRESHOLD_PERCENT: u128 = 75; // seule occurrence du seuil dans le dépôt
 
@@ -138,9 +161,32 @@ fn setup_music_layers(
     });
 }
 
+/// Dérive les cibles de l'état, interpole, pousse les quatre gains. Voir la doc de tête.
+fn update_music_gains(
+    time: Res<Time>,
+    app_state: Res<State<AppState>>,
+    phase: Option<Res<State<RunPhase>>>,
+    blind: Option<Res<BlindContext>>,
+    mut manager: ResMut<AdaptiveMusicManager>,
+    mut backend: ResMut<AudioBackendHandle>,
+) {
+    let app = *app_state.get();
+    let phase = phase.map(|p| *p.get());
+    manager.target_gains = target_gains(app, phase, blind_in_play(app, phase, blind.as_deref()));
+
+    let t = 1.0 - (-manager.fade_per_second * time.delta_secs()).exp();
+    for i in 0..4 {
+        let target = manager.target_gains[i];
+        manager.current_gains[i] += (target - manager.current_gains[i]) * t;
+        let gain = layer_gain(manager.current_gains[i], manager.duck);
+        backend.0.set_layer_gain(manager.layers[i], gain);
+    }
+}
+
 /// Enregistre les systèmes de ce fichier. Appelée par `GameAudioPlugin::build`.
 pub fn music_plugin(app: &mut App) {
     app.add_systems(Startup, setup_music_layers);
+    app.add_systems(Update, update_music_gains);
 }
 
 /// Gains cibles des 4 couches. Fonction pure : mêmes entrées, mêmes sorties.

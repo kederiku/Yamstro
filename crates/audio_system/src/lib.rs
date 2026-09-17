@@ -14,6 +14,7 @@ pub mod pitch;
 pub mod sfx;
 
 use bevy::prelude::*;
+use game_state::states::{AppState, RunPhase};
 
 pub use backend::{
     AudioBackend, AudioBackendHandle, AudioClip, BackendKind, Bus, LayerHandle, NullBackend,
@@ -32,6 +33,10 @@ pub use music::AdaptiveMusicManager;
 /// façade reçoit un `AssetServer`. En 0.19 un système dont une ressource manque n'est pas écarté
 /// en silence, il panique, et son message ne nomme ni le système ni le paramètre : `build` le
 /// vérifie donc d'entrée, sous un message lisible.
+///
+/// **Ils exigent aussi la machine à états du jeu, déjà montée** : la musique lit l'état de
+/// l'application à chaque image, menu compris. La machine appartient à `game_state` ; ce plugin
+/// la vérifie, il ne l'initialise pas.
 ///
 /// Il ne monte pas `JuicePlugin` et n'y ajoute rien : l'inventaire de la mise en scène reste
 /// celui que TASK-46 garde.
@@ -74,6 +79,14 @@ impl Plugin for GameAudioPlugin {
         assert!(
             app.world().contains_resource::<AssetServer>(),
             "`GameAudioPlugin` exige un `AssetPlugin` déjà monté : la façade audio reçoit un `AssetServer`"
+        );
+        assert!(
+            app.world().contains_resource::<State<AppState>>()
+                && app
+                    .world()
+                    .contains_resource::<Messages<StateTransitionEvent<RunPhase>>>(),
+            "`GameAudioPlugin` exige la machine à états du jeu déjà montée : `GameStatePlugin`, ou \
+             `init_state::<AppState>()` puis `add_sub_state::<RunPhase>()`"
         );
         backend::install(app, self.kind);
         bus::bus_plugin(app);

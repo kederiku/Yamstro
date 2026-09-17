@@ -6,19 +6,28 @@
 //!
 //! Les quatre couches sont chargées **par le jeu lui-même**, au démarrage (TASK-100) : aucun test
 //! n'appelle `load_layer`. Les fichiers de `tests/assets/audio` portent les noms de production.
+//!
+//! Et leurs gains sont poussés **par le système de musique**, à chaque image (TASK-101) : un gain
+//! posé par la façade serait écrasé à l'image suivante. Un test qui veut tenir ses gains passe
+//! par la ressource publique : une vitesse de fondu nulle gèle l'interpolation, et les gains
+//! courants portent ce qu'il veut entendre. Le test du mix, lui, laisse le fondu faire.
 
 #[path = "support/offline.rs"]
 mod offline;
 
 use audio_system::{
-    AdaptiveMusicManager, AudioBackendHandle, AudioBusVolumes, Bus, LayerHandle,
-    bus::{layer_gain, local_gain, music_gain, sfx_volume},
+    AdaptiveMusicManager, AudioBackendHandle, AudioBusVolumes, Bus,
+    bus::{local_gain, music_gain, sfx_volume},
     music::STEM_PATHS,
 };
-use bevy::{prelude::*, state::app::StatesPlugin};
+use bevy::prelude::*;
 use bevy_seedling::prelude::SamplePlayer;
+use core_engine::{
+    blinds::{BlindContext, BlindDefinition, BlindType},
+    hands::HandGrid,
+};
 use game_state::states::{AppState, RunPhase};
-use offline::{RATE, offline_app, offline_app_with, render, step, wait_loaded};
+use offline::{RATE, offline_app, render, step, wait_loaded};
 
 const LAYER_FRAMES: usize = 48_000;
 const IMPULSE_SPACING: usize = 480;
@@ -39,19 +48,27 @@ fn with_backend<R>(
     act(&mut handle, &server)
 }
 
-/// Une image, celle du démarrage : le jeu y charge ses quatre couches. Leurs gains, nés à zéro,
-/// sont posés **avant le départ**, qui attend la fin des chargements : le premier échantillon
-/// sorti est donc celui de la trame 0.
-fn layers_with_gains(app: &mut App, gains: [f32; 4], left: &mut Vec<f32>) -> [LayerHandle; 4] {
+fn manager(app: &mut App) -> Mut<'_, AdaptiveMusicManager> {
+    app.world_mut().resource_mut::<AdaptiveMusicManager>()
+}
+
+/// Une image, celle du démarrage : le jeu y charge ses quatre couches. Le test **gèle le fondu**
+/// et pose les gains courants, que le système de musique pousse dès l'image suivante, donc
+/// **avant le départ**, qui attend la fin des chargements : le premier échantillon sorti est
+/// celui de la trame 0.
+fn layers_with_gains(app: &mut App, gains: [f32; 4], left: &mut Vec<f32>) {
+    layers_with(app, gains, 1.0, left);
+}
+
+/// La même, avec un ducking : posé lui aussi avant le départ, sans quoi la première impulsion
+/// sortirait sans lui, le temps que le gain se lisse.
+fn layers_with(app: &mut App, gains: [f32; 4], duck: f32, left: &mut Vec<f32>) {
     step(app, left);
-    let layers = app.world().resource::<AdaptiveMusicManager>().layers;
-    with_backend(app, |handle, _| {
-        for (layer, gain) in layers.into_iter().zip(gains) {
-            handle.0.set_layer_gain(layer, gain);
-        }
-    });
+    let mut manager = manager(app);
+    manager.fade_per_second = 0.0;
+    manager.current_gains = gains;
+    manager.duck = duck;
     wait_loaded(app, &STEM_PATHS, left);
-    layers
 }
 
 fn peak(signal: &[f32]) -> f32 {
@@ -80,6 +97,10 @@ fn render_hit_from_play(bus: Bus, volume: f32, pitch: f32, volumes: AudioBusVolu
     let mut app = offline_app();
     let mut left = Vec::new();
     app.world_mut().insert_resource(volumes);
+    // Fin de run : les quatre cibles y sont nulles, la musique ne déborde pas sur la mesure.
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::GameOver);
     let clip = with_backend(&mut app, |handle, server| {
         handle.0.load_clip(server, "hit.ogg")
     });
@@ -115,7 +136,7 @@ fn render_hit(bus: Bus, volume: f32, pitch: f32, volumes: AudioBusVolumes) -> Ve
 fn test_four_layers_start_in_phase_and_stay() {
     let mut app = offline_app();
     let mut left = Vec::new();
-    let layers = layers_with_gains(&mut app, [1.0; 4], &mut left);
+    layers_with_gains(&mut app, [1.0; 4], &mut left);
     render(&mut app, 3.5, &mut left);
 
     // Rien ne fuit avant le départ : le premier échantillon non nul est l'impulsion de la
@@ -152,9 +173,7 @@ fn test_four_layers_start_in_phase_and_stay() {
 
     // Un gain poussé après le départ agit, et sur sa couche seule : c'est l'usage de chaque
     // image du jeu. La couche 3 se tait, la couche 0 reste, et la phase ne bouge pas.
-    with_backend(&mut app, |handle, _| {
-        handle.0.set_layer_gain(layers[3], 0.0)
-    });
+    manager(&mut app).current_gains[3] = 0.0;
     let turn = (left.len() - origin).div_ceil(LAYER_FRAMES) + 1;
     render(&mut app, 3.0, &mut left);
     let silenced = origin + turn * LAYER_FRAMES + 3 * IMPULSE_SPACING;
@@ -325,11 +344,11 @@ fn test_effective_volume_matches_the_formulas() {
         ..UNITY
     };
     assert_eq!(music_gain(&volumes, 0.5, 0.5), 0.0625);
-    let first_impulse = |volumes: AudioBusVolumes, gain: f32| {
+    let first_impulse = |volumes: AudioBusVolumes, weight: f32, duck: f32| {
         let mut app = offline_app();
         let mut left = Vec::new();
         app.world_mut().insert_resource(volumes);
-        layers_with_gains(&mut app, [gain, 0.0, 0.0, 0.0], &mut left);
+        layers_with(&mut app, [weight, 0.0, 0.0, 0.0], duck, &mut left);
         render(&mut app, 0.5, &mut left);
         left[left
             .iter()
@@ -337,8 +356,8 @@ fn test_effective_volume_matches_the_formulas() {
             .expect("la couche 0 ne sort pas")]
     };
     let layer = per_mille(
-        first_impulse(volumes, layer_gain(0.5, 0.5)),
-        first_impulse(UNITY, layer_gain(1.0, 1.0)),
+        first_impulse(volumes, 0.5, 0.5),
+        first_impulse(UNITY, 1.0, 1.0),
     );
     assert!(
         (61..=64).contains(&layer),
@@ -370,6 +389,88 @@ fn test_each_layer_handle_drives_its_own_stem() {
             "`layers[{index}]` fait sonner le stem d'index {heard}"
         );
     }
+}
+
+fn blind(kind: BlindType, target_score: u64, current_score: u64) -> BlindContext {
+    BlindContext {
+        blind: BlindDefinition {
+            kind,
+            target_score,
+            ..Default::default()
+        },
+        target_score,
+        current_score,
+        hands_remaining: 3,
+        used_hands: HandGrid::default(),
+    }
+}
+
+/// TASK-101 : **l'état du jeu s'entend**, par le fondu réel, sans rien geler. En run, Base et
+/// Mélodie sont pleines et les deux autres couches muettes ; un Boss lève la Tension ; la boutique
+/// adoucit le mix de moitié et fait taire la Tension, **alors que le contexte du Boss battu est
+/// encore dans le monde** : c'est le piège de TASK-99, écouté sur le signal.
+#[test]
+fn test_state_changes_are_heard() {
+    let mut app = offline_app();
+    let mut left = Vec::new();
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::InRun);
+    // Le mix de run est posé avant le départ, pour que le premier échantillon soit celui de la
+    // trame 0 ; la vitesse de fondu reste celle du jeu.
+    step(&mut app, &mut left);
+    manager(&mut app).current_gains = [1.0, 1.0, 0.0, 0.0];
+    wait_loaded(&mut app, &STEM_PATHS, &mut left);
+    render(&mut app, 1.2, &mut left);
+
+    let origin = onset(&left);
+    let impulse = |left: &[f32], turn: usize, layer: usize| {
+        left[origin + turn * LAYER_FRAMES + layer * IMPULSE_SPACING]
+    };
+    let last_turn = |left: &[f32]| (left.len() - origin - 4 * IMPULSE_SPACING) / LAYER_FRAMES;
+
+    let run = impulse(&left, 0, 0);
+    // Le codec rabote l'impulsion, chaque fichier à sa façon : une couche pleine se lit au-dessus
+    // de 0,3, une couche muette sous 0,1 (il y reste les notes des autres), et un rapport ne se
+    // prend qu'entre deux lectures de la même couche.
+    assert!(run > 0.3, "la Base ne sonne pas en run : {run}");
+    assert!(impulse(&left, 0, 1) > 0.3, "la Mélodie ne sonne pas en run");
+    assert!(impulse(&left, 0, 2) < 0.1, "la Tension sonne sans raison");
+    assert!(impulse(&left, 0, 3) < 0.1, "le Climax sonne sans raison");
+
+    // Un Boss annoncé : la Tension monte, par le fondu.
+    app.world_mut()
+        .insert_resource(blind(BlindType::Boss, 1_000, 0));
+    render(&mut app, 3.5, &mut left);
+    let turn = last_turn(&left);
+    let tension = impulse(&left, turn, 2);
+    assert!(tension > 0.3, "le Boss ne lève pas la Tension : {tension}");
+    assert!(
+        impulse(&left, turn, 3) < 0.1,
+        "le Climax sonne sous le seuil"
+    );
+
+    // Le Boss est battu, la manche se clôt, la boutique s'ouvre. Son contexte reste dans le
+    // monde : sans le filtre, Tension et Climax sonneraient à chaque visite.
+    app.world_mut()
+        .insert_resource(blind(BlindType::Boss, 1_000, 1_000));
+    go_phase(&mut app, RunPhase::Roll, false, &mut left);
+    go_phase(&mut app, RunPhase::Scoring, false, &mut left);
+    go_phase(&mut app, RunPhase::RoundEnd, false, &mut left);
+    go_phase(&mut app, RunPhase::Shop, false, &mut left);
+    assert!(app.world().contains_resource::<BlindContext>());
+    render(&mut app, 4.0, &mut left);
+    let turn = last_turn(&left);
+    let base = per_mille(impulse(&left, turn, 0), run);
+    assert!(
+        (490..=510).contains(&base),
+        "Base en boutique à {base} pour mille, 500 attendus"
+    );
+    assert!(
+        impulse(&left, turn, 2) < 0.1,
+        "la Tension sonne en boutique"
+    );
+    assert!(impulse(&left, turn, 3) < 0.1, "le Climax sonne en boutique");
 }
 
 /// Les identifiants des lecteurs du monde, triés : les quatre voies, et elles seules.
@@ -414,10 +515,7 @@ fn go_phase(app: &mut App, phase: RunPhase, reflexive: bool, left: &mut Vec<f32>
 /// chaque couche est à sa trame, du premier bouclage au dernier.
 #[test]
 fn test_music_survives_the_state_cycle() {
-    let mut app = offline_app_with(|app| {
-        app.add_plugins(StatesPlugin);
-        app.init_state::<AppState>().add_sub_state::<RunPhase>();
-    });
+    let mut app = offline_app();
     let mut left = Vec::new();
     layers_with_gains(&mut app, [1.0; 4], &mut left);
     render(&mut app, 0.5, &mut left);

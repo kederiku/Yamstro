@@ -2415,7 +2415,6 @@ jobs:
           forbid  "TASK-100 horloge écrite au lieu du tick"        -n '^[^/]*set_elapsed' "$MUSIC"
           forbid  "TASK-100 méthode disparue du minuteur"          -n '^[^/]*\.finished\(\)' "$AUDIO/src"
           require "TASK-100 vitesse de fondu, sous son nom"        -n '^pub const DEFAULT_FADE_PER_SECOND: f32 = 2\.0;$' "$MUSIC"
-          forbid  "TASK-100 gain poussé par ce ticket"             -n '^[^/]*\.set_layer_gain\(' "$MUSIC"
 
           # `AssetPlugin` est exigé des trois constructeurs, et `build` le dit :
           # en 0.19 une ressource manquante fait paniquer le système, sous un
@@ -2428,6 +2427,47 @@ jobs:
           require "TASK-100 chaque couche s'écoute seule"          -n '^fn test_each_layer_handle_drives_its_own_stem\(\) \{$' "$AUDIO/tests/real_backend.rs"
           forbid  "TASK-100 un test du son charge ses couches"     -n '^[^/]*\.load_layer\(' "$AUDIO/tests/real_backend.rs"
           count   "TASK-100 fixtures aux noms de production" 4     --files "$AUDIO/tests/assets/audio" -g 'stem_{base,melody,tension,climax}.ogg'
+
+          # TASK-101 : le seul système qui fait sonner la musique. Il tourne
+          # partout, menu compris : la phase de run et le contexte de blind sont
+          # optionnels, l'état de l'application ne l'est pas, et `build` exige la
+          # machine à états. (La garde de TASK-100 « gain poussé par ce ticket »
+          # était datée : elle est levée ici, et remplacée par un comptage.)
+          require "TASK-101 phase de run optionnelle"              -n '^\s+phase: Option<Res<State<RunPhase>>>,$' "$MUSIC"
+          require "TASK-101 contexte de blind optionnel"           -n '^\s+blind: Option<Res<BlindContext>>,$' "$MUSIC"
+          forbid  "TASK-101 paramètre pris nu"                     -n '^[^/]*[ (]Res<(State<RunPhase>|BlindContext)>' "$AUDIO/src"
+          require "TASK-101 état de l'application pris nu"         -n '^\s+app_state: Res<State<AppState>>,$' "$MUSIC"
+          forbid  "TASK-101 état de l'application optionnel"       -n '^[^/]*Option<Res<State<AppState>>>' "$AUDIO/src"
+          require "TASK-101 build exige la machine à états"        -n '^\s+app\.world\(\)\.contains_resource::<State<AppState>>\(\)$' "$LIB"
+          require "TASK-101 build exige la sous-phase de run"      -n '^\s+\.contains_resource::<Messages<StateTransitionEvent<RunPhase>>>\(\),$' "$LIB"
+          # Ancrée sur l'appel, par son point : le message de `build` nomme ces
+          # méthodes pour dire à qui les appeler.
+          forbid  "TASK-101 états initialisés par l'audio"         -n '^[^/]*\.(init_state|add_sub_state|insert_state)(::<|\()' "$AUDIO/src"
+          require "TASK-101 système enregistré en Update"          -n '^\s+app\.add_systems\(Update, update_music_gains\);$' "$MUSIC"
+          forbid  "TASK-101 condition d'état ou de changement"     -n '^[^/]*(run_if\(|in_state\(|is_changed\(\))' "$MUSIC"
+
+          # Les cibles passent par le filtre des contextes périmés (TASK-99).
+          # L'interpolation est exponentielle, écrite une fois, sur le pas de
+          # temps de l'image. Ce qui part à la façade est `layer_gain` : les
+          # curseurs s'appliquent sur les bus, la musique ne les lit pas.
+          require "TASK-101 cibles filtrées par blind_in_play"     -n '^\s+manager\.target_gains = target_gains\(app, phase, blind_in_play\(app, phase, blind\.as_deref\(\)\)\);$' "$MUSIC"
+          require "TASK-101 interpolation exponentielle"           -n '^\s+let t = 1\.0 - \(-manager\.fade_per_second \* time\.delta_secs\(\)\)\.exp\(\);$' "$MUSIC"
+          count   "TASK-101 une seule exponentielle" 1             -n '^[^/]*\.exp\(\)' "$MUSIC"
+          require "TASK-101 pas vers la cible"                     -n '^\s+manager\.current_gains\[i\] \+= \(target - manager\.current_gains\[i\]\) \* t;$' "$MUSIC"
+          require "TASK-101 gain remis à la façade"                -n '^\s+let gain = layer_gain\(manager\.current_gains\[i\], manager\.duck\);$' "$MUSIC"
+          count   "TASK-101 un seul site pousse les gains de couche" 1 -n '^[^/]*\.set_layer_gain\(' "$AUDIO/src"
+          forbid  "TASK-101 curseurs lus par la musique"           -n '^[^/]*(AudioBusVolumes|volumes\.|music \* master)' "$MUSIC"
+          forbid  "TASK-101 son relancé pour bouger un gain"       -n '^[^/]*\.play\(' "$MUSIC"
+
+          # Le backend nul compte les poussées, il ne les journalise pas : il est
+          # aussi celui d'une machine sans sortie audio, quatre poussées par image.
+          require "TASK-101 les poussées de gain se comptent"      -n '^\s+pub fn layer_gain_pushes\(&self\) -> usize \{$' "$BACKEND"
+          forbid  "TASK-101 journal des gains de couche"           -n '^[^/]*layer_gain[a-z_]*: Vec<' "$BACKEND"
+
+          # Le mix s'écoute sur le son rendu, et les tests du son tiennent leurs
+          # gains par la ressource : un gain posé par la façade serait écrasé.
+          require "TASK-101 le mix s'écoute sur le son rendu"      -n '^fn test_state_changes_are_heard\(\) \{$' "$AUDIO/tests/real_backend.rs"
+          forbid  "TASK-101 un test du son pousse un gain de couche" -n '^[^/]*\.set_layer_gain\(' "$AUDIO/tests/real_backend.rs"
 
           exit $status
 

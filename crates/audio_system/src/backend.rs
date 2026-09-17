@@ -151,6 +151,7 @@ pub struct NullBackend {
     layers: LayerSlots<String>,
     layer_loads: Vec<(String, u8)>,
     layer_gains: [f32; LAYER_COUNT],
+    layer_gain_pushes: usize,
     bus_gains: [f32; Bus::ALL.len()],
     bus_gain_writes: Vec<(Bus, f32)>,
 }
@@ -163,6 +164,7 @@ impl Default for NullBackend {
             layers: LayerSlots::default(),
             layer_loads: Vec::new(),
             layer_gains: [0.0; LAYER_COUNT],
+            layer_gain_pushes: 0,
             bus_gains: [1.0; Bus::ALL.len()],
             bus_gain_writes: Vec::new(),
         }
@@ -208,24 +210,34 @@ impl NullBackend {
         self.layer_gains[usize::from(layer.0)]
     }
 
+    /// Le nombre d'appels à `set_layer_gain`. **Un compteur, jamais un journal** : les gains de
+    /// couche partent quatre fois par image, et ce backend est aussi celui d'une machine sans
+    /// sortie audio, où un journal grossirait sans borne. Une poussée par couche et par image :
+    /// lire [`NullBackend::layer_gain`] après chaque image, c'est lire chaque valeur poussée.
+    pub fn layer_gain_pushes(&self) -> usize {
+        self.layer_gain_pushes
+    }
+
     pub fn bus_gain(&self, bus: Bus) -> f32 {
         self.bus_gains[bus.index()]
     }
 
     /// Un enregistrement par appel à `set_bus_gain`, dans l'ordre : les gains de bus ne bougent
     /// que sur action de l'utilisateur, leurs poussées se comptent. Les gains de couche, poussés
-    /// à chaque image, ne sont pas journalisés : seule leur dernière valeur est tenue.
+    /// à chaque image, ne sont pas journalisés : leur dernière valeur est tenue, et leurs
+    /// poussées comptées.
     pub fn bus_gain_writes(&self) -> &[(Bus, f32)] {
         &self.bus_gain_writes
     }
 
-    /// Vide les trois journaux, sons joués, poussées de bus et chargements de couche, entre deux
-    /// phases d'un même test. Le catalogue, les couches et les gains sont un état, pas un
-    /// journal : ils restent.
+    /// Vide les trois journaux, sons joués, poussées de bus et chargements de couche, et remet à
+    /// zéro le compteur des poussées de gain, entre deux phases d'un même test. Le catalogue,
+    /// les couches et les gains sont un état, pas un journal : ils restent.
     pub fn clear(&mut self) {
         self.played.clear();
         self.bus_gain_writes.clear();
         self.layer_loads.clear();
+        self.layer_gain_pushes = 0;
     }
 }
 
@@ -254,6 +266,7 @@ impl AudioBackend for NullBackend {
 
     fn set_layer_gain(&mut self, layer: LayerHandle, gain: f32) {
         self.layer_gains[usize::from(layer.0)] = gain;
+        self.layer_gain_pushes += 1;
     }
 
     fn set_bus_gain(&mut self, bus: Bus, gain: f32) {

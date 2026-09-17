@@ -14,7 +14,7 @@ use audio_system::{
         blind_in_play, target_gains,
     },
 };
-use bevy::{prelude::*, state::app::StatesPlugin};
+use bevy::{prelude::*, state::app::StatesPlugin, time::TimePlugin};
 use core_engine::{
     blinds::{BlindContext, BlindDefinition, BlindType},
     hands::HandGrid,
@@ -45,14 +45,12 @@ fn arbre(arguments: &[&str]) -> String {
 #[test]
 fn test_audio_plugin_boots_headless() {
     // `MinimalPlugins` n'inclut ni `StatesPlugin` ni `AssetPlugin` : ils s'ajoutent à la main,
-    // et le second **avant** le plugin audio, qui l'exige (TASK-100).
+    // **avant** le plugin audio, qui exige le serveur d'assets (TASK-100) et la machine à états
+    // du jeu (TASK-101).
     let mut app = App::new();
-    app.add_plugins((
-        MinimalPlugins,
-        StatesPlugin,
-        AssetPlugin::default(),
-        GameAudioPlugin::headless(),
-    ));
+    app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default()));
+    app.init_state::<AppState>().add_sub_state::<RunPhase>();
+    app.add_plugins(GameAudioPlugin::headless());
     for _ in 0..3 {
         app.update();
     }
@@ -65,7 +63,29 @@ fn test_audio_plugin_boots_headless() {
 #[should_panic(expected = "`GameAudioPlugin` exige un `AssetPlugin` déjà monté")]
 fn test_audio_plugin_demands_the_asset_plugin() {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, StatesPlugin, GameAudioPlugin::headless()));
+    app.add_plugins((MinimalPlugins, StatesPlugin));
+    app.init_state::<AppState>().add_sub_state::<RunPhase>();
+    app.add_plugins(GameAudioPlugin::headless());
+}
+
+/// TASK-101 : la musique lit l'état de l'application à chaque image, menu compris. Sans la
+/// machine à états, son système paniquerait à la première image, sous un message anonyme :
+/// `build` le dit d'entrée. Il vérifie les deux niveaux, l'état et la sous-phase de run.
+#[test]
+#[should_panic(expected = "`GameAudioPlugin` exige la machine à états du jeu déjà montée")]
+fn test_audio_plugin_demands_the_state_machine() {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default()));
+    app.add_plugins(GameAudioPlugin::headless());
+}
+
+#[test]
+#[should_panic(expected = "`GameAudioPlugin` exige la machine à états du jeu déjà montée")]
+fn test_audio_plugin_demands_the_run_phase_too() {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default()));
+    app.init_state::<AppState>();
+    app.add_plugins(GameAudioPlugin::headless());
 }
 
 #[test]
@@ -176,15 +196,13 @@ fn test_audio_module_files_are_the_six() {
 // ------------------------------------------------------------------ TASK-97
 
 /// `MinimalPlugins` n'inclut ni `AssetPlugin` ni `StatesPlugin` : la façade reçoit un
-/// `AssetServer`, il faut donc le monter, même si le backend nul ne l'appelle pas.
+/// `AssetServer`, il faut donc le monter, même si le backend nul ne l'appelle pas ; et la
+/// musique lit la machine à états du jeu, initialisée ici comme le fait `GameStatePlugin`.
 fn headless_app() -> App {
     let mut app = App::new();
-    app.add_plugins((
-        MinimalPlugins,
-        StatesPlugin,
-        AssetPlugin::default(),
-        GameAudioPlugin::headless(),
-    ));
+    app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default()));
+    app.init_state::<AppState>().add_sub_state::<RunPhase>();
+    app.add_plugins(GameAudioPlugin::headless());
     app
 }
 
@@ -366,12 +384,9 @@ fn test_plugin_constructors_choose_a_kind() {
     );
 
     let mut reel = App::new();
-    reel.add_plugins((
-        MinimalPlugins,
-        StatesPlugin,
-        AssetPlugin::default(),
-        GameAudioPlugin::offline(),
-    ));
+    reel.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default()));
+    reel.init_state::<AppState>().add_sub_state::<RunPhase>();
+    reel.add_plugins(GameAudioPlugin::offline());
     assert!(
         reel.world()
             .resource::<AudioBackendHandle>()
@@ -928,7 +943,6 @@ fn vers_phase(app: &mut App, phase: RunPhase, reflexive: bool) {
 #[test]
 fn test_music_survives_round_end_to_roll() {
     let mut app = headless_app();
-    app.init_state::<AppState>().add_sub_state::<RunPhase>();
     app.update();
     app.world_mut()
         .resource_mut::<NextState<AppState>>()
@@ -981,9 +995,11 @@ fn test_duck_timer_is_not_zero_duration() {
     assert!(!manager.duck_timer.just_finished());
     assert_eq!(manager.duck, 1.0);
 
-    // La bande-son part du silence, à la vitesse de fondu de l'étape.
+    // La bande-son part du silence, à la vitesse de fondu de l'étape : à la première image le
+    // pas de temps est nul, rien n'a encore bougé. Les cibles, elles, sont déjà celles du menu
+    // (TASK-101).
     assert_eq!(manager.current_gains, [0.0; 4]);
-    assert_eq!(manager.target_gains, [0.0; 4]);
+    assert_eq!(manager.target_gains, [0.6, 0.4, 0.0, 0.0]);
     assert_eq!(DEFAULT_FADE_PER_SECOND, 2.0);
     assert_eq!(manager.fade_per_second, 2.0);
 
@@ -1012,4 +1028,242 @@ fn test_manager_is_resource_only() {
         "la ressource ne dérive pas `Resource` seule"
     );
     assert!(!source.contains("impl Default for AdaptiveMusicManager"));
+}
+
+// ------------------------------------------------------------------ TASK-101
+
+/// Sans `TimePlugin` : mesuré à TASK-39, il réécrit le pas à chaque image depuis l'horloge
+/// réelle. Sans lui, chaque image vaut exactement le pas demandé, et une image sans avance du
+/// temps a un pas nul : les changements d'état s'y posent sans faire bouger un gain.
+fn timed_app() -> App {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins.build().disable::<TimePlugin>(),
+        StatesPlugin,
+        AssetPlugin::default(),
+    ));
+    app.init_resource::<Time>();
+    app.init_state::<AppState>().add_sub_state::<RunPhase>();
+    app.add_plugins(GameAudioPlugin::headless());
+    app.update();
+    app
+}
+
+fn avancer(app: &mut App, millis: u64) {
+    app.world_mut()
+        .resource_mut::<Time>()
+        .advance_by(Duration::from_millis(millis));
+    app.update();
+}
+
+/// Pose un état ou une phase, en une image de pas nul.
+fn entrer_en_run(app: &mut App, phase: RunPhase) {
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::InRun);
+    app.update();
+    if phase != RunPhase::BlindSelect {
+        app.world_mut()
+            .resource_mut::<NextState<RunPhase>>()
+            .set(phase);
+        app.update();
+    }
+    assert_eq!(*app.world().resource::<State<RunPhase>>().get(), phase);
+}
+
+/// Les quatre gains courants, en pour-mille entiers.
+fn gains_pour_mille(app: &App) -> [i64; 4] {
+    manager(app)
+        .current_gains
+        .map(|gain| (f64::from(gain) * 1000.0).round() as i64)
+}
+
+/// Les quatre dernières valeurs poussées au backend, dans l'ordre des couches.
+fn pousses(app: &App) -> [f32; 4] {
+    let voies = manager(app).layers;
+    voies.map(|voie| journal(app).layer_gain(voie))
+}
+
+#[test]
+fn test_gain_interpolation_is_framerate_independent() {
+    // Les quatre cibles à 1 : un Boss, au-delà du seuil. 528 ms, en 33 pas de 16 puis 16 de 33.
+    let mesure = |pas: u64, images: u32| {
+        let mut app = timed_app();
+        app.world_mut()
+            .insert_resource(manche(BlindType::Boss, 1_000, 1_000, 3));
+        entrer_en_run(&mut app, RunPhase::Roll);
+        assert_eq!(manager(&app).current_gains, [0.0; 4], "un pas nul a bougé");
+        let depart = app.world().resource::<Time>().elapsed();
+        for _ in 0..images {
+            avancer(&mut app, pas);
+        }
+        let ecoule = app.world().resource::<Time>().elapsed() - depart;
+        assert_eq!(ecoule, Duration::from_millis(528));
+        assert_eq!(manager(&app).target_gains, [1.0; 4]);
+        gains_pour_mille(&app)
+    };
+    let (fin, grossier) = (mesure(16, 33), mesure(33, 16));
+
+    // 1 - e^(-2 × 0,528) = 0,652 : la valeur ne dépend que de la durée, jamais du découpage.
+    for couche in 0..4 {
+        assert!(
+            (651..=653).contains(&fin[couche]),
+            "couche {couche} : {} pour mille en 33 pas",
+            fin[couche]
+        );
+        assert!(
+            (-1..=1).contains(&(fin[couche] - grossier[couche])),
+            "couche {couche} : {} pour mille en 33 pas, {} en 16",
+            fin[couche],
+            grossier[couche]
+        );
+    }
+}
+
+#[test]
+fn test_music_system_runs_in_main_menu() {
+    let mut app = timed_app();
+    // Ni sous-phase de run, ni contexte de blind : le système tourne quand même.
+    assert!(!app.world().contains_resource::<State<RunPhase>>());
+    assert!(!app.world().contains_resource::<BlindContext>());
+    // Les trois curseurs à mi-course : ils s'appliquent sur les bus, et ne doivent rien changer
+    // à ce que la musique remet à la façade.
+    app.world_mut().insert_resource(volumes(0.5, 0.5, 0.5));
+    let avant = journal(&app).layer_gain_pushes();
+
+    let mut precedent = [0_i64; 4];
+    for _ in 0..10 {
+        avancer(&mut app, 16);
+        let gains = gains_pour_mille(&app);
+        assert!(gains[0] > precedent[0] && gains[1] > precedent[1]);
+        assert_eq!(gains[2..], [0, 0]);
+        precedent = gains;
+    }
+    assert_eq!(journal(&app).layer_gain_pushes() - avant, 40);
+    assert_eq!(manager(&app).target_gains, [0.6, 0.4, 0.0, 0.0]);
+    // 160 ms : 1 - e^(-0,32) = 0,2739 du chemin, soit 0,164 et 0,110.
+    assert!((163..=165).contains(&precedent[0]), "{precedent:?}");
+    assert!((109..=111).contains(&precedent[1]), "{precedent:?}");
+    // Ce qui part au backend est le gain courant : aucun volume utilisateur, ducking à 1.
+    assert_eq!(pousses(&app), manager(&app).current_gains);
+    assert_eq!(journal(&app).bus_gain(Bus::Music), 0.5);
+
+    // Le ducking est lu : il multiplie ce qui part, sans toucher aux gains courants.
+    app.world_mut().resource_mut::<AdaptiveMusicManager>().duck = 0.5;
+    avancer(&mut app, 16);
+    let attendus = manager(&app).current_gains.map(|gain| gain * 0.5);
+    assert_eq!(pousses(&app), attendus);
+    assert!(attendus[0] > 0.0, "le test ne prouve rien");
+}
+
+#[test]
+fn test_gain_is_bounded() {
+    let mut app = timed_app();
+    app.world_mut()
+        .insert_resource(manche(BlindType::Boss, 1_000, 1_000, 3));
+    entrer_en_run(&mut app, RunPhase::Roll);
+    for image in 0..200 {
+        avancer(&mut app, 16);
+        // Une poussée par couche et par image : lire les quatre, c'est lire chaque valeur.
+        for gain in pousses(&app) {
+            assert!(
+                (0.0..=1.0).contains(&gain),
+                "image {image} : {gain} poussé au backend"
+            );
+        }
+    }
+
+    // Un poids sorti de ses bornes ne passe pas la façade : elle reçoit `layer_gain`.
+    let mut manager_mut = app.world_mut().resource_mut::<AdaptiveMusicManager>();
+    manager_mut.current_gains[0] = 1.4;
+    manager_mut.current_gains[1] = -0.3;
+    avancer(&mut app, 16);
+    assert!(
+        manager(&app).current_gains[0] > 1.0,
+        "le test ne prouve rien"
+    );
+    assert!(
+        manager(&app).current_gains[1] < 0.0,
+        "le test ne prouve rien"
+    );
+    let pousses = pousses(&app);
+    assert_eq!(pousses[0], 1.0);
+    assert_eq!(pousses[1], 0.0);
+}
+
+#[test]
+fn test_gains_reach_target() {
+    let mut app = timed_app();
+    entrer_en_run(&mut app, RunPhase::Roll);
+    // Deux couches montent, deux descendent.
+    app.world_mut()
+        .resource_mut::<AdaptiveMusicManager>()
+        .current_gains = [0.0, 0.0, 1.0, 1.0];
+
+    let mut precedent = manager(&app).current_gains;
+    for _ in 0..188 {
+        avancer(&mut app, 16);
+        let gains = manager(&app).current_gains;
+        assert!(gains[0] > precedent[0] && gains[1] > precedent[1]);
+        assert!(gains[2] < precedent[2] && gains[3] < precedent[3]);
+        precedent = gains;
+    }
+    assert_eq!(manager(&app).target_gains, [1.0, 1.0, 0.0, 0.0]);
+    // 3,008 s : l'écart vaut e^(-6,016), 2,4 pour mille. Une convergence, jamais une égalité.
+    let gains = gains_pour_mille(&app);
+    assert!((990..=999).contains(&gains[0]), "{gains:?}");
+    assert!((990..=999).contains(&gains[1]), "{gains:?}");
+    assert!((1..=10).contains(&gains[2]), "{gains:?}");
+    assert!((1..=10).contains(&gains[3]), "{gains:?}");
+}
+
+#[test]
+fn test_shop_softens_the_mix() {
+    let mut app = timed_app();
+    entrer_en_run(&mut app, RunPhase::Roll);
+    app.world_mut()
+        .resource_mut::<AdaptiveMusicManager>()
+        .current_gains = [1.0, 1.0, 0.0, 0.0];
+
+    // La blind vient d'être battue, et c'était un Boss : son contexte **reste dans le monde**.
+    // Sans le filtre des contextes périmés, Tension et Climax monteraient en boutique.
+    app.world_mut()
+        .insert_resource(manche(BlindType::Boss, 1_000, 1_000, 3));
+    app.world_mut()
+        .resource_mut::<NextState<RunPhase>>()
+        .set(RunPhase::Shop);
+    app.update();
+
+    avancer(&mut app, 16);
+    let debut = manager(&app).current_gains;
+    assert!(
+        debut[0] < 1.0 && debut[1] < 1.0,
+        "la boutique n'adoucit pas"
+    );
+    for _ in 0..200 {
+        avancer(&mut app, 16);
+        assert_eq!(manager(&app).current_gains[2..], [0.0, 0.0]);
+    }
+    assert!(app.world().contains_resource::<BlindContext>());
+    assert_eq!(manager(&app).target_gains, [0.5, 0.5, 0.0, 0.0]);
+    let gains = gains_pour_mille(&app);
+    assert!((500..=502).contains(&gains[0]), "{gains:?}");
+    assert!((500..=502).contains(&gains[1]), "{gains:?}");
+}
+
+#[test]
+fn test_four_layers_pushed_every_frame() {
+    // Horloge réelle, état inchangé : aucune garde de changement, quatre poussées par image.
+    let mut app = headless_app();
+    for _ in 0..10 {
+        app.update();
+    }
+    assert_eq!(journal(&app).layer_gain_pushes(), 40);
+
+    // Un compteur, pas un état : `clear` le remet à zéro, les gains tenus restent.
+    let tenus = pousses(&app);
+    let mut handle = app.world_mut().resource_mut::<AudioBackendHandle>();
+    handle.null_mut().expect("backend nul").clear();
+    assert_eq!(journal(&app).layer_gain_pushes(), 0);
+    assert_eq!(pousses(&app), tenus);
 }
