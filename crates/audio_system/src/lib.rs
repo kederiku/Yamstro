@@ -15,6 +15,7 @@ pub mod sfx;
 
 use bevy::prelude::*;
 use game_state::states::{AppState, RunPhase};
+use ui_and_juice::events::ScoreStepPlayed;
 
 pub use backend::{
     AudioBackend, AudioBackendHandle, AudioClip, BackendKind, Bus, LayerHandle, NullBackend,
@@ -39,6 +40,10 @@ pub use sfx::SoundEffectBank;
 /// **Ils exigent aussi la machine à états du jeu, déjà montée** : la musique lit l'état de
 /// l'application à chaque image, menu compris. La machine appartient à `game_state` ; ce plugin
 /// la vérifie, il ne l'initialise pas.
+///
+/// **Et ils exigent `JuicePlugin` déjà monté** : l'audio lit les paliers de score que la mise en
+/// scène publie, et le tampon de ces paliers est le sien. Ce plugin le vérifie, il ne
+/// l'enregistre pas : un second enregistrement masquerait l'oubli du premier.
 ///
 /// Il ne monte pas `JuicePlugin` et n'y ajoute rien : l'inventaire de la mise en scène reste
 /// celui que TASK-46 garde.
@@ -89,6 +94,11 @@ impl Plugin for GameAudioPlugin {
                     .contains_resource::<Messages<StateTransitionEvent<RunPhase>>>(),
             "`GameAudioPlugin` exige la machine à états du jeu déjà montée : `GameStatePlugin`, ou \
              `init_state::<AppState>()` puis `add_sub_state::<RunPhase>()`"
+        );
+        assert!(
+            app.world().contains_resource::<Messages<ScoreStepPlayed>>(),
+            "`GameAudioPlugin` exige `JuicePlugin` déjà monté : l'audio lit les paliers de score \
+             que la mise en scène publie"
         );
         backend::install(app, self.kind);
         bus::bus_plugin(app);

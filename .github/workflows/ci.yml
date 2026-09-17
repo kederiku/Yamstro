@@ -2607,6 +2607,59 @@ jobs:
           require "TASK-104 build branche la hauteur"              -n '^\s+pitch::pitch_plugin\(app\);$' "$LIB"
           require "TASK-104 le plafond s'écoute sur le son rendu"  -n '^fn test_the_capped_pitch_is_played\(\) \{$' "$AUDIO/tests/real_backend.rs"
 
+          # TASK-105 : le lecteur des paliers de score, seul point d'entrée de
+          # l'audio depuis la mise en scène. Le tampon est celui de `JuicePlugin`,
+          # que `build` exige ; l'audio le lit, il ne l'enregistre pas.
+          require "TASK-105 lecteur de paliers tamponnés"          -n '^\s+mut events: MessageReader<ScoreStepPlayed>,$' "$PITCH"
+          require "TASK-105 build exige le tampon des paliers"     -n '^\s+app\.world\(\)\.contains_resource::<Messages<ScoreStepPlayed>>\(\),$' "$LIB"
+          forbid  "TASK-105 lecteur optionnel, décompte muet"      -n '^[^/]*Option<MessageReader' "$AUDIO/src"
+
+          # **Lire la hauteur, jouer, puis avancer**, un demi-ton par palier,
+          # quelle que soit la source, en un seul site.
+          require "TASK-105 jouer, puis avancer"                   -U -n '^\s+backend\.0\.play\(clip, bus, volume, height\);\n\s+pitch\.advance\(\);$' "$PITCH"
+          count   "TASK-105 un seul site avance la hauteur" 1      -n '^[^/]*\.advance\(\)' "$AUDIO/src"
+
+          # L'arête d'ordre, écrite dans `pitch_plugin` : **après** le dépileur,
+          # dans la même image, jamais **dans** son ensemble, qui ferait hériter
+          # le lecteur de sa condition d'état.
+          require "TASK-105 après le dépileur, dans la même image" -n '^\s+app\.add_systems\(Update, play_score_steps\.after\(JuiceSet::TickQueue\)\);$' "$PITCH"
+          forbid  "TASK-105 lecteur placé dans un ensemble du juice" -n '^[^/]*in_set\(JuiceSet' "$AUDIO/"
+          forbid  "TASK-105 condition d'état sur le lecteur"       -n '^[^/]*(run_if\(|in_state\()' "$PITCH"
+          forbid  "TASK-105 combinateurs supprimés en 0.19"        -n '^[^/]*\.(run_in|run_after|run_before)\(' "$AUDIO/"
+
+          # Quatre sources, quatre clips, cités une fois chacun ; le coup
+          # multiplicatif change de clip **et** de routage. Les `match` sont
+          # exhaustifs, et l'identité d'une relique est ignorée : un `match` sur
+          # elle grossirait avec le catalogue de l'Étape 9.
+          count   "TASK-105 l'accord de la figure de base, une fois" 1 -n '^[^/]*bank\.hand_base_chord' "$PITCH"
+          count   "TASK-105 le tic de jeton, une fois" 1           -n '^[^/]*bank\.chip_tick' "$PITCH"
+          count   "TASK-105 l'accord de relique, une fois" 1       -n '^[^/]*bank\.relic_chord' "$PITCH"
+          count   "TASK-105 le tic de sceau, une fois" 1           -n '^[^/]*bank\.seal_tick' "$PITCH"
+          require "TASK-105 le coup multiplicatif"                 -n '^\s+ScoreAction::MultiplyMult\(_\) => bank\.mult_hit,$' "$PITCH"
+          require "TASK-105 le coup multiplicatif résonne"         -n '^\s+ScoreAction::MultiplyMult\(_\) => Bus::SfxReverb,$' "$PITCH"
+          forbid  "TASK-105 bras générique dans un match"          -n '^[^/]*\b_ =>' "$PITCH"
+          forbid  "TASK-105 identité de relique lue par l'audio"   -n '^[^/]*RelicId' "$AUDIO/src"
+          # Le nom proscrit de la variante de dé est tenu par le volet 1
+          # (« critère 10 noms proscrits »), ancré par `\b` : nu, il mordrait le
+          # déclencheur normatif `Hook::OnScoringDie`.
+
+          # La figure de base sonne au nominal ; un sceau à la hauteur courante
+          # teintée ; quatre teintes, écrites une fois, distinctes.
+          require "TASK-105 figure de base à la hauteur nominale"  -n '^\s+StepSource::HandBase \{ \.\. \} => tracker\.base_pitch,$' "$PITCH"
+          count   "TASK-105 quatre teintes de sceau" 4             -n '^\s+DieSeal::(Gold => 1\.02|Blue => 1\.01|Purple => 0\.99|Red => 0\.98),$' "$PITCH"
+
+          # L'intensité vient de l'action seule, chacune dans son unité, et ce
+          # qui part à la façade est la part locale : les curseurs sont sur les bus.
+          require "TASK-105 intensité tirée de l'action"           -n '^\s+let volume = local_gain\(step_intensity\(step\.action\)\);$' "$PITCH"
+          require "TASK-105 une perte sonne comme un gain"         -n '^\s+share\(hundredths\.unsigned_abs\(\), FULL_MULT_HUNDREDTHS\),$' "$PITCH"
+          forbid  "TASK-105 curseurs lus par le lecteur"           -n '^[^/]*(AudioBusVolumes|volumes\.)' "$PITCH"
+
+          # Le flux est à sens unique : rien de la mise en scène n'est lu ici
+          # hors du palier et de l'ensemble d'ordre.
+          forbid  "TASK-105 ressource de la mise en scène lue par l'audio" -n '^[^/]*(JuiceSettings|ScreenShake|AnimatedNumber|PunchScale)' "$AUDIO/src"
+          require "TASK-105 l'arête s'éprouve sur la chaîne réelle" -n '^fn test_reader_runs_after_the_drainer\(\) \{$' "$AUDIO/tests/audio_contract.rs"
+          require "TASK-105 le coup multiplicatif s'écoute"        -n '^fn test_a_multiplying_step_resonates\(\) \{$' "$AUDIO/tests/real_backend.rs"
+
           exit $status
 
       # ---- Passe rand 0.10 et Default (15 septembre 2026) ----

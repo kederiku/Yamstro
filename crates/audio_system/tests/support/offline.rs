@@ -83,6 +83,9 @@ pub fn offline_app_at(root: &str) -> App {
         },
     ));
     app.init_state::<AppState>().add_sub_state::<RunPhase>();
+    // Le tampon des paliers de score, enregistré comme le fait `JuicePlugin`, que le plugin
+    // audio exige.
+    app.add_message::<ui_and_juice::events::ScoreStepPlayed>();
     app.add_plugins((GameAudioPlugin::offline(), OfflinePlatformPlugin))
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
             16,

@@ -2,7 +2,12 @@
 //! décisions, jamais du son. Ce fichier est celui que le document de l'Étape 8
 //! nomme ; chaque ticket de l'étape y ajoute les siens.
 
-use std::{collections::BTreeSet, path::PathBuf, process::Command, time::Duration};
+use std::{
+    collections::{BTreeSet, VecDeque},
+    path::PathBuf,
+    process::Command,
+    time::Duration,
+};
 
 use audio_system::{
     AdaptiveMusicManager, AudioBackendHandle, AudioBusVolumes, AudioClip, BackendKind, Bus,
@@ -13,22 +18,25 @@ use audio_system::{
         CLIMAX_THRESHOLD_PERCENT, DEFAULT_FADE_PER_SECOND, DUCK_DURATION, STEM_PATHS,
         blind_in_play, target_gains,
     },
+    pitch::{seal_tint, step_intensity},
 };
-use bevy::{prelude::*, state::app::StatesPlugin, time::TimePlugin};
+use bevy::{input::InputPlugin, prelude::*, state::app::StatesPlugin, time::TimePlugin};
 use core_engine::{
     blinds::{BlindContext, BlindDefinition, BlindType},
     config::RunConfig,
     cups::{CupId, definitions::cup},
-    dice::{Die, DieId},
+    dice::{Die, DieId, DieSeal},
     hands::{HandGrid, HandLevels, YahtzeeHand},
+    relics::RelicId,
     rng::RunRng,
+    scoring::{ScoreAction, ScoreStep, StepSource},
 };
 use game_state::{
-    resources::{HandContext, RunSession},
+    resources::{HandContext, RunSession, ScoringStepQueue},
     states::{AppState, RunPhase},
 };
 use rand::Rng;
-use ui_and_juice::JuicePlugin;
+use ui_and_juice::{JuicePlugin, events::ScoreStepPlayed};
 
 fn racine() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -58,10 +66,22 @@ fn test_audio_plugin_boots_headless() {
     let mut app = App::new();
     app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default()));
     app.init_state::<AppState>().add_sub_state::<RunPhase>();
+    app.add_message::<ScoreStepPlayed>();
     app.add_plugins(GameAudioPlugin::headless());
     for _ in 0..3 {
         app.update();
     }
+}
+
+/// TASK-105 : l'audio lit les paliers de score que la mise en scène publie. Sans leur tampon, le
+/// lecteur paniquerait à la première image, sous un message anonyme : `build` le dit d'entrée.
+#[test]
+#[should_panic(expected = "`GameAudioPlugin` exige `JuicePlugin` déjà monté")]
+fn test_audio_plugin_demands_the_juice_plugin() {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default()));
+    app.init_state::<AppState>().add_sub_state::<RunPhase>();
+    app.add_plugins(GameAudioPlugin::headless());
 }
 
 /// TASK-100 : sans `AssetPlugin`, le chargement des couches ne serait pas écarté en silence, il
@@ -204,12 +224,15 @@ fn test_audio_module_files_are_the_six() {
 // ------------------------------------------------------------------ TASK-97
 
 /// `MinimalPlugins` n'inclut ni `AssetPlugin` ni `StatesPlugin` : la façade reçoit un
-/// `AssetServer`, il faut donc le monter, même si le backend nul ne l'appelle pas ; et la
-/// musique lit la machine à états du jeu, initialisée ici comme le fait `GameStatePlugin`.
+/// `AssetServer`, il faut donc le monter, même si le backend nul ne l'appelle pas ; la musique
+/// lit la machine à états du jeu, initialisée ici comme le fait `GameStatePlugin` ; et le lecteur
+/// de paliers lit un tampon, enregistré ici comme le fait `JuicePlugin`. Le plugin entier n'est
+/// pas monté : il exigerait une file et une manche dès qu'un test entre en phase de décompte.
 fn headless_app() -> App {
     let mut app = App::new();
     app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default()));
     app.init_state::<AppState>().add_sub_state::<RunPhase>();
+    app.add_message::<ScoreStepPlayed>();
     app.add_plugins(GameAudioPlugin::headless());
     app
 }
@@ -394,6 +417,7 @@ fn test_plugin_constructors_choose_a_kind() {
     let mut reel = App::new();
     reel.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default()));
     reel.init_state::<AppState>().add_sub_state::<RunPhase>();
+    reel.add_message::<ScoreStepPlayed>();
     reel.add_plugins(GameAudioPlugin::offline());
     assert!(
         reel.world()
@@ -1052,6 +1076,7 @@ fn timed_app() -> App {
     ));
     app.init_resource::<Time>();
     app.init_state::<AppState>().add_sub_state::<RunPhase>();
+    app.add_message::<ScoreStepPlayed>();
     app.add_plugins(GameAudioPlugin::headless());
     app.update();
     app
@@ -1950,4 +1975,292 @@ fn test_tracker_is_resource_only() {
         "la ressource ne dérive pas `Resource` seule"
     );
     assert!(source.contains("impl Default for PitchScaleTracker {"));
+}
+
+// ------------------------------------------------------------------ TASK-105
+
+const BASE: StepSource = StepSource::HandBase {
+    hand: YahtzeeHand::FullHouse,
+};
+const DE: StepSource = StepSource::Die {
+    die_id: DieId(2),
+    value: 5,
+};
+const RELIQUE: StepSource = StepSource::Relic {
+    uid: 7,
+    def: RelicId::CrackedDie,
+};
+
+fn sceau(seal: DieSeal) -> StepSource {
+    StepSource::Seal {
+        die_id: DieId(4),
+        seal,
+    }
+}
+
+/// Publie un palier, comme le fait le dépileur de la mise en scène, puis avance d'une image.
+fn publier(app: &mut App, source: StepSource, action: ScoreAction) {
+    app.world_mut()
+        .write_message(ScoreStepPlayed { source, action });
+    app.update();
+}
+
+fn remettre_a_zero(app: &mut App) {
+    app.world_mut().resource_mut::<PitchScaleTracker>().reset();
+    let mut handle = app.world_mut().resource_mut::<AudioBackendHandle>();
+    handle.null_mut().expect("backend nul").clear();
+}
+
+fn pour_mille(valeur: f32) -> i64 {
+    (f64::from(valeur) * 1000.0).round() as i64
+}
+
+#[test]
+fn test_one_semitone_per_event_whatever_the_source() {
+    let mut app = app_des_sons_d_etat();
+    let sources = [BASE, DE, RELIQUE, sceau(DieSeal::Gold)];
+    let actions = [
+        ScoreAction::AddChips(10),
+        ScoreAction::AddMult(100),
+        ScoreAction::MultiplyMult(150),
+    ];
+    for palier in 0..10 {
+        publier(&mut app, sources[palier % 4], actions[palier % 3]);
+        assert_eq!(hauteur_courante(&app), palier as i32 + 1);
+    }
+    assert_eq!(journal(&app).played().len(), 10, "un son par palier");
+
+    // Plusieurs paliers dans la même image : chacun avance d'un demi-ton.
+    for _ in 0..5 {
+        app.world_mut().write_message(ScoreStepPlayed {
+            source: DE,
+            action: ScoreAction::AddChips(1),
+        });
+    }
+    app.update();
+    assert_eq!(hauteur_courante(&app), 15);
+
+    // Le plafond est celui du compteur : quarante paliers de plus s'y arrêtent.
+    for palier in 0..40 {
+        publier(&mut app, sources[palier % 4], actions[palier % 3]);
+    }
+    assert_eq!(hauteur_courante(&app), 24);
+    assert_eq!(journal(&app).played().len(), 55);
+}
+
+#[test]
+fn test_timbre_matches_step_source() {
+    let mut app = app_des_sons_d_etat();
+    let banque = banque(&app);
+    let attendus = [
+        banque.hand_base_chord,
+        banque.chip_tick,
+        banque.relic_chord,
+        banque.seal_tick,
+    ];
+    let distincts: BTreeSet<usize> = attendus.into_iter().map(rang).collect();
+    assert_eq!(distincts.len(), 4, "deux sources partagent un échantillon");
+
+    // Quatre sources, quatre clips. L'assertion porte sur les **clips**, jamais sur les hauteurs.
+    for (source, clip) in [BASE, DE, RELIQUE, sceau(DieSeal::Gold)]
+        .into_iter()
+        .zip(attendus)
+    {
+        remettre_a_zero(&mut app);
+        publier(&mut app, source, ScoreAction::AddChips(10));
+        let joues = journal(&app).played();
+        assert_eq!(joues.len(), 1);
+        assert_eq!(joues[0].clip, clip, "{source:?}");
+        assert_eq!(joues[0].bus, Bus::Sfx);
+    }
+
+    // La figure de base sonne à la hauteur nominale, **même en cours de séquence** ; un dé, lui,
+    // suit la gamme : lire, jouer, puis avancer.
+    remettre_a_zero(&mut app);
+    publier(&mut app, DE, ScoreAction::AddChips(10));
+    publier(&mut app, DE, ScoreAction::AddChips(10));
+    publier(&mut app, BASE, ScoreAction::AddChips(10));
+    let hauteurs: Vec<i64> = journal(&app)
+        .played()
+        .iter()
+        .map(|son| millioniemes(son.pitch))
+        .collect();
+    assert_eq!(hauteurs[0], 1_000_000, "le premier palier sonne au nominal");
+    assert!(
+        (1_059_462..=1_059_464).contains(&hauteurs[1]),
+        "{hauteurs:?}"
+    );
+    assert_eq!(hauteurs[2], 1_000_000, "la figure de base a suivi la gamme");
+
+    // Les quatre sceaux, **au même demi-ton zéro** : la seule variable restante est la teinte.
+    let mut teintes = BTreeSet::new();
+    for (seal, attendue) in [
+        (DieSeal::Gold, 1_020_000),
+        (DieSeal::Blue, 1_010_000),
+        (DieSeal::Purple, 990_000),
+        (DieSeal::Red, 980_000),
+    ] {
+        remettre_a_zero(&mut app);
+        publier(&mut app, sceau(seal), ScoreAction::AddChips(10));
+        let son = journal(&app).played()[0];
+        assert_eq!(son.clip, attendus[3]);
+        let hauteur = millioniemes(son.pitch);
+        assert!(
+            (attendue - 1..=attendue + 1).contains(&hauteur),
+            "{seal:?} : {hauteur}"
+        );
+        assert_eq!(millioniemes(seal_tint(seal)), hauteur);
+        teintes.insert(hauteur);
+    }
+    assert_eq!(teintes.len(), 4, "deux sceaux partagent une teinte");
+}
+
+#[test]
+fn test_multiply_mult_routes_to_the_reverb_bus() {
+    let mut app = app_des_sons_d_etat();
+    let (coup, tic) = (banque(&app).mult_hit, banque(&app).chip_tick);
+    for source in [BASE, DE, RELIQUE, sceau(DieSeal::Red)] {
+        remettre_a_zero(&mut app);
+        publier(&mut app, source, ScoreAction::MultiplyMult(300));
+        let son = journal(&app).played()[0];
+        assert_eq!((son.clip, son.bus), (coup, Bus::SfxReverb), "{source:?}");
+    }
+
+    // La hauteur suit la source, quel que soit le clip : un coup multiplicatif continue la gamme.
+    remettre_a_zero(&mut app);
+    publier(&mut app, DE, ScoreAction::AddChips(10));
+    publier(&mut app, DE, ScoreAction::MultiplyMult(300));
+    let second = millioniemes(journal(&app).played()[1].pitch);
+    assert!((1_059_462..=1_059_464).contains(&second), "{second}");
+
+    // Les deux autres actions ne le produisent jamais, et restent sur le bus sec.
+    for action in [ScoreAction::AddChips(9_999), ScoreAction::AddMult(9_999)] {
+        remettre_a_zero(&mut app);
+        publier(&mut app, DE, action);
+        let son = journal(&app).played()[0];
+        assert_eq!((son.clip, son.bus), (tic, Bus::Sfx), "{action:?}");
+    }
+}
+
+#[test]
+fn test_intensity_comes_from_the_action_alone() {
+    // Pur : un plancher audible, une part bornée, **chaque action dans son unité**.
+    let cas = [
+        (ScoreAction::AddChips(0), 600),
+        (ScoreAction::AddChips(50), 800),
+        (ScoreAction::AddChips(100), 1_000),
+        (ScoreAction::AddChips(u64::MAX), 1_000),
+        (ScoreAction::AddMult(0), 600),
+        (ScoreAction::AddMult(400), 760),
+        (ScoreAction::AddMult(-400), 760),
+        (ScoreAction::AddMult(1_000), 1_000),
+        (ScoreAction::AddMult(i64::MIN), 1_000),
+        (ScoreAction::MultiplyMult(50), 800),
+        (ScoreAction::MultiplyMult(100), 800),
+        (ScoreAction::MultiplyMult(150), 850),
+        (ScoreAction::MultiplyMult(300), 1_000),
+        (ScoreAction::MultiplyMult(u32::MAX), 1_000),
+    ];
+    for (action, attendue) in cas {
+        assert_eq!(pour_mille(step_intensity(action)), attendue, "{action:?}");
+    }
+    // Quatre points de multiplicateur ne sonnent pas comme quatre cents jetons.
+    assert_ne!(
+        pour_mille(step_intensity(ScoreAction::AddMult(400))),
+        pour_mille(step_intensity(ScoreAction::AddChips(400)))
+    );
+
+    // Dans le système : l'intensité est la part **locale**, la source n'y change rien, et les
+    // curseurs, ici à 0,5, ne sont pas remis à la façade.
+    let mut app = app_des_sons_d_etat();
+    for source in [BASE, DE, RELIQUE, sceau(DieSeal::Blue)] {
+        remettre_a_zero(&mut app);
+        publier(&mut app, source, ScoreAction::AddChips(50));
+        assert_eq!(
+            pour_mille(journal(&app).played()[0].volume),
+            800,
+            "{source:?}"
+        );
+    }
+}
+
+fn palier(source: StepSource, action: ScoreAction) -> ScoreStep {
+    ScoreStep {
+        source,
+        action,
+        chips_after: 10,
+        mult_after: 100,
+        score_after: 10,
+    }
+}
+
+/// La **chaîne réelle** de la mise en scène, pas un émetteur factice : c'est l'arête d'ordre qui
+/// est le sujet. `JuicePlugin` est monté en entier, avec ce qu'il exige en phase de décompte.
+#[test]
+fn test_reader_runs_after_the_drainer() {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins.build().disable::<TimePlugin>(),
+        StatesPlugin,
+        InputPlugin,
+        AssetPlugin::default(),
+        JuicePlugin,
+    ));
+    app.init_resource::<Time>();
+    app.init_state::<AppState>().add_sub_state::<RunPhase>();
+    app.add_plugins(GameAudioPlugin::headless());
+    app.insert_resource(manche(BlindType::Small, 1_000, 0, 3));
+    app.insert_resource(ScoringStepQueue::new(
+        VecDeque::from([
+            palier(BASE, ScoreAction::AddChips(30)),
+            palier(DE, ScoreAction::AddChips(5)),
+        ]),
+        YahtzeeHand::FullHouse,
+        35,
+    ));
+    entrer_en_run(&mut app, RunPhase::Scoring);
+    images(&mut app, 3);
+    assert!(
+        journal(&app).played().is_empty(),
+        "un son avant tout dépilement"
+    );
+    assert_eq!(app.world().resource::<ScoringStepQueue>().steps.len(), 2);
+
+    // Une image qui dépile un palier : **dans la même image**, le son est parti.
+    let pas = app
+        .world()
+        .resource::<ScoringStepQueue>()
+        .step_timer
+        .duration();
+    app.world_mut().resource_mut::<Time>().advance_by(pas);
+    app.update();
+    assert_eq!(app.world().resource::<ScoringStepQueue>().steps.len(), 1);
+    let joues = journal(&app).played();
+    assert_eq!(
+        joues.len(),
+        1,
+        "le son part une image après l'impulsion visuelle"
+    );
+    assert_eq!(joues[0].clip, banque(&app).hand_base_chord);
+
+    // Le second palier, à l'image de son dépilement aussi, un demi-ton plus haut.
+    app.world_mut().resource_mut::<Time>().advance_by(pas);
+    app.update();
+    assert!(app.world().resource::<ScoringStepQueue>().steps.is_empty());
+    let joues = journal(&app).played();
+    assert_eq!(joues.len(), 2);
+    assert_eq!(joues[1].clip, banque(&app).chip_tick);
+    assert!((1_059_462..=1_059_464).contains(&millioniemes(joues[1].pitch)));
+
+    // Le lecteur consomme **sans condition d'état**. Hors de la phase de décompte, les ensembles
+    // du dépileur ne tournent plus ; un palier publié s'y entend encore. Placé *dans* l'ensemble
+    // du dépileur au lieu d'être ordonné *après* lui, le lecteur hériterait de sa condition et se
+    // tairait ici, ce que seule la mise en scène montée en entier permet de voir.
+    vers_phase(&mut app, RunPhase::RoundEnd, false);
+    publier(&mut app, DE, ScoreAction::AddChips(1));
+    assert_eq!(
+        journal(&app).played().len(),
+        3,
+        "hors du décompte, le lecteur s'est tu"
+    );
 }

@@ -27,10 +27,13 @@ use bevy::prelude::*;
 use bevy_seedling::prelude::SamplePlayer;
 use core_engine::{
     blinds::{BlindContext, BlindDefinition, BlindType},
+    dice::DieId,
     hands::HandGrid,
+    scoring::{ScoreAction, StepSource},
 };
 use game_state::states::{AppState, RunPhase};
 use offline::{RATE, offline_app, offline_app_at, render, step, wait_loaded};
+use ui_and_juice::events::ScoreStepPlayed;
 
 const LAYER_FRAMES: usize = 48_000;
 const IMPULSE_SPACING: usize = 480;
@@ -748,5 +751,66 @@ fn test_the_capped_pitch_is_played() {
     assert!(
         (225..=275).contains(&quartered),
         "au plafond, le coup dure {quartered} pour mille de sa durée nominale"
+    );
+}
+
+// ------------------------------------------------------------------ TASK-105
+
+/// Publie un palier de score, comme le fait la mise en scène, et rend une seconde de son à
+/// partir de là. La musique se tait : fin de run. Les clips de la banque manquent à cette
+/// racine : chaque palier y sonne comme le bip, ce qui suffit à écouter un routage.
+fn render_step(action: ScoreAction) -> Vec<f32> {
+    let mut app = offline_app();
+    let mut left = Vec::new();
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::GameOver);
+    render(&mut app, 0.5, &mut left);
+    assert_eq!(peak(&left), 0.0, "du son sort avant le premier palier");
+
+    app.world_mut().write_message(ScoreStepPlayed {
+        source: StepSource::Die {
+            die_id: DieId(0),
+            value: 6,
+        },
+        action,
+    });
+    let before = left.len();
+    render(&mut app, 1.0, &mut left);
+    left.split_off(before)
+}
+
+/// TASK-105 : **un palier multiplicatif résonne, les autres non.** Le lecteur des paliers est
+/// écouté de bout en bout : le palier publié, le routage choisi, la queue de réverbération qui
+/// suit le coup. Sur le backend nul, ce n'est qu'un nom de bus dans un journal.
+#[test]
+fn test_a_multiplying_step_resonates() {
+    let dry = render_step(ScoreAction::AddChips(100));
+    let wet = render_step(ScoreAction::MultiplyMult(300));
+    let (dry_start, wet_start) = (onset(&dry), onset(&wet));
+    // Les deux paliers sonnent, au même instant et au même niveau : deux actions au plein volume.
+    assert_eq!(wet_start, dry_start);
+    let level = per_mille(
+        peak(&wet[wet_start..][..2_880]),
+        peak(&dry[dry_start..][..2_880]),
+    );
+    assert!(
+        (950..=1_050).contains(&level),
+        "coup à {level} pour mille du tic"
+    );
+
+    // Après le coup, 60 ms, le routage sec se tait ; le routage réverbéré laisse une queue.
+    let tail = |signal: &[f32], start: usize| {
+        let from = start + 2_880 + RATE / 50;
+        dbfs_rms(&signal[from..from + RATE * 3 / 10])
+    };
+    let (dry_tail, wet_tail) = (tail(&dry, dry_start), tail(&wet, wet_start));
+    assert!(
+        dry_tail < -80.0,
+        "le palier additif laisse une queue : {dry_tail:.1} dBFS"
+    );
+    assert!(
+        wet_tail > -60.0,
+        "le palier multiplicatif ne résonne pas : {wet_tail:.1} dBFS"
     );
 }
