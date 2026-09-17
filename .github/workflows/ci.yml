@@ -2371,6 +2371,64 @@ jobs:
           # le score commis, et rien de la file de dépilement.
           forbid  "TASK-99  total anticipé par l'audio"            -n 'ScoringStepQueue|ScoringReport|final_score' "$AUDIO/src"
 
+          # TASK-100 : la ressource qui pilote les quatre couches, et leurs voies
+          # créées une seule fois, au démarrage, hors de toute portée d'état. Les
+          # gardes sont ancrées sur une **ligne de code** (`^[^/]*`) : la doc a le
+          # droit de nommer ce qu'elle interdit.
+          LIB=$AUDIO/src/lib.rs
+          require "TASK-100 ressource musicale, Resource seule"    -U -n '#\[derive\(Resource\)\]\npub struct AdaptiveMusicManager \{$' "$MUSIC"
+          count   "TASK-100 une seule ressource musicale" 1        -n '^pub struct AdaptiveMusicManager \{$' crates/
+          require "TASK-100 six champs, ceux du document source"   -U -n '^pub struct AdaptiveMusicManager \{\n\s+pub layers: \[LayerHandle; 4\],\n\s+pub current_gains: \[f32; 4\],\n\s+pub target_gains: \[f32; 4\],\n\s+pub fade_per_second: f32,\n\s+pub duck: f32,\n\s+pub duck_timer: Timer,\n\}$' "$MUSIC"
+          forbid  "TASK-100 Default écrit pour la ressource"       -n '^impl Default for AdaptiveMusicManager' crates/
+          forbid  "TASK-100 ressource musicale en init_resource"   -n '^[^/]*init_resource::<AdaptiveMusicManager>' crates/
+          count   "TASK-100 la ressource est insérée une fois" 1   -n '^\s+commands\.insert_resource\(AdaptiveMusicManager \{$' "$AUDIO/src"
+
+          # **Aucune entité musicale sous portée d'état**, et l'audio n'écrit
+          # aucune transition : il faut nommer `NextState` pour en écrire une.
+          # Les voies naissent au démarrage, jamais à une entrée d'état, où elles
+          # seraient recréées à chaque passage.
+          forbid  "TASK-100 marqueur de despawn lié à un état"     -n '^[^/]*DespawnOn(Enter|Exit)' "$AUDIO/src"
+          forbid  "TASK-100 transition écrite par l'audio"         -n '^[^/]*NextState' "$AUDIO/src"
+          require "TASK-100 point d'enregistrement de la musique"  -n '^pub fn music_plugin\(app: &mut App\) \{$' "$MUSIC"
+          require "TASK-100 voies créées au démarrage"             -n '^\s+app\.add_systems\(Startup, setup_music_layers\);$' "$MUSIC"
+          count   "TASK-100 un seul enregistrement du chargeur" 1  -n '^[^/]*add_systems\([^;]*setup_music_layers' "$AUDIO/src"
+          require "TASK-100 build branche la musique"              -n '^\s+music::music_plugin\(app\);$' "$LIB"
+          forbid  "TASK-100 système enregistré dans lib.rs"        -n '^[^/]*add_systems' "$LIB"
+
+          # **Charger, pas seulement nommer.** Un seul site appelle le chargement
+          # des couches, avec les quatre fichiers dans l'ordre des index ; les
+          # chemins sont relatifs à la racine des assets. Le backend nul compte
+          # les appels, l'état des couches étant plafonné à quatre cases.
+          count   "TASK-100 un seul site charge les couches" 1     -n '^[^/]*\.load_layer\(' "$AUDIO/src"
+          require "TASK-100 quatre couches, par la constante"      -n '^\s+std::array::from_fn\(\|index\| backend\.load_layer\(&assets, STEM_PATHS\[index\], index as u8\)\);$' "$MUSIC"
+          require "TASK-100 quatre stems, dans l'ordre des index"  -U -n '^pub const STEM_PATHS: \[&str; 4\] = \[\n\s+"audio/stem_base\.ogg",\n\s+"audio/stem_melody\.ogg",\n\s+"audio/stem_tension\.ogg",\n\s+"audio/stem_climax\.ogg",\n\];$' "$MUSIC"
+          forbid  "TASK-100 chemin écrit depuis la racine du dépôt" -n '^[^/]*"assets/' "$AUDIO/src"
+          require "TASK-100 les chargements de couche se comptent" -n '^\s+pub fn layer_loads\(&self\) -> &\[\(String, u8\)\] \{$' "$BACKEND"
+
+          # Le minuteur du ducking : durée exacte, mode `Once`, **né terminé par
+          # un `tick`** (écrire l'horloge ne recalcule rien), puis un `tick` nul
+          # pour que rien ne « vienne de se terminer » au lancement. La méthode
+          # `finished()` du corpus n'existe plus en 0.19.
+          require "TASK-100 durée du ducking, exacte"              -n '^pub const DUCK_DURATION: Duration = Duration::from_millis\(1_200\);$' "$MUSIC"
+          require "TASK-100 minuteur à un coup"                    -n '^\s+let mut timer = Timer::new\(DUCK_DURATION, TimerMode::Once\);$' "$MUSIC"
+          require "TASK-100 minuteur né terminé, par deux tick"    -U -n '^\s+timer\.tick\(DUCK_DURATION\);\n\s+timer\.tick\(Duration::ZERO\);$' "$MUSIC"
+          forbid  "TASK-100 horloge écrite au lieu du tick"        -n '^[^/]*set_elapsed' "$MUSIC"
+          forbid  "TASK-100 méthode disparue du minuteur"          -n '^[^/]*\.finished\(\)' "$AUDIO/src"
+          require "TASK-100 vitesse de fondu, sous son nom"        -n '^pub const DEFAULT_FADE_PER_SECOND: f32 = 2\.0;$' "$MUSIC"
+          forbid  "TASK-100 gain poussé par ce ticket"             -n '^[^/]*\.set_layer_gain\(' "$MUSIC"
+
+          # `AssetPlugin` est exigé des trois constructeurs, et `build` le dit :
+          # en 0.19 une ressource manquante fait paniquer le système, sous un
+          # message qui ne nomme ni le système ni le paramètre.
+          require "TASK-100 build exige l'AssetPlugin"             -n '^\s+app\.world\(\)\.contains_resource::<AssetServer>\(\),$' "$LIB"
+
+          # Le backend nul ne crée aucune entité : la survie des voies s'écoute
+          # sur le backend réel, dont les tests passent par le chargeur du jeu.
+          require "TASK-100 la survie s'écoute sur le son rendu"   -n '^fn test_music_survives_the_state_cycle\(\) \{$' "$AUDIO/tests/real_backend.rs"
+          require "TASK-100 chaque couche s'écoute seule"          -n '^fn test_each_layer_handle_drives_its_own_stem\(\) \{$' "$AUDIO/tests/real_backend.rs"
+          forbid  "TASK-100 un test du son charge ses couches"     -n '^[^/]*\.load_layer\(' "$AUDIO/tests/real_backend.rs"
+          count   "TASK-100 fixtures aux noms de production" 4     --files "$AUDIO/tests/assets/audio" -g 'stem_{base,melody,tension,climax}.ogg'
+
           exit $status
 
       # ---- Passe rand 0.10 et Default (15 septembre 2026) ----

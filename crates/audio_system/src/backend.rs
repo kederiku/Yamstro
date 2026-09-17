@@ -149,6 +149,7 @@ pub struct NullBackend {
     played: Vec<PlayedSound>,
     loaded: Vec<String>,
     layers: LayerSlots<String>,
+    layer_loads: Vec<(String, u8)>,
     layer_gains: [f32; LAYER_COUNT],
     bus_gains: [f32; Bus::ALL.len()],
     bus_gain_writes: Vec<(Bus, f32)>,
@@ -160,6 +161,7 @@ impl Default for NullBackend {
             played: Vec::new(),
             loaded: Vec::new(),
             layers: LayerSlots::default(),
+            layer_loads: Vec::new(),
             layer_gains: [0.0; LAYER_COUNT],
             bus_gains: [1.0; Bus::ALL.len()],
             bus_gain_writes: Vec::new(),
@@ -183,6 +185,13 @@ impl NullBackend {
         (self.layers.slots.iter().enumerate())
             .filter_map(|(index, path)| Some((path.clone()?, index as u8)))
             .collect()
+    }
+
+    /// Un enregistrement par appel à `load_layer`, `(chemin, index)`, dans l'ordre des appels,
+    /// retenu ou non. [`NullBackend::layers`] est un état plafonné à quatre cases : lui seul ne
+    /// distinguerait pas quatre appels de huit.
+    pub fn layer_loads(&self) -> &[(String, u8)] {
+        &self.layer_loads
     }
 
     /// Vrai dès que les quatre couches sont enregistrées : elles partent ensemble.
@@ -210,11 +219,13 @@ impl NullBackend {
         &self.bus_gain_writes
     }
 
-    /// Vide les deux journaux, sons joués et poussées de bus, entre deux phases d'un même test.
-    /// Le catalogue, les couches et les gains sont un état, pas un journal : ils restent.
+    /// Vide les trois journaux, sons joués, poussées de bus et chargements de couche, entre deux
+    /// phases d'un même test. Le catalogue, les couches et les gains sont un état, pas un
+    /// journal : ils restent.
     pub fn clear(&mut self) {
         self.played.clear();
         self.bus_gain_writes.clear();
+        self.layer_loads.clear();
     }
 }
 
@@ -235,6 +246,7 @@ impl AudioBackend for NullBackend {
     }
 
     fn load_layer(&mut self, _assets: &AssetServer, path: &str, index: u8) -> LayerHandle {
+        self.layer_loads.push((path.to_string(), index));
         let handle = self.layers.register(index, path.to_string());
         self.layers.started |= self.layers.all_registered();
         handle

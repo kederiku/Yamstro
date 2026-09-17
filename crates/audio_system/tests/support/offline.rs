@@ -62,8 +62,15 @@ fn start_stream(
 }
 
 /// Une application sans fenêtre ni périphérique, avec le **backend réel** et les fichiers de
-/// `tests/assets`.
+/// `tests/assets`. Les quatre couches y portent leurs noms de production : le jeu les charge
+/// lui-même au démarrage, aucun test ne le fait à sa place.
 pub fn offline_app() -> App {
+    offline_app_with(|_| {})
+}
+
+/// La même, avec ce que `extend` y monte avant la clôture des plugins : après elle, plus aucun
+/// plugin ne s'ajoute.
+pub fn offline_app_with(extend: impl FnOnce(&mut App)) -> App {
     let mut app = App::new();
     app.add_plugins((
         MinimalPlugins,
@@ -77,6 +84,7 @@ pub fn offline_app() -> App {
     .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
         16,
     )));
+    extend(&mut app);
     app.finish();
     app.cleanup();
     app

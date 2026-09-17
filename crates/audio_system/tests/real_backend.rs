@@ -2,17 +2,23 @@
 //!
 //! Le backend nul vérifie des décisions ; il est aveugle au pire défaut de l'étape, qui est
 //! **vert et muet** : des voies vides, des gains au carré, une réverbération qui mange le son
-//! sec. Ces trois tests écoutent le signal.
+//! sec, une voie détruite par un changement d'état. Ces tests écoutent le signal.
+//!
+//! Les quatre couches sont chargées **par le jeu lui-même**, au démarrage (TASK-100) : aucun test
+//! n'appelle `load_layer`. Les fichiers de `tests/assets/audio` portent les noms de production.
 
 #[path = "support/offline.rs"]
 mod offline;
 
 use audio_system::{
-    AudioBackendHandle, AudioBusVolumes, Bus,
+    AdaptiveMusicManager, AudioBackendHandle, AudioBusVolumes, Bus, LayerHandle,
     bus::{layer_gain, local_gain, music_gain, sfx_volume},
+    music::STEM_PATHS,
 };
-use bevy::prelude::*;
-use offline::{RATE, offline_app, render, wait_loaded};
+use bevy::{prelude::*, state::app::StatesPlugin};
+use bevy_seedling::prelude::SamplePlayer;
+use game_state::states::{AppState, RunPhase};
+use offline::{RATE, offline_app, offline_app_with, render, step, wait_loaded};
 
 const LAYER_FRAMES: usize = 48_000;
 const IMPULSE_SPACING: usize = 480;
@@ -23,7 +29,6 @@ const UNITY: AudioBusVolumes = AudioBusVolumes {
     music: 1.0,
     sfx: 1.0,
 };
-const LAYERS: [&str; 4] = ["layer_0.ogg", "layer_1.ogg", "layer_2.ogg", "layer_3.ogg"];
 
 fn with_backend<R>(
     app: &mut App,
@@ -32,6 +37,21 @@ fn with_backend<R>(
     let server = app.world().resource::<AssetServer>().clone();
     let mut handle = app.world_mut().resource_mut::<AudioBackendHandle>();
     act(&mut handle, &server)
+}
+
+/// Une image, celle du démarrage : le jeu y charge ses quatre couches. Leurs gains, nés à zéro,
+/// sont posés **avant le départ**, qui attend la fin des chargements : le premier échantillon
+/// sorti est donc celui de la trame 0.
+fn layers_with_gains(app: &mut App, gains: [f32; 4], left: &mut Vec<f32>) -> [LayerHandle; 4] {
+    step(app, left);
+    let layers = app.world().resource::<AdaptiveMusicManager>().layers;
+    with_backend(app, |handle, _| {
+        for (layer, gain) in layers.into_iter().zip(gains) {
+            handle.0.set_layer_gain(layer, gain);
+        }
+    });
+    wait_loaded(app, &STEM_PATHS, left);
+    layers
 }
 
 fn peak(signal: &[f32]) -> f32 {
@@ -95,15 +115,7 @@ fn render_hit(bus: Bus, volume: f32, pitch: f32, volumes: AudioBusVolumes) -> Ve
 fn test_four_layers_start_in_phase_and_stay() {
     let mut app = offline_app();
     let mut left = Vec::new();
-    let layers = with_backend(&mut app, |handle, server| {
-        let load = |(index, path): (usize, &&str)| {
-            let layer = handle.0.load_layer(server, path, index as u8);
-            handle.0.set_layer_gain(layer, 1.0);
-            layer
-        };
-        LAYERS.iter().enumerate().map(load).collect::<Vec<_>>()
-    });
-    wait_loaded(&mut app, &LAYERS, &mut left);
+    let layers = layers_with_gains(&mut app, [1.0; 4], &mut left);
     render(&mut app, 3.5, &mut left);
 
     // Rien ne fuit avant le départ : le premier échantillon non nul est l'impulsion de la
@@ -317,15 +329,7 @@ fn test_effective_volume_matches_the_formulas() {
         let mut app = offline_app();
         let mut left = Vec::new();
         app.world_mut().insert_resource(volumes);
-        with_backend(&mut app, |handle, server| {
-            for (index, path) in LAYERS.iter().enumerate() {
-                let layer = handle.0.load_layer(server, path, index as u8);
-                handle
-                    .0
-                    .set_layer_gain(layer, if index == 0 { gain } else { 0.0 });
-            }
-        });
-        wait_loaded(&mut app, &LAYERS, &mut left);
+        layers_with_gains(&mut app, [gain, 0.0, 0.0, 0.0], &mut left);
         render(&mut app, 0.5, &mut left);
         left[left
             .iter()
@@ -340,4 +344,132 @@ fn test_effective_volume_matches_the_formulas() {
         (61..=64).contains(&layer),
         "couche entendue à {layer} pour mille, 62,5 attendus"
     );
+}
+
+/// TASK-100 : **`layers[i]` fait sonner le fichier d'index `i`**, et lui seul. Une permutation
+/// ne casse aucune compilation et la somme des quatre couches y est aveugle : il faut l'oreille.
+/// Chaque couche est donc écoutée seule ; son impulsion est à `i` × 480 trames de son départ.
+#[test]
+fn test_each_layer_handle_drives_its_own_stem() {
+    for index in 0..4 {
+        let mut gains = [0.0; 4];
+        gains[index] = 1.0;
+        let mut app = offline_app();
+        let mut left = Vec::new();
+        layers_with_gains(&mut app, gains, &mut left);
+        render(&mut app, 0.5, &mut left);
+
+        let start = onset(&left);
+        let impulse = left
+            .iter()
+            .position(|v| *v > 0.3)
+            .expect("la couche ne porte pas son impulsion");
+        let heard = (impulse - start + IMPULSE_SPACING / 2) / IMPULSE_SPACING;
+        assert_eq!(
+            heard, index,
+            "`layers[{index}]` fait sonner le stem d'index {heard}"
+        );
+    }
+}
+
+/// Les identifiants des lecteurs du monde, triés : les quatre voies, et elles seules.
+fn players(app: &mut App) -> Vec<Entity> {
+    let mut found: Vec<Entity> = app
+        .world_mut()
+        .query_filtered::<Entity, With<SamplePlayer>>()
+        .iter(app.world())
+        .collect();
+    found.sort();
+    found
+}
+
+fn go_app(app: &mut App, state: AppState, left: &mut Vec<f32>) {
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(state);
+    render(app, 0.2, left);
+    assert_eq!(*app.world().resource::<State<AppState>>().get(), state);
+}
+
+/// `reflexive` pose un `set` nu, qui autorise la transition d'un état vers lui-même ; sinon
+/// c'est la forme du jeu, `set_if_neq`, en appel qualifié.
+fn go_phase(app: &mut App, phase: RunPhase, reflexive: bool, left: &mut Vec<f32>) {
+    {
+        let mut next = app.world_mut().resource_mut::<NextState<RunPhase>>();
+        if reflexive {
+            next.set(phase);
+        } else {
+            NextState::set_if_neq(&mut next, phase);
+        }
+    }
+    render(app, 0.2, left);
+    assert_eq!(*app.world().resource::<State<RunPhase>>().get(), phase);
+}
+
+/// TASK-100 : **la musique survit à tous les changements d'état**, y compris la sortie de la
+/// run et une transition d'un état vers lui-même. Le backend nul ne crée aucune entité : seul le
+/// backend réel a des voies qu'un marqueur de despawn lié à un état pourrait détruire, et une
+/// voie détruite ne renaît pas, les couches ne partent qu'une fois. Le test compare les
+/// **identifiants** des quatre lecteurs, pas leur nombre, puis écoute : chaque impulsion de
+/// chaque couche est à sa trame, du premier bouclage au dernier.
+#[test]
+fn test_music_survives_the_state_cycle() {
+    let mut app = offline_app_with(|app| {
+        app.add_plugins(StatesPlugin);
+        app.init_state::<AppState>().add_sub_state::<RunPhase>();
+    });
+    let mut left = Vec::new();
+    layers_with_gains(&mut app, [1.0; 4], &mut left);
+    render(&mut app, 0.5, &mut left);
+    let voices = players(&mut app);
+    assert_eq!(voices.len(), 4, "les quatre voies ne sont pas parties");
+
+    // Un témoin rattaché à la phase de lancer : s'il tombe, les transitions ont bien eu lieu et
+    // le piège est réel.
+    go_app(&mut app, AppState::CupSelect, &mut left);
+    go_app(&mut app, AppState::InRun, &mut left);
+    go_phase(&mut app, RunPhase::Roll, false, &mut left);
+    let witness = app.world_mut().spawn(DespawnOnExit(RunPhase::Roll)).id();
+    go_phase(&mut app, RunPhase::Roll, true, &mut left);
+    assert!(
+        app.world().get_entity(witness).is_err(),
+        "la transition réflexive n'a pas eu lieu : le test ne prouve rien"
+    );
+    assert_eq!(players(&mut app), voices, "transition réflexive");
+
+    // Les transitions déclarées de la run : une main perdue et la suivante, une blind battue et
+    // sa boutique, puis la défaite, qui sort de la run, et le retour au menu.
+    go_phase(&mut app, RunPhase::Scoring, false, &mut left);
+    go_phase(&mut app, RunPhase::RoundEnd, false, &mut left);
+    go_phase(&mut app, RunPhase::Roll, false, &mut left);
+    assert_eq!(players(&mut app), voices, "retour au lancer");
+    go_phase(&mut app, RunPhase::Scoring, false, &mut left);
+    go_phase(&mut app, RunPhase::RoundEnd, false, &mut left);
+    go_phase(&mut app, RunPhase::Shop, false, &mut left);
+    go_phase(&mut app, RunPhase::BlindSelect, false, &mut left);
+    go_phase(&mut app, RunPhase::Roll, false, &mut left);
+    go_phase(&mut app, RunPhase::Scoring, false, &mut left);
+    go_phase(&mut app, RunPhase::RoundEnd, false, &mut left);
+    go_app(&mut app, AppState::GameOver, &mut left);
+    go_app(&mut app, AppState::MainMenu, &mut left);
+    render(&mut app, 1.0, &mut left);
+    assert_eq!(players(&mut app), voices, "sortie de la run");
+
+    // Le son : quatre impulsions par bouclage, chacune à sa trame, sans un trou.
+    let origin = left
+        .iter()
+        .position(|v| *v != 0.0)
+        .expect("aucune couche ne sort");
+    let turns = (left.len() - origin - 4 * IMPULSE_SPACING) / LAYER_FRAMES;
+    assert!(turns >= 4, "rendu trop court : {turns} bouclages");
+    for turn in 0..turns {
+        for layer in 0..4 {
+            let at = origin + turn * LAYER_FRAMES + layer * IMPULSE_SPACING;
+            assert!(
+                left[at] > 0.3,
+                "couche {layer}, bouclage {turn} : la voie s'est tue ({})",
+                left[at]
+            );
+        }
+    }
 }

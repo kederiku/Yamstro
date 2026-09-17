@@ -2,14 +2,17 @@
 //! décisions, jamais du son. Ce fichier est celui que le document de l'Étape 8
 //! nomme ; chaque ticket de l'étape y ajoute les siens.
 
-use std::{collections::BTreeSet, path::PathBuf, process::Command};
+use std::{collections::BTreeSet, path::PathBuf, process::Command, time::Duration};
 
 use audio_system::{
-    AudioBackendHandle, AudioBusVolumes, AudioClip, BackendKind, Bus, GameAudioPlugin, NullBackend,
-    PlayedSound,
+    AdaptiveMusicManager, AudioBackendHandle, AudioBusVolumes, AudioClip, BackendKind, Bus,
+    GameAudioPlugin, NullBackend, PlayedSound,
     backend::resolve_kind,
     bus::{layer_gain, local_gain, music_gain, sfx_volume},
-    music::{CLIMAX_THRESHOLD_PERCENT, blind_in_play, target_gains},
+    music::{
+        CLIMAX_THRESHOLD_PERCENT, DEFAULT_FADE_PER_SECOND, DUCK_DURATION, STEM_PATHS,
+        blind_in_play, target_gains,
+    },
 };
 use bevy::{prelude::*, state::app::StatesPlugin};
 use core_engine::{
@@ -41,13 +44,28 @@ fn arbre(arguments: &[&str]) -> String {
 
 #[test]
 fn test_audio_plugin_boots_headless() {
-    // `MinimalPlugins` n'inclut pas `StatesPlugin` : il s'ajoute à la main,
-    // comme dans tous les tests sans fenêtre depuis l'Étape 3.
+    // `MinimalPlugins` n'inclut ni `StatesPlugin` ni `AssetPlugin` : ils s'ajoutent à la main,
+    // et le second **avant** le plugin audio, qui l'exige (TASK-100).
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, StatesPlugin, GameAudioPlugin::headless()));
+    app.add_plugins((
+        MinimalPlugins,
+        StatesPlugin,
+        AssetPlugin::default(),
+        GameAudioPlugin::headless(),
+    ));
     for _ in 0..3 {
         app.update();
     }
+}
+
+/// TASK-100 : sans `AssetPlugin`, le chargement des couches ne serait pas écarté en silence, il
+/// paniquerait à la première image sous un message qui ne nomme ni le système ni le paramètre.
+/// `build` le dit d'entrée, lisiblement, et pour les trois constructeurs.
+#[test]
+#[should_panic(expected = "`GameAudioPlugin` exige un `AssetPlugin` déjà monté")]
+fn test_audio_plugin_demands_the_asset_plugin() {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, StatesPlugin, GameAudioPlugin::headless()));
 }
 
 #[test]
@@ -777,4 +795,221 @@ fn test_blind_in_play_filters_stale_contexts() {
         assert!(rendu.is_some_and(|b| std::ptr::eq(b, &battu)), "{phase:?}");
     }
     assert!(blind_in_play(EN_MANCHE.0, EN_MANCHE.1, None).is_none());
+}
+
+// ------------------------------------------------------------------ TASK-100
+
+/// Les quatre stems de la branche retenue, **en littéraux** : la constante de la crate est ce
+/// qui est sous test, elle ne sert pas d'attendu.
+fn stems() -> Vec<(String, u8)> {
+    [
+        ("audio/stem_base.ogg", 0),
+        ("audio/stem_melody.ogg", 1),
+        ("audio/stem_tension.ogg", 2),
+        ("audio/stem_climax.ogg", 3),
+    ]
+    .into_iter()
+    .map(|(chemin, index)| (chemin.to_string(), index))
+    .collect()
+}
+
+const QUATRE_VOIES: &str = "[LayerHandle(0), LayerHandle(1), LayerHandle(2), LayerHandle(3)]";
+
+fn manager(app: &App) -> &AdaptiveMusicManager {
+    app.world().resource::<AdaptiveMusicManager>()
+}
+
+fn entites(app: &mut App) -> Vec<Entity> {
+    let mut toutes: Vec<Entity> = app
+        .world_mut()
+        .query::<Entity>()
+        .iter(app.world())
+        .collect();
+    toutes.sort();
+    toutes
+}
+
+#[test]
+fn test_four_stems_are_loaded_and_started() {
+    let mut app = headless_app();
+    app.update();
+
+    // Quatre appels, pas un de plus, chacun liant **un fichier** à son index : nommer les voies
+    // sans les charger donnerait un jeu muet sous des tests verts.
+    let nul = journal(&app);
+    assert_eq!(nul.layer_loads(), stems());
+    assert_eq!(nul.layers(), stems());
+    assert!(nul.layers_started(), "les quatre voies ne sont pas parties");
+    assert_eq!(nul.ignored_layer_loads(), 0);
+
+    // `layers[i]` est le handle rendu par le chargement d'index `i`.
+    assert_eq!(format!("{:?}", manager(&app).layers), QUATRE_VOIES);
+
+    // Les chargements sont un journal, `clear` le vide ; les couches sont un état, elles restent.
+    let mut handle = app.world_mut().resource_mut::<AudioBackendHandle>();
+    handle.null_mut().expect("backend nul").clear();
+    assert!(journal(&app).layer_loads().is_empty());
+    assert_eq!(journal(&app).layers(), stems());
+}
+
+#[test]
+fn test_layers_created_once() {
+    let mut app = headless_app();
+    for _ in 0..2 {
+        app.update();
+    }
+    assert_eq!(journal(&app).layer_loads().len(), 4);
+    let voies = manager(&app).layers;
+
+    for _ in 0..8 {
+        app.update();
+    }
+    let nul = journal(&app);
+    assert_eq!(
+        nul.layer_loads(),
+        stems(),
+        "des voies ont été recréées après le démarrage"
+    );
+    assert_eq!(nul.ignored_layer_loads(), 0);
+    assert_eq!(manager(&app).layers, voies);
+}
+
+#[test]
+fn test_layer_indices_are_stable() {
+    let mut app = headless_app();
+    app.update();
+    assert_eq!(format!("{:?}", manager(&app).layers), QUATRE_VOIES);
+
+    // L'ordre des fichiers est celui des index de `target_gains` : Base, Mélodie, Tension,
+    // Climax. Une permutation ne casse aucune compilation, il faut l'oreille pour la trouver.
+    assert_eq!(
+        STEM_PATHS,
+        [
+            "audio/stem_base.ogg",
+            "audio/stem_melody.ogg",
+            "audio/stem_tension.ogg",
+            "audio/stem_climax.ogg",
+        ]
+    );
+    let boss = manche(BlindType::Boss, 1_000, 0, 3);
+    assert_eq!(
+        target_gains(EN_MANCHE.0, EN_MANCHE.1, Some(&boss)),
+        [1.0, 1.0, 1.0, 0.0],
+        "la Tension est l'index 2"
+    );
+    let gagnee = manche(BlindType::Small, 1_000, 1_000, 3);
+    assert_eq!(
+        target_gains(EN_MANCHE.0, EN_MANCHE.1, Some(&gagnee)),
+        [1.0, 1.0, 0.0, 1.0],
+        "le Climax est l'index 3"
+    );
+}
+
+fn vers_phase(app: &mut App, phase: RunPhase, reflexive: bool) {
+    {
+        let mut next = app.world_mut().resource_mut::<NextState<RunPhase>>();
+        if reflexive {
+            next.set(phase);
+        } else {
+            // Appel qualifié : sur un `ResMut`, la méthode homonyme de la détection de
+            // changement capture l'appel et ne compile pas.
+            NextState::set_if_neq(&mut next, phase);
+        }
+    }
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(*app.world().resource::<State<RunPhase>>().get(), phase);
+}
+
+/// Sur le backend nul, qui ne crée aucune entité : ce test garde la ressource, le journal et
+/// l'ensemble des entités du monde (en 0.19 une ressource en est une). Les voies du backend
+/// réel, elles, sont écoutées par `test_music_survives_the_state_cycle`.
+#[test]
+fn test_music_survives_round_end_to_roll() {
+    let mut app = headless_app();
+    app.init_state::<AppState>().add_sub_state::<RunPhase>();
+    app.update();
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::InRun);
+    app.update();
+    vers_phase(&mut app, RunPhase::Roll, false);
+    vers_phase(&mut app, RunPhase::Scoring, false);
+    vers_phase(&mut app, RunPhase::RoundEnd, false);
+
+    let voies = manager(&app).layers;
+    let avant = entites(&mut app);
+
+    // La main suivante de la même blind, sous la forme que le jeu emploie.
+    vers_phase(&mut app, RunPhase::Roll, false);
+    assert_eq!(manager(&app).layers, voies);
+    assert_eq!(
+        entites(&mut app),
+        avant,
+        "les entités ont changé : compare les identifiants, pas le nombre"
+    );
+    assert_eq!(journal(&app).layer_loads(), stems());
+    assert_eq!(journal(&app).ignored_layer_loads(), 0);
+
+    // Une transition réellement réflexive. Le témoin tombe : elle a bien eu lieu, et le piège
+    // est réel. La musique, elle, ne bouge pas.
+    let temoin = app.world_mut().spawn(DespawnOnExit(RunPhase::Roll)).id();
+    vers_phase(&mut app, RunPhase::Roll, true);
+    assert!(
+        app.world().get_entity(temoin).is_err(),
+        "la transition réflexive n'a pas eu lieu"
+    );
+    assert_eq!(manager(&app).layers, voies);
+    assert_eq!(entites(&mut app), avant);
+    assert_eq!(journal(&app).layer_loads(), stems());
+    assert_eq!(journal(&app).ignored_layer_loads(), 0);
+}
+
+#[test]
+fn test_duck_timer_is_not_zero_duration() {
+    let mut app = headless_app();
+    app.update();
+    let manager = manager(&app);
+
+    assert_eq!(DUCK_DURATION, Duration::from_millis(1_200));
+    assert_eq!(manager.duck_timer.duration(), Duration::from_millis(1_200));
+    assert_eq!(manager.duck_timer.mode(), TimerMode::Once);
+    // Né terminé, et rien ne vient de se terminer : aucun ducking au lancement, et la garde de
+    // réentrance de la fanfare laisse passer la première.
+    assert!(manager.duck_timer.is_finished());
+    assert!(!manager.duck_timer.just_finished());
+    assert_eq!(manager.duck, 1.0);
+
+    // La bande-son part du silence, à la vitesse de fondu de l'étape.
+    assert_eq!(manager.current_gains, [0.0; 4]);
+    assert_eq!(manager.target_gains, [0.0; 4]);
+    assert_eq!(DEFAULT_FADE_PER_SECOND, 2.0);
+    assert_eq!(manager.fade_per_second, 2.0);
+
+    // L'usage qu'en fera la fanfare : réarmé, il dure sa durée, ni plus ni moins.
+    let mut enveloppe = manager.duck_timer.clone();
+    enveloppe.reset();
+    assert!(!enveloppe.is_finished());
+    enveloppe.tick(Duration::from_millis(1_100));
+    assert!(!enveloppe.is_finished(), "le ducking ne tient pas 1,1 s");
+    enveloppe.tick(Duration::from_millis(150));
+    assert!(enveloppe.is_finished(), "le ducking dépasse 1,25 s");
+}
+
+#[test]
+fn test_manager_is_resource_only() {
+    // Jamais `init_resource` : la ressource n'existe pas avant le démarrage, c'est le système
+    // qui charge les couches qui l'insère.
+    let mut app = headless_app();
+    assert!(!app.world().contains_resource::<AdaptiveMusicManager>());
+    app.update();
+    assert!(app.world().contains_resource::<AdaptiveMusicManager>());
+
+    let source = lire("crates/audio_system/src/music.rs");
+    assert!(
+        source.contains("#[derive(Resource)]\npub struct AdaptiveMusicManager {"),
+        "la ressource ne dérive pas `Resource` seule"
+    );
+    assert!(!source.contains("impl Default for AdaptiveMusicManager"));
 }

@@ -5,6 +5,9 @@ de périodes et une impulsion à la trame k * 480 : décalées de 10 ms, les qua
 séparent dans la somme et donnent la phase de chaque couche. `hit.ogg` est un coup de bruit de
 120 ms à fin sèche, pour lire volume, hauteur et queue de réverbération.
 
+Les quatre couches portent **les noms de production**, sous `audio/` : c'est le jeu lui-même qui
+les charge au démarrage, et les tests écoutent donc son chargeur, pas un chargement à eux.
+
 Dépend de `soundfile` pour l'encodage Vorbis : `pip install --target <dir> soundfile`, puis
 `PYTHONPATH=<dir> python3 gen_fixtures.py`. Les fichiers sont commis : personne n'a besoin de
 relancer ce script pour faire tourner les tests.
@@ -19,6 +22,7 @@ import soundfile as sf
 RATE = 48_000
 LAYER_FRAMES = RATE
 NOTES_HZ = [110.0, 220.0, 330.0, 440.0]
+STEMS = ["base", "melody", "tension", "climax"]
 NOTE_AMPLITUDE = 0.02
 IMPULSE_AMPLITUDE = 0.6
 IMPULSE_SPACING = 480
@@ -43,6 +47,7 @@ def hit():
 
 
 here = os.path.dirname(os.path.abspath(__file__))
-for index in range(4):
-    write_ogg(os.path.join(here, f"layer_{index}.ogg"), layer(index))
+os.makedirs(os.path.join(here, "audio"), exist_ok=True)
+for index, stem in enumerate(STEMS):
+    write_ogg(os.path.join(here, "audio", f"stem_{stem}.ogg"), layer(index))
 write_ogg(os.path.join(here, "hit.ogg"), hit())

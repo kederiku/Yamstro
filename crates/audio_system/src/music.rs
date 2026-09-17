@@ -29,11 +29,119 @@
 //! let gains = target_gains(app, phase, blind_in_play(app, phase, blind));
 //! # assert_eq!(gains, [0.5, 0.5, 0.0, 0.0]);
 //! ```
+//!
+//! # Les quatre voies : créées une fois, rattachées à rien
+//!
+//! [`AdaptiveMusicManager`] est une ressource, et les quatre voies naissent au démarrage, hors de
+//! toute portée d'état. **Aucune entité musicale ne porte de marqueur de despawn lié à un état**
+//! (`DespawnOnEnter`, `DespawnOnExit`, ou un marqueur maison équivalent), ni ici ni dans ce que
+//! la façade crée pour une voie : la voie s'arrêterait au premier changement
+//! de phase, au milieu d'une blind, sans une erreur ni une ligne de log. Le marqueur le plus
+//! tentant est celui des entités de run, rattachées à la sortie de la run : la musique, elle,
+//! joue aussi au menu, et ne se rattache à rien. Une voie détruite ne renaît pas : les couches
+//! ne partent qu'une fois.
+//!
+//! L'audio est un pur lecteur d'état : cette crate n'écrit aucune transition.
+//!
+//! Le retour de la fin de manche au lancer n'est jamais une transition d'un état vers lui-même,
+//! contrairement à ce qu'on lit parfois ; le piège des transitions réflexives est réel, mais il
+//! n'est qu'un cas du précédent. `tests/real_backend.rs` fait le tour complet des états sur le
+//! son rendu, sortie de run et transition réflexive comprises.
+//!
+//! # [`music_plugin`], le point d'enregistrement de ce fichier
+//!
+//! `GameAudioPlugin::build` l'appelle, et les systèmes de ce fichier s'y branchent : ceux de
+//! TASK-101 et de TASK-106 s'ajoutent ici, jamais dans `lib.rs`. Un système enregistré nulle
+//! part ne tourne jamais, et rien ne le dit.
 
+use std::time::Duration;
+
+use bevy::prelude::*;
 use core_engine::blinds::{BlindContext, BlindType};
 use game_state::states::{AppState, RunPhase};
 
+use crate::backend::{AudioBackendHandle, LayerHandle};
+
 pub const CLIMAX_THRESHOLD_PERCENT: u128 = 75; // seule occurrence du seuil dans le dépôt
+
+/// Les quatre stems, **dans l'ordre des index** : Base, Mélodie, Tension, Climax. Chemins
+/// relatifs à la racine des assets ; les fichiers sont ceux de TASK-107. Une permutation ne casse
+/// aucune compilation : le mix lèverait la Tension à la place de la Mélodie.
+pub const STEM_PATHS: [&str; 4] = [
+    "audio/stem_base.ogg",
+    "audio/stem_melody.ogg",
+    "audio/stem_tension.ogg",
+    "audio/stem_climax.ogg",
+];
+
+/// Vitesse du fondu, par seconde : une couche est à 95 % de sa cible au bout de 1,5 s, la seule
+/// grandeur que l'étape mesure. Aucun test ne dépend de sa valeur.
+pub const DEFAULT_FADE_PER_SECOND: f32 = 2.0;
+
+/// Durée du ducking de fanfare : 1,2 s. En millisecondes entières, donc exacte.
+pub const DUCK_DURATION: Duration = Duration::from_millis(1_200);
+
+/// L'état musical. `Resource` seule : en 0.19 elle est un sous-trait de `Component`, et un type
+/// ne dérive pas les deux.
+///
+/// **Ni `Default`, ni `init_resource`** : les quatre [`LayerHandle`] viennent du backend, et un
+/// minuteur par défaut aurait une durée nulle, donc un ducking qui ne dure rien. Insérée par
+/// `setup_music_layers`, et par personne d'autre.
+///
+/// `target_gains` est le champ, [`target_gains`] la fonction libre : le champ mémorise ce que la
+/// fonction a rendu à l'image courante. `layers[i]`, `current_gains[i]` et `target_gains[i]`
+/// désignent toujours la même couche, celle de `STEM_PATHS[i]`.
+#[derive(Resource)]
+pub struct AdaptiveMusicManager {
+    pub layers: [LayerHandle; 4],
+    pub current_gains: [f32; 4],
+    pub target_gains: [f32; 4],
+    pub fade_per_second: f32,
+    pub duck: f32,
+    pub duck_timer: Timer,
+}
+
+/// Le minuteur du ducking, **né terminé** : sans cela les 1,2 premières secondes de chaque
+/// lancement sortiraient atténuées, et la garde de réentrance de la fanfare (TASK-106) avalerait
+/// la première de la partie.
+///
+/// Terminé **par un `tick`** : l'état « terminé » n'est recalculé que là, écrire l'horloge ne
+/// suffit pas. Le second `tick`, de durée nulle, efface le « vient de se terminer » du premier :
+/// au lancement, aucun ducking ne vient de finir.
+fn finished_duck_timer() -> Timer {
+    let mut timer = Timer::new(DUCK_DURATION, TimerMode::Once);
+    timer.tick(DUCK_DURATION);
+    timer.tick(Duration::ZERO);
+    timer
+}
+
+/// Charge **et** démarre les quatre voies, une fois pour la durée du processus, puis insère la
+/// ressource. C'est ce système, et lui seul, qui lie un fichier à une voie : sans ces quatre
+/// appels les gains se pousseraient sur du silence, et le jeu serait muet sous des tests verts.
+///
+/// Les gains naissent à zéro : la bande-son monte en fondu depuis le silence (TASK-101).
+fn setup_music_layers(
+    assets: Res<AssetServer>,
+    mut backend: ResMut<AudioBackendHandle>,
+    mut commands: Commands,
+) {
+    let backend = &mut backend.0;
+    let layers =
+        std::array::from_fn(|index| backend.load_layer(&assets, STEM_PATHS[index], index as u8));
+    commands.insert_resource(AdaptiveMusicManager {
+        layers,
+        current_gains: [0.0; 4],
+        target_gains: [0.0; 4],
+        fade_per_second: DEFAULT_FADE_PER_SECOND,
+        duck: 1.0,
+        duck_timer: finished_duck_timer(),
+    });
+}
+
+/// Enregistre les systèmes de ce fichier. Appelée par `GameAudioPlugin::build`.
+pub fn music_plugin(app: &mut App) {
+    app.add_systems(Startup, setup_music_layers);
+}
 
 /// Gains cibles des 4 couches. Fonction pure : mêmes entrées, mêmes sorties.
 pub fn target_gains(
