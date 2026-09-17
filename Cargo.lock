@@ -370,6 +370,7 @@ dependencies = [
  "game_state",
  "log",
  "rand",
+ "serde_json",
  "ui_and_juice",
 ]
 

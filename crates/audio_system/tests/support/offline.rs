@@ -67,12 +67,18 @@ fn start_stream(
 /// portent leurs noms de production : le jeu les charge lui-même au démarrage, aucun test ne le
 /// fait à sa place.
 pub fn offline_app() -> App {
+    offline_app_at("tests/assets")
+}
+
+/// La même, sur une autre racine d'assets : une racine sans dossier `audio` est le terrain des
+/// fichiers manquants.
+pub fn offline_app_at(root: &str) -> App {
     let mut app = App::new();
     app.add_plugins((
         MinimalPlugins,
         StatesPlugin,
         AssetPlugin {
-            file_path: "tests/assets".to_string(),
+            file_path: root.to_string(),
             ..Default::default()
         },
     ));

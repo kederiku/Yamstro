@@ -22,6 +22,7 @@ pub use backend::{
 };
 pub use bus::AudioBusVolumes;
 pub use music::AdaptiveMusicManager;
+pub use sfx::SoundEffectBank;
 
 /// Monte l'audio du jeu.
 ///
@@ -91,5 +92,6 @@ impl Plugin for GameAudioPlugin {
         backend::install(app, self.kind);
         bus::bus_plugin(app);
         music::music_plugin(app);
+        sfx::sfx_plugin(app);
     }
 }

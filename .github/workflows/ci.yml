@@ -425,7 +425,15 @@ jobs:
           # TASK-44. Une garde sur le mot « audio » serait déjà rouge
           # aujourd'hui : le titre de section de `lib.rs` et le commentaire de
           # `Cargo.toml` documentent tous deux cette absence.
-          forbid  "critère 4  ressource de son déclarée ou employée" -n '(struct|enum|impl|::<|Res<|ResMut<|insert_resource\()\s*(AudioFeedbackConfig|ScoringAudioPool|SoundEffectBank)' crates/
+          # **Un chemin qualifié ne passe pas** (contre-épreuve de TASK-102) : le
+          # motif admet un préfixe de modules entre l'acte et le nom, sans quoi
+          # `Res<audio_system::SoundEffectBank>` échappait à la garde.
+          forbid  "critère 4  ressource de son déclarée ou employée" -n '(struct|enum|impl|::<|Res<|ResMut<|insert_resource\()\s*([A-Za-z_]+::)*(AudioFeedbackConfig|ScoringAudioPool)' crates/
+          # **Scindée à TASK-102.** Les deux premiers noms restent proscrits
+          # partout. Le troisième est la banque unique de l'Étape 8 : elle existe
+          # désormais, dans la crate audio et nulle part ailleurs, ni déclarée,
+          # ni employée, ni importée.
+          forbid  "critère 4  banque de sons hors de la crate audio" -n '(struct|enum|impl|::<|Res<|ResMut<|insert_resource\()\s*([A-Za-z_]+::)*SoundEffectBank|^\s*(pub )?use [^;]*SoundEffectBank' crates/ -g '!**/audio_system/**'
           # **Scindée à TASK-97.** Les quatre premiers noms sont ceux du lecteur de
           # Bevy : proscrits partout, façade comprise, la branche A ne l'emploie
           # pas. Le cinquième est aussi le nom des réglages de lecture du backend
@@ -2468,6 +2476,57 @@ jobs:
           # gains par la ressource : un gain posé par la façade serait écrasé.
           require "TASK-101 le mix s'écoute sur le son rendu"      -n '^fn test_state_changes_are_heard\(\) \{$' "$AUDIO/tests/real_backend.rs"
           forbid  "TASK-101 un test du son pousse un gain de couche" -n '^[^/]*\.set_layer_gain\(' "$AUDIO/tests/real_backend.rs"
+
+          # TASK-102 : la banque de sons unique. Une seule ressource pour un rôle,
+          # douze champs de clips, `Resource` seule, jamais sérialisée : son
+          # générateur n'entre dans aucune sauvegarde.
+          SFX=$AUDIO/src/sfx.rs
+          count   "TASK-102 une seule banque de sons" 1            -n '^pub struct SoundEffectBank \{$' crates/
+          require "TASK-102 la banque, Resource seule"             -U -n '#\[derive\(Resource\)\]\npub struct SoundEffectBank \{$' "$SFX"
+          count   "TASK-102 douze champs de clips" 12              -n '^\s+pub [a-z_]+: (AudioClip|\[AudioClip; 6\]),$' "$SFX"
+          require "TASK-102 le timbre de la figure de base"        -n '^\s+pub hand_base_chord: AudioClip,$' "$SFX"
+          require "TASK-102 générateur privé"                      -n '^\s+rng: SmallRng,$' "$SFX"
+          forbid  "TASK-102 générateur public"                     -n '^\s+pub(\([a-z]+\))? rng:' "$SFX"
+          forbid  "TASK-102 l'audio sérialisé"                     -n '^[^/]*(Serialize|Deserialize|serde)' "$AUDIO/src"
+
+          # **Jamais un flux du générateur de la run**, ni un cinquième flux : il
+          # est sérialisé, et le nombre de sons joués dépend du volume et des
+          # images. La portée s'arrête à `src` : le test central construit une
+          # session, et il vit dans `tests/`.
+          forbid  "TASK-102 générateur de la run nommé par l'audio" -n '^[^/]*(RunSession|RunRng)' "$AUDIO/src"
+          forbid  "TASK-102 cinquième flux dans le générateur de la run" -n 'STREAM_AUDIO|pub audio: ChaCha8Rng' crates/
+          count   "TASK-102 quatre flux, toujours" 4               -n '^\s+pub (dice|shop|boss|relic_effects): ChaCha8Rng,$' crates/core_engine/src/rng.rs
+          require "TASK-102 le test central du générateur"         -n '^fn test_audio_never_advances_run_rng\(\) \{$' "$AUDIO/tests/audio_contract.rs"
+
+          # Le tirage, verbatim aux deux corrections actées près : la méthode de
+          # `rand` 0.10, et aucun clone d'un clip, qui est `Copy`. Le graine est
+          # infaillible (`rand_core` 0.10, `SeedableRng::from_rng`).
+          require "TASK-102 tirage de la variation"                -n '^\s+let idx = self\.rng\.random_range\(0\.\.6\);$' "$SFX"
+          require "TASK-102 tirage de la hauteur, à cinq pour cent" -n '^\s+let pitch = 1\.0 \+ self\.rng\.random_range\(-0\.05\.\.=0\.05\);$' "$SFX"
+          count   "TASK-102 deux tirages, pas un de plus" 2        -n '^[^/]*random_range' "$SFX"
+          require "TASK-102 générateur à l'entropie système"       -n '^\s+rng: SmallRng::from_rng\(&mut rand::rng\(\)\),$' "$SFX"
+          forbid  "TASK-102 méthodes disparues de rand"            -n '^[^/]*(gen_range|from_entropy|thread_rng\(|OsRng|rand::random\()' "$AUDIO/src"
+          forbid  "TASK-102 clone d'un clip"                       -n '^[^/]*\.clone\(\)' "$SFX"
+
+          # Un seul site charge les clips, au démarrage, et rien ne sort de la
+          # façade. Un fichier absent n'arrête rien : ni résultat à déballer ici,
+          # ni résultat ajouté à la façade.
+          count   "TASK-102 un seul site charge les clips" 1       -n '^[^/]*\.load_clip\(' "$AUDIO/src"
+          count   "TASK-102 dix-sept chemins de clips" 17          -n '^\s+(chip_tick: load\(|hand_base_chord: load\(|relic_chord: load\(|mult_hit: load\(|seal_tick: load\(|die_lock: load\(|hand_consumed: load\(|ui_hover: load\(|ui_click: load\(|coin: load\(|victory_fanfare: load\()?"audio/[a-z_0-9]+\.ogg"\)?,$' "$SFX"
+          require "TASK-102 banque chargée au démarrage"           -n '^\s+app\.add_systems\(Startup, load_sound_effect_bank\);$' "$SFX"
+          require "TASK-102 build branche la banque"               -n '^\s+sfx::sfx_plugin\(app\);$' "$LIB"
+          forbid  "TASK-102 échec déballé dans la banque"          -n '^[^/]*(unwrap\(\)|expect\(|panic!)' "$SFX"
+          require "TASK-102 load_clip rend toujours un clip"       -n '^\s+fn load_clip\(&mut self, assets: &AssetServer, path: &str\) -> AudioClip;$' "$BACKEND"
+
+          # Le repli vit dans le backend réel : un chargement échoué est remplacé
+          # par le bip et dit une fois, et un son dont le clip n'est pas résolu
+          # attend dans la file. Un stem absent se dit, sans être remplacé.
+          require "TASK-102 chargement échoué détecté"             -n '^\s+LoadState::Failed\(_\) => \{$' "$BACKEND"
+          require "TASK-102 substitution dite, avec le chemin"     -n '^\s+Some\(path\) => warn!\("son introuvable, remplacé par un bip : \{path\}"\),$' "$BACKEND"
+          require "TASK-102 son non résolu gardé en file"          -U -n '^\s+if !clip\.resolved \{\n\s+backend\.pending\.push\(sound\);$' "$BACKEND"
+          require "TASK-102 stem absent dit une fois"              -n '^\s+if failed && !backend\.layer_warned\[index\] \{$' "$BACKEND"
+          require "TASK-102 le bip s'écoute sur le son rendu"      -n '^fn test_a_missing_clip_is_heard_as_a_beep\(\) \{$' "$AUDIO/tests/real_backend.rs"
+          require "TASK-102 le stem absent s'observe"              -n '^fn test_a_missing_stem_is_said_once\(\) \{$' "$AUDIO/tests/real_backend.rs"
 
           exit $status
 

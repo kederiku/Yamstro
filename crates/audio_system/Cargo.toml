@@ -36,7 +36,9 @@ bevy_seedling = { version = "=0.8.0", default-features = false, features = ["ogg
 # moteur que le backend lie déjà. TASK-97 l'enregistre à la main.
 firewheel = { version = "0.12", default-features = false, features = ["freeverb_node"] }
 # `SmallRng` est exporté sans feature en 0.10 : celle que le ticket nommait
-# n'existe pas. Le générateur local de la banque de sons arrive à TASK-102.
+# n'existe pas. C'est le générateur local de la banque de sons (TASK-102), initialisé à
+# l'entropie système : `rand::rng()` vient des features par défaut, et sur la cible web
+# `getrandom` reçoit son fournisseur d'aléa par `game_state`.
 rand = { workspace = true }
 # La feature de journalisation de Bevy monte son plugin par `DefaultPlugins` et pèse 741 971
 # octets de WASM (mesuré à TASK-92) ; la crate `log` est déjà dans l'arbre et ne coûte rien.
@@ -46,3 +48,5 @@ log = "0.4"
 # Les tampons que le processeur du moteur attend : `tests/real_backend.rs` fait avancer le
 # contexte audio lui-même, sans périphérique, sur le patron du banc de TASK-95.
 audioadapter-buffers = "4"
+# `test_audio_never_advances_run_rng` compare les octets du générateur de la run, sérialisé.
+serde_json = { workspace = true }

@@ -39,6 +39,19 @@
 //! bus SFX. Le nœud de réverbération ne rend que le signal humide : il est monté en parallèle,
 //! jamais en série. Aucune ligne de DSP n'est écrite ici.
 //!
+//! # Un fichier manquant
+//!
+//! **Un son absent ne fait pas échouer le démarrage, et ne se tait pas non plus.** Pendant la
+//! fabrication du jeu les sons arrivent après le code : `load_clip` rend toujours un index
+//! valide, et le backend réel remplace un chargement échoué par un bip programmatique, en le
+//! disant une fois, avec le chemin. Le moteur ne traite pas l'échec lui-même : un lecteur créé
+//! sur un asset qui ne viendra jamais attendrait pour toujours, sans un son. Un son demandé avant
+//! que son clip soit résolu, chargé ou remplacé, attend donc dans la file, et part ensuite.
+//!
+//! Un **stem** absent, lui, est dit et n'est pas remplacé : les quatre couches partent ensemble
+//! ou pas du tout, c'est le contrat ci-dessus. Le backend nul ne lit aucun fichier : tous les
+//! chemins y sont consignés, qu'ils existent ou non.
+//!
 //! # La tuyauterie
 //!
 //! La façade est impérative, le backend réel est piloté par l'ECS : jouer un son y revient à
@@ -49,9 +62,9 @@
 //! Les deux implémentations sont **toujours compilées** : ni attribut de test, ni feature Cargo.
 //! Le choix se fait à la construction du plugin, par [`BackendKind`].
 
-use std::any::Any;
+use std::{any::Any, num::NonZeroU32};
 
-use bevy::prelude::*;
+use bevy::{asset::LoadState, ecs::system::SystemParam, prelude::*};
 use bevy_seedling::{node::DiffTimestamp, prelude::*};
 use firewheel::{
     cpal::cpal::{self, traits::HostTrait},
@@ -277,11 +290,22 @@ impl AudioBackend for NullBackend {
 
 // ----------------------------------------------------------------- backend réel
 
+/// Un son du catalogue. `resolved` : chargé, ou remplacé par le bip ; jusque-là aucun lecteur
+/// n'est créé pour lui.
+struct CatalogClip {
+    sample: Handle<AudioSample>,
+    resolved: bool,
+}
+
 /// Le backend réel, branche A de l'addendum : il range ce qu'on lui demande, et
 /// `apply_seedling_backend` l'applique au monde.
 pub struct SeedlingBackend {
-    catalog: Vec<Handle<AudioSample>>,
+    catalog: Vec<CatalogClip>,
+    /// Le bip de substitution, construit au premier fichier manquant et partagé ensuite.
+    beep: Option<Handle<AudioSample>>,
     layers: LayerSlots<Handle<AudioSample>>,
+    /// Un stem absent se dit une fois.
+    layer_warned: [bool; LAYER_COUNT],
     layer_gains: [f32; LAYER_COUNT],
     bus_gains: [f32; Bus::ALL.len()],
     pending: Vec<PlayedSound>,
@@ -291,7 +315,9 @@ impl Default for SeedlingBackend {
     fn default() -> Self {
         Self {
             catalog: Vec::new(),
+            beep: None,
             layers: LayerSlots::default(),
+            layer_warned: [false; LAYER_COUNT],
             layer_gains: [0.0; LAYER_COUNT],
             bus_gains: [1.0; Bus::ALL.len()],
             pending: Vec::new(),
@@ -302,7 +328,10 @@ impl Default for SeedlingBackend {
 impl AudioBackend for SeedlingBackend {
     fn load_clip(&mut self, assets: &AssetServer, path: &str) -> AudioClip {
         let index = u16::try_from(self.catalog.len()).expect("catalogue de sons plein");
-        self.catalog.push(assets.load(path.to_string()));
+        self.catalog.push(CatalogClip {
+            sample: assets.load(path.to_string()),
+            resolved: false,
+        });
         AudioClip(index)
     }
 
@@ -316,7 +345,11 @@ impl AudioBackend for SeedlingBackend {
     }
 
     fn load_layer(&mut self, assets: &AssetServer, path: &str, index: u8) -> LayerHandle {
-        self.layers.register(index, assets.load(path.to_string()))
+        let layer = self.layers.register(index, assets.load(path.to_string()));
+        if !self.layers.started {
+            self.layer_warned[usize::from(index)] = false;
+        }
+        layer
     }
 
     fn set_layer_gain(&mut self, layer: LayerHandle, gain: f32) {
@@ -338,6 +371,29 @@ fn amplitude(gain: f32) -> Volume {
     } else {
         Volume::Decibels(20.0 * gain.log10())
     }
+}
+
+/// Le bip de substitution : un sinus bref, discret, que personne ne prendra pour un son du jeu.
+/// Deux rampes linéaires l'ouvrent et le ferment, sans quoi il claquerait. L'interdit de DSP de
+/// l'étape porte sur la réverbération et les enveloppes du mixage, pas sur cette onde.
+const BEEP_HZ: f32 = 880.0;
+const BEEP_MILLIS: u32 = 60;
+const BEEP_RAMP_MILLIS: u32 = 5;
+const BEEP_AMPLITUDE: f32 = 0.25;
+const BEEP_RATE: u32 = 48_000;
+
+fn beep_sample() -> AudioSample {
+    let frames = (BEEP_RATE * BEEP_MILLIS / 1000) as usize;
+    let ramp = (BEEP_RATE * BEEP_RAMP_MILLIS / 1000) as f32;
+    let wave: Vec<f32> = (0..frames)
+        .map(|n| {
+            let edge = n.min(frames - 1 - n) as f32;
+            let phase = std::f32::consts::TAU * BEEP_HZ * n as f32 / BEEP_RATE as f32;
+            BEEP_AMPLITUDE * (edge / ramp).min(1.0) * phase.sin()
+        })
+        .collect();
+    let rate = NonZeroU32::new(BEEP_RATE).expect("fréquence non nulle");
+    AudioSample::new(vec![wave], rate)
 }
 
 /// Le nœud de volume d'un routage.
@@ -403,13 +459,21 @@ fn build_seedling_graph(mut commands: Commands) {
         .connect(SfxReverbBus);
 }
 
+/// Le serveur d'assets et les échantillons, pris ensemble : l'un dit qu'un fichier manque, les
+/// autres reçoivent le bip qui le remplace.
+#[derive(SystemParam)]
+struct SampleAssets<'w> {
+    server: Res<'w, AssetServer>,
+    samples: ResMut<'w, Assets<AudioSample>>,
+}
+
 type BusVolumes<'w, 's> = Query<'w, 's, (&'static mut VolumeNode, &'static BusNode)>;
 type LayerVolumes<'w, 's> = Query<'w, 's, &'static mut VolumeNode, Without<BusNode>>;
 
 /// La tuyauterie : ce que la façade a rangé part vers le monde. Voir la doc de tête.
 fn apply_seedling_backend(
     mut handle: ResMut<AudioBackendHandle>,
-    server: Res<AssetServer>,
+    assets: SampleAssets,
     time: Res<Time<Audio>>,
     mut buses: BusVolumes,
     voices: Query<(&LayerVoice, &SampleEffects)>,
@@ -419,11 +483,40 @@ fn apply_seedling_backend(
     let Some(backend) = handle.seedling_mut() else {
         return;
     };
+    let SampleAssets {
+        server,
+        mut samples,
+    } = assets;
 
-    for sound in backend.pending.drain(..) {
-        let Some(sample) = backend.catalog.get(usize::from(sound.clip.0)) else {
+    // Un chargement échoué est remplacé par le bip, et dit une fois. Voir la doc de tête.
+    for clip in backend.catalog.iter_mut().filter(|clip| !clip.resolved) {
+        match server.load_state(&clip.sample) {
+            LoadState::Loaded => clip.resolved = true,
+            LoadState::Failed(_) => {
+                match clip.sample.path() {
+                    Some(path) => warn!("son introuvable, remplacé par un bip : {path}"),
+                    None => warn!("son introuvable, remplacé par un bip"),
+                }
+                let beep = backend
+                    .beep
+                    .get_or_insert_with(|| samples.add(beep_sample()));
+                clip.sample = beep.clone();
+                clip.resolved = true;
+            }
+            _ => {}
+        }
+    }
+
+    // Un son dont le clip n'est pas encore résolu attend dans la file.
+    for sound in std::mem::take(&mut backend.pending) {
+        let Some(clip) = backend.catalog.get(usize::from(sound.clip.0)) else {
             continue;
         };
+        if !clip.resolved {
+            backend.pending.push(sound);
+            continue;
+        }
+        let sample = &clip.sample;
         let player = SamplePlayer::new(sample.clone()).with_volume(amplitude(sound.volume));
         let settings = PlaybackSettings::default().with_speed(f64::from(sound.pitch));
         match sound.bus {
@@ -438,6 +531,24 @@ fn apply_seedling_backend(
         let volume = amplitude(backend.bus_gains[bus.0.index()]);
         if node.volume != volume {
             node.volume = volume;
+        }
+    }
+
+    // Un stem absent se dit, une fois ; il n'est pas remplacé, et la bande-son ne partira pas.
+    if !backend.layers.started {
+        for (index, slot) in backend.layers.slots.iter().enumerate() {
+            let Some(sample) = slot else { continue };
+            let failed = matches!(server.load_state(sample), LoadState::Failed(_));
+            if failed && !backend.layer_warned[index] {
+                backend.layer_warned[index] = true;
+                match sample.path() {
+                    Some(path) => warn!(
+                        "stem introuvable : {path} ; les quatre couches partent ensemble, la \
+                         bande-son ne partira pas"
+                    ),
+                    None => warn!("stem introuvable : la bande-son ne partira pas"),
+                }
+            }
         }
     }
 

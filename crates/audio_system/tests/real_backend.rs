@@ -15,8 +15,10 @@
 #[path = "support/offline.rs"]
 mod offline;
 
+use std::sync::{Mutex, Once};
+
 use audio_system::{
-    AdaptiveMusicManager, AudioBackendHandle, AudioBusVolumes, Bus,
+    AdaptiveMusicManager, AudioBackendHandle, AudioBusVolumes, Bus, SoundEffectBank,
     bus::{local_gain, music_gain, sfx_volume},
     music::STEM_PATHS,
 };
@@ -27,7 +29,7 @@ use core_engine::{
     hands::HandGrid,
 };
 use game_state::states::{AppState, RunPhase};
-use offline::{RATE, offline_app, render, step, wait_loaded};
+use offline::{RATE, offline_app, offline_app_at, render, step, wait_loaded};
 
 const LAYER_FRAMES: usize = 48_000;
 const IMPULSE_SPACING: usize = 480;
@@ -69,6 +71,14 @@ fn layers_with(app: &mut App, gains: [f32; 4], duck: f32, left: &mut Vec<f32>) {
     manager.current_gains = gains;
     manager.duck = duck;
     wait_loaded(app, &STEM_PATHS, left);
+}
+
+/// Le même gel, sans attendre des chargements : pour une racine où les stems manquent.
+fn manager_pinned(app: &mut App, gains: [f32; 4], left: &mut Vec<f32>) {
+    step(app, left);
+    let mut manager = manager(app);
+    manager.fade_per_second = 0.0;
+    manager.current_gains = gains;
 }
 
 fn peak(signal: &[f32]) -> f32 {
@@ -570,4 +580,137 @@ fn test_music_survives_the_state_cycle() {
             );
         }
     }
+}
+
+// ------------------------------------------------------------------ TASK-102
+
+/// Les avertissements de tout le binaire de test, captés par un journaliseur posé une fois. Les
+/// tests tournent en parallèle dans un même processus : chacun ne compte que les messages qui
+/// portent **un chemin qu'il est seul à faire échouer**.
+static WARNINGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+struct Capture;
+
+impl log::Log for Capture {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Warn
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            WARNINGS
+                .lock()
+                .expect("verrou")
+                .push(record.args().to_string());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+fn capture_warnings() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        log::set_logger(&Capture).expect("un seul journaliseur par processus");
+        log::set_max_level(log::LevelFilter::Warn);
+    });
+}
+
+fn warnings_about(path: &str) -> Vec<String> {
+    let all = WARNINGS.lock().expect("verrou");
+    all.iter().filter(|m| m.contains(path)).cloned().collect()
+}
+
+/// Joue `clip` et rend une seconde de son, à partir de l'appel.
+fn render_clip(app: &mut App, clip: audio_system::AudioClip, left: &mut Vec<f32>) -> Vec<f32> {
+    with_backend(app, |handle, _| handle.0.play(clip, Bus::Sfx, 1.0, 1.0));
+    let before = left.len();
+    render(app, 1.0, left);
+    left.split_off(before)
+}
+
+/// Durée sonore d'un rendu, en trames : du premier au dernier échantillon non nul.
+fn sounding_frames(signal: &[f32]) -> usize {
+    let last = signal.iter().rposition(|v| *v != 0.0).expect("silence");
+    last + 1 - onset(signal)
+}
+
+/// TASK-102 : **un fichier manquant s'entend, et se dit une fois.** La racine d'assets des tests
+/// ne porte aucun des dix-sept fichiers de la banque : chacun y est remplacé par le bip. Le
+/// backend nul, qui ne lit aucun fichier, est aveugle à tout cela.
+#[test]
+fn test_a_missing_clip_is_heard_as_a_beep() {
+    capture_warnings();
+    let mut app = offline_app();
+    let mut left = Vec::new();
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::GameOver);
+    let absent = "audio/absent_du_test_du_bip.ogg";
+    let (missing, hit) = with_backend(&mut app, |handle, server| {
+        let missing = handle.0.load_clip(server, absent);
+        // Demandé **avant** que le clip soit résolu : le son attend dans la file, il n'est ni
+        // perdu, ni confié à un lecteur qui attendrait pour toujours.
+        handle.0.play(missing, Bus::Sfx, 1.0, 1.0);
+        (missing, handle.0.load_clip(server, "hit.ogg"))
+    });
+    wait_loaded(&mut app, &["hit.ogg"], &mut left);
+    render(&mut app, 1.0, &mut left);
+
+    // Le bip : 60 ms à 48 kHz, soit 2 880 trames, à 0,25 d'amplitude.
+    let early = left.clone();
+    let frames = sounding_frames(&early);
+    assert!(
+        (2_870..=2_880).contains(&frames),
+        "le son demandé trop tôt dure {frames} trames"
+    );
+    let level = per_mille(peak(&early), 1.0);
+    assert!((245..=255).contains(&level), "bip à {level} pour mille");
+    // Il s'ouvre et se ferme sans claquer : ses deux bouts sont à fleur de zéro.
+    let first = early[onset(&early)];
+    let last = early[early.iter().rposition(|v| *v != 0.0).expect("silence")];
+    assert!((-0.005..=0.005).contains(&first), "le bip claque : {first}");
+    assert!((-0.005..=0.005).contains(&last), "le bip claque : {last}");
+
+    // Un clip de la banque, absent lui aussi, sonne pareil ; un fichier présent sonne comme lui.
+    let third_roll = app.world().resource::<SoundEffectBank>().dice_rolls[2];
+    let roll = render_clip(&mut app, third_roll, &mut left);
+    assert!((2_870..=2_880).contains(&sounding_frames(&roll)));
+    let again = render_clip(&mut app, missing, &mut left);
+    assert!((2_870..=2_880).contains(&sounding_frames(&again)));
+    let real = render_clip(&mut app, hit, &mut left);
+    assert!(peak(&real) > 0.5, "le fichier présent a été remplacé");
+    assert!(sounding_frames(&real) > 5_000);
+
+    // Dit une fois, avec le chemin, et pas une fois par image ni par `play`.
+    let said = warnings_about(absent);
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(said[0].contains("bip"), "{said:?}");
+
+    // Aucun lecteur n'attend pour toujours un asset qui ne viendra pas : il ne reste que les
+    // quatre voies de la musique.
+    assert_eq!(players(&mut app).len(), 4);
+}
+
+/// TASK-102 : un **stem** manquant se dit une fois, et n'est pas remplacé : les quatre couches
+/// partent ensemble ou pas du tout. `tests/support` n'a pas de dossier `audio`.
+#[test]
+fn test_a_missing_stem_is_said_once() {
+    capture_warnings();
+    let mut app = offline_app_at("tests/support");
+    let mut left = Vec::new();
+    manager_pinned(&mut app, [1.0; 4], &mut left);
+    render(&mut app, 1.5, &mut left);
+
+    for path in STEM_PATHS {
+        let said = warnings_about(path);
+        assert_eq!(said.len(), 1, "{path} : {said:?}");
+        assert!(said[0].contains("stem"), "{said:?}");
+    }
+    assert_eq!(
+        peak(&left),
+        0.0,
+        "la bande-son est partie sans ses quatre couches"
+    );
+    assert!(players(&mut app).is_empty());
 }

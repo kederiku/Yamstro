@@ -6,7 +6,7 @@ use std::{collections::BTreeSet, path::PathBuf, process::Command, time::Duration
 
 use audio_system::{
     AdaptiveMusicManager, AudioBackendHandle, AudioBusVolumes, AudioClip, BackendKind, Bus,
-    GameAudioPlugin, NullBackend, PlayedSound,
+    GameAudioPlugin, NullBackend, PlayedSound, SoundEffectBank,
     backend::resolve_kind,
     bus::{layer_gain, local_gain, music_gain, sfx_volume},
     music::{
@@ -17,9 +17,16 @@ use audio_system::{
 use bevy::{prelude::*, state::app::StatesPlugin, time::TimePlugin};
 use core_engine::{
     blinds::{BlindContext, BlindDefinition, BlindType},
-    hands::HandGrid,
+    config::RunConfig,
+    cups::{CupId, definitions::cup},
+    hands::{HandGrid, HandLevels},
+    rng::RunRng,
 };
-use game_state::states::{AppState, RunPhase};
+use game_state::{
+    resources::RunSession,
+    states::{AppState, RunPhase},
+};
+use rand::Rng;
 use ui_and_juice::JuicePlugin;
 
 fn racine() -> PathBuf {
@@ -1266,4 +1273,213 @@ fn test_four_layers_pushed_every_frame() {
     handle.null_mut().expect("backend nul").clear();
     assert_eq!(journal(&app).layer_gain_pushes(), 0);
     assert_eq!(pousses(&app), tenus);
+}
+
+// ------------------------------------------------------------------ TASK-102
+
+/// Les dix-sept chemins que la banque demande, **en littéraux**, dans l'ordre des champs.
+const BANQUE: [&str; 17] = [
+    "audio/dice_roll_01.ogg",
+    "audio/dice_roll_02.ogg",
+    "audio/dice_roll_03.ogg",
+    "audio/dice_roll_04.ogg",
+    "audio/dice_roll_05.ogg",
+    "audio/dice_roll_06.ogg",
+    "audio/chip_tick.ogg",
+    "audio/hand_base_chord.ogg",
+    "audio/relic_chord.ogg",
+    "audio/mult_hit.ogg",
+    "audio/seal_tick.ogg",
+    "audio/die_lock.ogg",
+    "audio/hand_consumed.ogg",
+    "audio/ui_hover.ogg",
+    "audio/ui_click.ogg",
+    "audio/coin.ogg",
+    "audio/victory_fanfare.ogg",
+];
+
+fn banque(app: &App) -> &SoundEffectBank {
+    app.world().resource::<SoundEffectBank>()
+}
+
+/// Le rang d'un clip dans le catalogue du backend : l'index rendu par `load_clip`.
+fn rang(clip: AudioClip) -> usize {
+    format!("{clip:?}")
+        .trim_start_matches("AudioClip(")
+        .trim_end_matches(')')
+        .parse()
+        .expect("forme de débogage d'un clip")
+}
+
+fn session() -> RunSession {
+    let deck = cup(CupId::Standard);
+    RunSession {
+        config: RunConfig::from_cup(&deck),
+        ante: 1,
+        blind_kind: BlindType::Small,
+        gold: deck.starting_gold,
+        cup_id: CupId::Standard,
+        stake_level: 0,
+        hand_levels: HandLevels::default(),
+        rng: RunRng::from_seed(20_260_917),
+    }
+}
+
+fn octets_du_generateur(app: &App) -> String {
+    serde_json::to_string(&app.world().resource::<RunSession>().rng).expect("sérialisation")
+}
+
+#[test]
+fn test_audio_never_advances_run_rng() {
+    // La session vit **dans le monde où tournent les systèmes audio** : un système qui
+    // l'emprunterait pour y tirer un nombre serait vu.
+    let mut app = headless_app();
+    app.world_mut().insert_resource(session());
+    app.update();
+    let avant = octets_du_generateur(&app);
+
+    for son in 0..1_000 {
+        let (clip, hauteur) = app
+            .world_mut()
+            .resource_mut::<SoundEffectBank>()
+            .dice_roll();
+        let mut handle = app.world_mut().resource_mut::<AudioBackendHandle>();
+        handle.0.play(clip, Bus::Sfx, 1.0, hauteur);
+        if son % 50 == 0 {
+            app.update();
+        }
+    }
+    assert_eq!(journal(&app).played().len(), 1_000);
+
+    // Les **octets de la sérialisation**, jamais deux tirages : deux tirages égaux par chance
+    // passeraient, la sérialisation non.
+    assert_eq!(octets_du_generateur(&app), avant);
+
+    // Témoin : un seul tirage sur un flux de la run change ces octets. Le test sait échouer.
+    app.world_mut()
+        .resource_mut::<RunSession>()
+        .rng
+        .dice
+        .next_u64();
+    assert_ne!(octets_du_generateur(&app), avant);
+}
+
+#[test]
+fn test_dice_roll_uses_six_variations() {
+    let mut app = headless_app();
+    app.update();
+    let lancers: BTreeSet<usize> = banque(&app).dice_rolls.into_iter().map(rang).collect();
+    assert_eq!(lancers.len(), 6, "les six variations partagent un clip");
+
+    let mut sortis = BTreeSet::new();
+    let mut hauteurs = BTreeSet::new();
+    let (mut sous, mut sur) = (0, 0);
+    for _ in 0..1_000 {
+        let (clip, hauteur) = app
+            .world_mut()
+            .resource_mut::<SoundEffectBank>()
+            .dice_roll();
+        sortis.insert(rang(clip));
+        assert!(
+            (0.95..=1.05).contains(&hauteur),
+            "hauteur {hauteur} hors de plus ou moins 5 %"
+        );
+        hauteurs.insert(hauteur.to_bits());
+        if hauteur < 1.0 {
+            sous += 1;
+        } else {
+            sur += 1;
+        }
+    }
+    assert_eq!(sortis, lancers, "une variation ne sort jamais");
+    // La hauteur varie vraiment, des deux côtés de la hauteur nominale.
+    assert!(
+        hauteurs.len() > 500,
+        "{} hauteurs distinctes",
+        hauteurs.len()
+    );
+    assert!(
+        sous > 300 && sur > 300,
+        "{sous} en dessous, {sur} au-dessus"
+    );
+}
+
+/// Sur le backend nul, qui ne lit aucun fichier : ce test garde ce que la banque demande et ce
+/// qu'elle rend, **qu'un fichier existe ou non** (ici, aucun n'existe). Le bip lui-même s'écoute
+/// sur le backend réel, par `test_a_missing_clip_is_heard_as_a_beep`.
+#[test]
+fn test_missing_clip_falls_back_to_beep() {
+    let mut app = headless_app();
+    app.update();
+
+    // Dix-sept chargements, dans l'ordre des champs, chaque chemin consigné.
+    assert_eq!(journal(&app).loaded(), BANQUE);
+
+    // Chaque champ désigne **son** fichier : une permutation ne casse aucune compilation.
+    let banque = banque(&app);
+    let champs = [
+        (banque.dice_rolls[0], "audio/dice_roll_01.ogg"),
+        (banque.dice_rolls[1], "audio/dice_roll_02.ogg"),
+        (banque.dice_rolls[2], "audio/dice_roll_03.ogg"),
+        (banque.dice_rolls[3], "audio/dice_roll_04.ogg"),
+        (banque.dice_rolls[4], "audio/dice_roll_05.ogg"),
+        (banque.dice_rolls[5], "audio/dice_roll_06.ogg"),
+        (banque.chip_tick, "audio/chip_tick.ogg"),
+        (banque.hand_base_chord, "audio/hand_base_chord.ogg"),
+        (banque.relic_chord, "audio/relic_chord.ogg"),
+        (banque.mult_hit, "audio/mult_hit.ogg"),
+        (banque.seal_tick, "audio/seal_tick.ogg"),
+        (banque.die_lock, "audio/die_lock.ogg"),
+        (banque.hand_consumed, "audio/hand_consumed.ogg"),
+        (banque.ui_hover, "audio/ui_hover.ogg"),
+        (banque.ui_click, "audio/ui_click.ogg"),
+        (banque.coin, "audio/coin.ogg"),
+        (banque.victory_fanfare, "audio/victory_fanfare.ogg"),
+    ];
+    for (clip, chemin) in champs {
+        assert_eq!(journal(&app).loaded()[rang(clip)], chemin);
+    }
+
+    // Et ils se jouent comme les autres.
+    let (troisieme, accord) = (banque.dice_rolls[2], banque.hand_base_chord);
+    let mut handle = app.world_mut().resource_mut::<AudioBackendHandle>();
+    handle.0.play(troisieme, Bus::Sfx, 1.0, 1.0);
+    handle.0.play(accord, Bus::Sfx, 1.0, 1.0);
+    let joues = journal(&app).played();
+    assert_eq!(joues.len(), 2);
+    assert_eq!((joues[0].clip, joues[1].clip), (troisieme, accord));
+}
+
+#[test]
+fn test_bank_is_resource_only() {
+    // Insérée par le système de démarrage, et par lui seul.
+    let mut app = headless_app();
+    assert!(!app.world().contains_resource::<SoundEffectBank>());
+    app.update();
+    assert!(app.world().contains_resource::<SoundEffectBank>());
+
+    // Dix frames de plus : la banque n'est pas rechargée.
+    for _ in 0..10 {
+        app.update();
+    }
+    assert_eq!(journal(&app).loaded().len(), 17);
+
+    let source = lire("crates/audio_system/src/sfx.rs");
+    assert!(
+        source.contains("#[derive(Resource)]\npub struct SoundEffectBank {"),
+        "la banque ne dérive pas `Resource` seule"
+    );
+}
+
+/// La banque et son générateur restent hors de toute sauvegarde : la crate audio ne dépend
+/// d'aucune crate de sérialisation. `serde_json` n'y entre que pour les tests, qui comparent
+/// les octets du générateur de la run. C'est la sortie de l'outil qui fait foi, pas le manifeste.
+#[test]
+fn test_bank_is_never_serialized() {
+    let directes = arbre(&["-p", "audio_system", "-e", "normal", "--depth", "1"]);
+    assert!(directes.contains("rand v"), "arbre inattendu : {directes}");
+    assert!(
+        !directes.contains("serde"),
+        "la crate audio dépend d'une crate de sérialisation : {directes}"
+    );
 }
