@@ -2465,7 +2465,10 @@ jobs:
           require "TASK-101 gain remis à la façade"                -n '^\s+let gain = layer_gain\(manager\.current_gains\[i\], manager\.duck\);$' "$MUSIC"
           count   "TASK-101 un seul site pousse les gains de couche" 1 -n '^[^/]*\.set_layer_gain\(' "$AUDIO/src"
           forbid  "TASK-101 curseurs lus par la musique"           -n '^[^/]*(AudioBusVolumes|volumes\.|music \* master)' "$MUSIC"
-          forbid  "TASK-101 son relancé pour bouger un gain"       -n '^[^/]*\.play\(' "$MUSIC"
+          # **Revue à TASK-106** : « aucun `.play(` dans `music.rs` » tombait sur
+          # la fanfare. La forme durable : un seul son part de ce fichier, le
+          # jingle, et il n'est pas dans le système qui applique les gains.
+          count   "TASK-101 un seul son part de la musique, le jingle" 1 -n '^[^/]*\.play\(' "$MUSIC"
 
           # Le backend nul compte les poussées, il ne les journalise pas : il est
           # aussi celui d'une machine sans sortie audio, quatre poussées par image.
@@ -2659,6 +2662,39 @@ jobs:
           forbid  "TASK-105 ressource de la mise en scène lue par l'audio" -n '^[^/]*(JuiceSettings|ScreenShake|AnimatedNumber|PunchScale)' "$AUDIO/src"
           require "TASK-105 l'arête s'éprouve sur la chaîne réelle" -n '^fn test_reader_runs_after_the_drainer\(\) \{$' "$AUDIO/tests/audio_contract.rs"
           require "TASK-105 le coup multiplicatif s'écoute"        -n '^fn test_a_multiplying_step_resonates\(\) \{$' "$AUDIO/tests/real_backend.rs"
+
+          # TASK-106 : **une seule définition de « blind battue » dans le dépôt**,
+          # à côté du type, et quatre lecteurs qui l'appellent : l'arbitre de fin
+          # de manche, la victoire finale, le harnais de simulation et l'audio.
+          # Aucun ne recopie la comparaison du score à la cible.
+          BLINDS=crates/core_engine/src/blinds/mod.rs
+          count   "TASK-106 une seule définition de la blind battue" 1 -n '^[^/]*fn blind_is_beaten\(' crates/
+          require "TASK-106 la règle, écrite une fois"             -U -n '^pub fn blind_is_beaten\(ctx: &BlindContext\) -> bool \{\n\s+ctx\.current_score >= ctx\.target_score\n\}$' "$BLINDS"
+          forbid  "TASK-106 règle de victoire recopiée"            -n '^[^/]*current_score\s*(>=|<)\s*[a-z_.]*target_score' crates/ -g '!**/core_engine/src/blinds/mod.rs'
+          require "TASK-106 l'arbitre de fin de manche l'appelle"  -n '^\s+if blind_is_beaten\(&blind\) \{$' crates/game_state/src/systems/round_end.rs
+          require "TASK-106 la victoire finale l'appelle"          -n '^\s+&& blind_is_beaten\(&blind\);$' crates/game_state/src/systems/setup.rs
+          require "TASK-106 le harnais l'appelle"                  -n '^\s+if blind_is_beaten\(ctx\) \{$' crates/sim_harness/src/run.rs
+          require "TASK-106 l'audio l'appelle"                     -n '^\s+if !blind_is_beaten\(&blind\) \|\| !manager\.duck_timer\.is_finished\(\) \{$' "$MUSIC"
+
+          # La fanfare : une fois par blind battue, par un seul système qui joue
+          # le jingle **et** arme l'enveloppe. La garde de réentrance est le
+          # minuteur lui-même, aucun témoin de plus ; le clip vient de la banque.
+          require "TASK-106 fanfare à l'entrée de la fin de manche" -n '^\s+app\.add_systems\(OnEnter\(RunPhase::RoundEnd\), on_blind_beaten\);$' "$MUSIC"
+          require "TASK-106 le jingle, à la part locale du volume" -n '^\s+backend\.0\.play\(fanfare, Bus::Sfx, local_gain\(1\.0\), 1\.0\);$' "$MUSIC"
+          count   "TASK-106 un seul lecteur de la fanfare" 1       -n '^[^/]*bank\.victory_fanfare' "$AUDIO/src"
+          count   "TASK-106 un seul site arme l'enveloppe" 1       -n '^[^/]*duck_timer\.reset\(\)' "$AUDIO/src"
+          forbid  "TASK-106 clip chargé hors de la banque"         -n '^[^/]*load_clip' "$MUSIC"
+          forbid  "TASK-106 second témoin de la fanfare"           -n '^[^/]*(fanfare_played|Local<bool>)' "$MUSIC"
+
+          # Le ducking : −6 dB, écrit une fois ; un plateau, maintenu en tête du
+          # système qui applique les gains, et qui ne touche que la sortie.
+          require "TASK-106 le gain du ducking, écrit une fois"    -n '^pub const FANFARE_DUCK_GAIN: f32 = 0\.501_187_2;$' "$MUSIC"
+          count   "TASK-106 le gain du ducking n'est pas recopié" 1 -n '^[^/]*0\.501' "$AUDIO/src"
+          forbid  "TASK-106 puissance calculée dans la musique"    -n '^[^/]*powf' "$MUSIC"
+          require "TASK-106 l'enveloppe avance avec les gains"     -n '^\s+manager\.duck_timer\.tick\(time\.delta\(\)\);$' "$MUSIC"
+          require "TASK-106 un plateau, pas une rampe"             -U -n '^\s+manager\.duck = if manager\.duck_timer\.is_finished\(\) \{\n\s+1\.0\n\s+\} else \{\n\s+FANFARE_DUCK_GAIN\n\s+\};$' "$MUSIC"
+          count   "TASK-106 un seul site écrit le ducking" 1       -n '^[^/]*\.duck = ' "$AUDIO/src"
+          require "TASK-106 le ducking s'écoute sur le son rendu"  -n '^fn test_the_fanfare_ducks_the_music_for_1_2_seconds\(\) \{$' "$AUDIO/tests/real_backend.rs"
 
           exit $status
 

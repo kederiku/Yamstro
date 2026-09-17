@@ -32,7 +32,7 @@ use core_engine::{
     scoring::{ScoreAction, StepSource},
 };
 use game_state::states::{AppState, RunPhase};
-use offline::{RATE, offline_app, offline_app_at, render, step, wait_loaded};
+use offline::{RATE, offline_app, offline_app_at, render, step, wait_loaded, wait_settled};
 use ui_and_juice::events::ScoreStepPlayed;
 
 const LAYER_FRAMES: usize = 48_000;
@@ -58,31 +58,65 @@ fn manager(app: &mut App) -> Mut<'_, AdaptiveMusicManager> {
     app.world_mut().resource_mut::<AdaptiveMusicManager>()
 }
 
-/// Une image, celle du démarrage : le jeu y charge ses quatre couches. Le test **gèle le fondu**
-/// et pose les gains courants, que le système de musique pousse dès l'image suivante, donc
-/// **avant le départ**, qui attend la fin des chargements : le premier échantillon sorti est
-/// celui de la trame 0.
-fn layers_with_gains(app: &mut App, gains: [f32; 4], left: &mut Vec<f32>) {
-    layers_with(app, gains, 1.0, left);
+/// Les gains qu'un test veut entendre, remis au jeu **avant sa première image**.
+#[derive(Resource)]
+struct Pinned {
+    gains: [f32; 4],
+    ducked: bool,
 }
 
-/// La même, avec un ducking : posé lui aussi avant le départ, sans quoi la première impulsion
-/// sortirait sans lui, le temps que le gain se lisse.
-fn layers_with(app: &mut App, gains: [f32; 4], duck: f32, left: &mut Vec<f32>) {
-    step(app, left);
-    let mut manager = manager(app);
+/// Gèle le fondu et pose les gains courants dès que le gestionnaire existe, une seule fois.
+///
+/// En tête d'image, donc avant le système de musique, qui pousse les gains, et avant le backend,
+/// qui lance les couches avec le gain poussé. Posés **après** la première image, comme le
+/// faisait ce fichier, ils perdaient une course : sous charge, les quatre stems pouvaient être
+/// chargés dès cette image, les couches partaient avec les gains du fondu naissant, et la
+/// première impulsion sortait à un niveau quelconque, voire nul.
+fn pin_manager(
+    mut commands: Commands,
+    pinned: Option<Res<Pinned>>,
+    manager: Option<ResMut<AdaptiveMusicManager>>,
+) {
+    let (Some(pinned), Some(mut manager)) = (pinned, manager) else {
+        return;
+    };
     manager.fade_per_second = 0.0;
-    manager.current_gains = gains;
-    manager.duck = duck;
+    manager.current_gains = pinned.gains;
+    if pinned.ducked {
+        manager.duck_timer = Timer::new(std::time::Duration::from_secs(3_600), TimerMode::Once);
+    }
+    commands.remove_resource::<Pinned>();
+}
+
+/// Le jeu charge ses quatre couches à sa première image. Le test **gèle le fondu** et pose les
+/// gains courants dans cette même image, donc **avant le départ**, qui attend la fin des
+/// chargements : le premier échantillon sorti est celui de la trame 0, à son gain.
+fn layers_with_gains(app: &mut App, gains: [f32; 4], left: &mut Vec<f32>) {
+    layers_with(app, gains, false, left);
+}
+
+/// La même, sous le ducking de fanfare : posé lui aussi avant le départ, sans quoi la première
+/// impulsion sortirait sans lui, le temps que le gain se lisse. **Le champ `duck` est réécrit à
+/// chaque image depuis le minuteur** (TASK-106) : le test tient le ducking en installant un
+/// minuteur long, jamais terminé, et non en écrivant le champ.
+fn layers_with(app: &mut App, gains: [f32; 4], ducked: bool, left: &mut Vec<f32>) {
+    manager_pinned_under(app, gains, ducked, left);
     wait_loaded(app, &STEM_PATHS, left);
 }
 
 /// Le même gel, sans attendre des chargements : pour une racine où les stems manquent.
 fn manager_pinned(app: &mut App, gains: [f32; 4], left: &mut Vec<f32>) {
+    manager_pinned_under(app, gains, false, left);
+}
+
+fn manager_pinned_under(app: &mut App, gains: [f32; 4], ducked: bool, left: &mut Vec<f32>) {
+    app.insert_resource(Pinned { gains, ducked })
+        .add_systems(First, pin_manager);
     step(app, left);
-    let mut manager = manager(app);
-    manager.fade_per_second = 0.0;
-    manager.current_gains = gains;
+    assert!(
+        !app.world().contains_resource::<Pinned>(),
+        "le gestionnaire de musique n'existe pas à la première image"
+    );
 }
 
 fn peak(signal: &[f32]) -> f32 {
@@ -351,18 +385,20 @@ fn test_effective_volume_matches_the_formulas() {
         "son entendu à {sound} pour mille, 125 attendus"
     );
 
-    // Une couche : music 0,5, master 0,5, poids 0,5, ducking 0,5. Les trois autres se taisent.
+    // Une couche : music 0,5, master 0,5, poids 0,5, sous le ducking de fanfare, qui vaut 0,501.
+    // Les trois autres se taisent. La formule pure se vérifie sur des valeurs dyadiques ; ce que
+    // l'auditeur entend, avec le vrai gain de ducking : 62,6 pour mille.
     let volumes = AudioBusVolumes {
         master: 0.5,
         music: 0.5,
         ..UNITY
     };
     assert_eq!(music_gain(&volumes, 0.5, 0.5), 0.0625);
-    let first_impulse = |volumes: AudioBusVolumes, weight: f32, duck: f32| {
+    let first_impulse = |volumes: AudioBusVolumes, weight: f32, ducked: bool| {
         let mut app = offline_app();
         let mut left = Vec::new();
         app.world_mut().insert_resource(volumes);
-        layers_with(&mut app, [weight, 0.0, 0.0, 0.0], duck, &mut left);
+        layers_with(&mut app, [weight, 0.0, 0.0, 0.0], ducked, &mut left);
         render(&mut app, 0.5, &mut left);
         left[left
             .iter()
@@ -370,12 +406,12 @@ fn test_effective_volume_matches_the_formulas() {
             .expect("la couche 0 ne sort pas")]
     };
     let layer = per_mille(
-        first_impulse(volumes, 0.5, 0.5),
-        first_impulse(UNITY, 1.0, 1.0),
+        first_impulse(volumes, 0.5, true),
+        first_impulse(UNITY, 1.0, false),
     );
     assert!(
         (61..=64).contains(&layer),
-        "couche entendue à {layer} pour mille, 62,5 attendus"
+        "couche entendue à {layer} pour mille, 62,6 attendus"
     );
 }
 
@@ -765,6 +801,13 @@ fn render_step(action: ScoreAction) -> Vec<f32> {
     app.world_mut()
         .resource_mut::<NextState<AppState>>()
         .set(AppState::GameOver);
+    // Les deux clips manquent à cette racine : leur résolution est une vraie entrée-sortie. Le
+    // test compare l'**instant** de deux rendus, il attend donc qu'elle soit faite.
+    wait_settled(
+        &mut app,
+        &["audio/chip_tick.ogg", "audio/mult_hit.ogg"],
+        &mut left,
+    );
     render(&mut app, 0.5, &mut left);
     assert_eq!(peak(&left), 0.0, "du son sort avant le premier palier");
 
@@ -812,5 +855,74 @@ fn test_a_multiplying_step_resonates() {
     assert!(
         wet_tail > -60.0,
         "le palier multiplicatif ne résonne pas : {wet_tail:.1} dBFS"
+    );
+}
+
+// ------------------------------------------------------------------ TASK-106
+
+/// TASK-106 : **la fanfare sonne, et la musique baisse de 6 dB pendant 1,2 s.** La Base seule,
+/// gelée à l'unité, porte une impulsion par seconde : celle qui tombe sous l'enveloppe sort à
+/// la moitié de son niveau, la suivante à son niveau plein, et la fanfare, elle, n'est pas
+/// atténuée : le ducking ne touche que les couches.
+#[test]
+fn test_the_fanfare_ducks_the_music_for_1_2_seconds() {
+    let mut app = offline_app();
+    let mut left = Vec::new();
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::InRun);
+    app.world_mut()
+        .insert_resource(blind(BlindType::Small, 1_000, 1_000));
+    layers_with_gains(&mut app, [1.0, 0.0, 0.0, 0.0], &mut left);
+    // Le lancer et la fanfare manquent à cette racine, et leur résolution est une vraie
+    // entrée-sortie : le test mesure des instants, il attend donc qu'elle soit faite.
+    wait_settled(
+        &mut app,
+        &[
+            "audio/dice_roll_01.ogg",
+            "audio/dice_roll_02.ogg",
+            "audio/dice_roll_03.ogg",
+            "audio/dice_roll_04.ogg",
+            "audio/dice_roll_05.ogg",
+            "audio/dice_roll_06.ogg",
+            "audio/victory_fanfare.ogg",
+        ],
+        &mut left,
+    );
+    render(&mut app, 0.3, &mut left);
+    let origin = onset(&left);
+
+    // La main se joue ; le lancer sonne à l'entrée de sa phase, loin des mesures.
+    go_phase(&mut app, RunPhase::Roll, false, &mut left);
+    go_phase(&mut app, RunPhase::Scoring, false, &mut left);
+
+    // La fin de manche est déclenchée 100 à 200 ms après une impulsion : la suivante tombe
+    // sous l'enveloppe, à 800 ou 900 ms, et celle d'après hors d'elle.
+    while !(4_800..9_600).contains(&((left.len() - origin) % LAYER_FRAMES)) {
+        step(&mut app, &mut left);
+    }
+    let trigger = left.len();
+    let before = origin + (trigger - origin) / LAYER_FRAMES * LAYER_FRAMES;
+    go_phase(&mut app, RunPhase::RoundEnd, false, &mut left);
+    render(&mut app, 2.2, &mut left);
+
+    let full = left[before];
+    assert!(full > 0.3, "la Base ne sonne pas : {full}");
+    let ducked = per_mille(left[before + LAYER_FRAMES], full);
+    let restored = per_mille(left[before + 2 * LAYER_FRAMES], full);
+    assert!(
+        (495..=508).contains(&ducked),
+        "sous l'enveloppe, la Base sort à {ducked} pour mille, 501 attendus"
+    );
+    assert!(
+        (990..=1_010).contains(&restored),
+        "après l'enveloppe, la Base sort à {restored} pour mille"
+    );
+
+    // La fanfare est ici le bip : elle sort à son niveau, dans les 100 ms qui suivent.
+    let fanfare = per_mille(peak(&left[trigger..trigger + RATE / 10]), 1.0);
+    assert!(
+        (230..=280).contains(&fanfare),
+        "la fanfare sort à {fanfare} pour mille, 250 attendus"
     );
 }

@@ -244,6 +244,39 @@ impl BlindContext {
     }
 }
 
+/// Vrai quand la cible de la manche est atteinte. **Seule définition de « blind battue » du
+/// dépôt** (TASK-106) : l'arbitre de fin de manche, la victoire finale, le harnais de simulation
+/// et l'audio l'appellent, aucun ne recopie la comparaison. Le jour où un boss change la
+/// condition de victoire, une copie restée ailleurs ferait sonner la fanfare sur une défaite, ou
+/// fausserait le taux de victoire mesuré, sans une erreur.
+pub fn blind_is_beaten(ctx: &BlindContext) -> bool {
+    ctx.current_score >= ctx.target_score
+}
+
+#[cfg(test)]
+mod tests_victoire {
+    use super::*;
+
+    #[test]
+    fn test_blind_is_beaten_at_the_target_and_above() {
+        let manche = |cible: u64, score: u64| BlindContext {
+            target_score: cible,
+            current_score: score,
+            ..BlindContext::de_test(None)
+        };
+        assert!(!blind_is_beaten(&manche(1_000, 0)));
+        assert!(!blind_is_beaten(&manche(1_000, 999)));
+        assert!(blind_is_beaten(&manche(1_000, 1_000)), "la cible atteinte");
+        assert!(blind_is_beaten(&manche(1_000, 1_001)));
+        assert!(
+            blind_is_beaten(&manche(0, 0)),
+            "une cible nulle est battue d'emblée"
+        );
+        assert!(blind_is_beaten(&manche(u64::MAX, u64::MAX)));
+        assert!(!blind_is_beaten(&manche(u64::MAX, u64::MAX - 1)));
+    }
+}
+
 #[cfg(test)]
 mod tests_modificateurs {
     use smallvec::smallvec;

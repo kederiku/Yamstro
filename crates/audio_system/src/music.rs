@@ -70,6 +70,26 @@
 //! ces deux paramètres feraient tomber le jeu au menu principal. L'état de l'application, lui,
 //! existe toujours : `GameAudioPlugin::build` l'exige.
 //!
+//! # La fanfare et son ducking
+//!
+//! « Manche gagnée » veut dire **blind battue**, pas main jouée : la fin de manche est entrée
+//! après chacune des mains d'une blind, et une fanfare branchée là sans autre condition sonnerait
+//! quatre fois, dont trois sur des mains perdues. La règle de victoire n'est pas réécrite ici :
+//! elle s'appelle, par `blind_is_beaten`, seule définition du dépôt.
+//!
+//! **Un seul système joue le jingle et arme l'enveloppe**, dans le même corps : deux systèmes
+//! lisant la même condition divergeraient d'une image, et la musique baisserait à côté du jingle.
+//! La garde de réentrance est le minuteur lui-même : tant que l'enveloppe court, une nouvelle
+//! entrée dans la fin de manche ne rejoue rien. Né terminé, il laisse passer la première fanfare.
+//!
+//! Le ducking est **la seule enveloppe qui échappe à la fonction pure des cibles** : il dépend
+//! d'un instant, pas d'un état. C'est un plateau, sans attaque ni relâchement écrits à la main :
+//! le lissage du backend absorbe le pas. Il multiplie la **sortie**, en dernier facteur de ce qui
+//! part à la façade ; l'écrire sur les cibles ou sur les gains courants contaminerait
+//! l'interpolation, et le mix ne remonterait plus à son niveau. Son maintien tient en deux lignes,
+//! en tête du système qui applique déjà les gains : un système de plus s'ordonnancerait
+//! librement, et le ducking s'appliquerait une image en retard, une image sur deux.
+//!
 //! # [`music_plugin`], le point d'enregistrement de ce fichier
 //!
 //! `GameAudioPlugin::build` l'appelle, et les systèmes de ce fichier s'y branchent : ceux de
@@ -79,11 +99,13 @@
 use std::time::Duration;
 
 use bevy::prelude::*;
+use core_engine::blinds::blind_is_beaten;
 use core_engine::blinds::{BlindContext, BlindType};
 use game_state::states::{AppState, RunPhase};
 
-use crate::backend::{AudioBackendHandle, LayerHandle};
-use crate::bus::layer_gain;
+use crate::backend::{AudioBackendHandle, Bus, LayerHandle};
+use crate::bus::{layer_gain, local_gain};
+use crate::sfx::SoundEffectBank;
 
 pub const CLIMAX_THRESHOLD_PERCENT: u128 = 75; // seule occurrence du seuil dans le dépôt
 
@@ -103,6 +125,11 @@ pub const DEFAULT_FADE_PER_SECOND: f32 = 2.0;
 
 /// Durée du ducking de fanfare : 1,2 s. En millisecondes entières, donc exacte.
 pub const DUCK_DURATION: Duration = Duration::from_millis(1_200);
+
+/// Le gain du ducking de fanfare : −6 dB en amplitude, `10f32.powf(-6.0 / 20.0)`. La puissance
+/// n'est pas une fonction constante : la valeur est littérale, et un test la garde alignée sur
+/// la formule. Aucune autre écriture de ce gain dans la crate.
+pub const FANFARE_DUCK_GAIN: f32 = 0.501_187_2;
 
 /// L'état musical. `Resource` seule : en 0.19 elle est un sous-trait de `Component`, et un type
 /// ne dérive pas les deux.
@@ -170,6 +197,13 @@ fn update_music_gains(
     mut manager: ResMut<AdaptiveMusicManager>,
     mut backend: ResMut<AudioBackendHandle>,
 ) {
+    manager.duck_timer.tick(time.delta());
+    manager.duck = if manager.duck_timer.is_finished() {
+        1.0
+    } else {
+        FANFARE_DUCK_GAIN
+    };
+
     let app = *app_state.get();
     let phase = phase.map(|p| *p.get());
     manager.target_gains = target_gains(app, phase, blind_in_play(app, phase, blind.as_deref()));
@@ -183,10 +217,29 @@ fn update_music_gains(
     }
 }
 
+/// La fanfare d'une blind battue, et l'armement de son ducking. Voir la doc de tête.
+fn on_blind_beaten(
+    blind: Option<Res<BlindContext>>,
+    bank: Res<SoundEffectBank>,
+    mut manager: ResMut<AdaptiveMusicManager>,
+    mut backend: ResMut<AudioBackendHandle>,
+) {
+    let Some(blind) = blind else {
+        return;
+    };
+    if !blind_is_beaten(&blind) || !manager.duck_timer.is_finished() {
+        return;
+    }
+    let fanfare = bank.victory_fanfare;
+    backend.0.play(fanfare, Bus::Sfx, local_gain(1.0), 1.0);
+    manager.duck_timer.reset();
+}
+
 /// Enregistre les systèmes de ce fichier. Appelée par `GameAudioPlugin::build`.
 pub fn music_plugin(app: &mut App) {
     app.add_systems(Startup, setup_music_layers);
     app.add_systems(Update, update_music_gains);
+    app.add_systems(OnEnter(RunPhase::RoundEnd), on_blind_beaten);
 }
 
 /// Gains cibles des 4 couches. Fonction pure : mêmes entrées, mêmes sorties.

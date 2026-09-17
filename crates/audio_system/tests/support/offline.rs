@@ -7,7 +7,10 @@ use std::{num::NonZeroU32, sync::Mutex, time::Duration};
 
 use audio_system::GameAudioPlugin;
 use audioadapter_buffers::direct::InterleavedSlice;
-use bevy::{prelude::*, state::app::StatesPlugin, time::TimeUpdateStrategy};
+use bevy::{
+    asset::LoadState, platform::time::Instant, prelude::*, state::app::StatesPlugin,
+    time::TimeUpdateStrategy,
+};
 use bevy_seedling::{
     context::SampleRate,
     firewheel::{
@@ -25,10 +28,29 @@ const BLOCK: usize = 128;
 const BLOCKS_PER_UPDATE: usize = 6;
 const CHANNELS: usize = 2;
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 struct OfflineDriver {
     processor: Mutex<Option<FirewheelProcessor>>,
     frames_done: u64,
+    /// Un instant que l'horloge n'atteint jamais, remis au moteur comme date de chaque bloc.
+    ///
+    /// Le moteur **corrige son horloge audio par le temps d'horloge écoulé** depuis le dernier
+    /// bloc rendu : en direct, c'est ce qui date un son au bon endroit entre deux blocs. Hors
+    /// ligne, ce temps ne veut rien dire, et sous charge il vaut des dizaines de millisecondes :
+    /// un son demandé à une image sortait alors une à trois images plus tard, d'un rendu à
+    /// l'autre. Le temps écoulé depuis un instant à venir vaut zéro : l'horloge lue par le jeu
+    /// est exactement celle des trames rendues, et un rendu ne dépend plus de la machine.
+    never: Instant,
+}
+
+impl Default for OfflineDriver {
+    fn default() -> Self {
+        Self {
+            processor: Mutex::default(),
+            frames_done: 0,
+            never: Instant::now() + Duration::from_secs(86_400),
+        }
+    }
 }
 
 struct OfflinePlatformPlugin;
@@ -116,7 +138,7 @@ pub fn step(app: &mut App, left: &mut Vec<f32>) {
                 &mut output,
                 BackendProcessInfo {
                     frames: BLOCK,
-                    process_timestamp: None,
+                    process_timestamp: Some(driver.never),
                     duration_since_stream_start: Duration::from_secs_f64(
                         driver.frames_done as f64 / RATE as f64,
                     ),
@@ -157,4 +179,33 @@ pub fn wait_loaded(app: &mut App, paths: &[&str], left: &mut Vec<f32>) {
         std::thread::sleep(Duration::from_millis(1));
     }
     panic!("les fichiers de test ne se chargent pas : {paths:?}");
+}
+
+/// Avance jusqu'à ce que chaque chemin soit **résolu**, chargé ou en échec, puis deux images de
+/// plus, le temps que le backend remplace un fichier manquant par le bip.
+///
+/// Un fichier manquant se résout par une vraie entrée-sortie, en temps d'horloge, alors que les
+/// images d'un rendu hors ligne s'enchaînent sans attendre : un test qui joue un clip absent et
+/// mesure **l'instant** où il sonne doit d'abord attendre ici, sans quoi le son part quand
+/// l'échec arrive, et cet instant dépend de la charge de la machine.
+pub fn wait_settled(app: &mut App, paths: &[&str], left: &mut Vec<f32>) {
+    let server = app.world().resource::<AssetServer>().clone();
+    let handles: Vec<Handle<AudioSample>> =
+        paths.iter().map(|p| server.load(p.to_string())).collect();
+    let settled = |handle: &Handle<AudioSample>| {
+        matches!(
+            server.load_state(handle),
+            LoadState::Loaded | LoadState::Failed(_)
+        )
+    };
+    for _ in 0..2_000 {
+        if handles.iter().all(settled) {
+            step(app, left);
+            step(app, left);
+            return;
+        }
+        step(app, left);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    panic!("les fichiers de test ne se résolvent pas : {paths:?}");
 }

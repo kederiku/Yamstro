@@ -20,7 +20,9 @@ use crate::rng::SimRng;
 use crate::state::{SimHand, SimSession};
 use crate::trace::{Muet, Observateur, libelle_des, libelle_verrous, ligne_de_pas};
 use crate::view::{HandView, ShopView};
-use core_engine::blinds::{BlindContext, BlindDefinition, BlindModifier, BlindType};
+use core_engine::blinds::{
+    BlindContext, BlindDefinition, BlindModifier, BlindType, blind_is_beaten,
+};
 use core_engine::config::{RunConfig, effective_rerolls};
 use core_engine::cups::CupId;
 use core_engine::cups::definitions::cup;
@@ -234,7 +236,7 @@ pub(crate) fn figure_jouable(blind: &BlindContext, hand: YahtzeeHand) -> bool {
 /// transformerait chaque manche gagnée de justesse en défaite, et le taux de
 /// victoire mesuré serait faux, à la baisse, de façon parfaitement crédible.
 fn issue_de_manche(ctx: &BlindContext) -> IssueManche {
-    if ctx.current_score >= ctx.target_score {
+    if blind_is_beaten(ctx) {
         return IssueManche::Battue;
     }
     if ctx.hands_remaining == 0 {

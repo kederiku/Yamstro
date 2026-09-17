@@ -15,8 +15,8 @@ use audio_system::{
     backend::resolve_kind,
     bus::{layer_gain, local_gain, music_gain, sfx_volume},
     music::{
-        CLIMAX_THRESHOLD_PERCENT, DEFAULT_FADE_PER_SECOND, DUCK_DURATION, STEM_PATHS,
-        blind_in_play, target_gains,
+        CLIMAX_THRESHOLD_PERCENT, DEFAULT_FADE_PER_SECOND, DUCK_DURATION, FANFARE_DUCK_GAIN,
+        STEM_PATHS, blind_in_play, target_gains,
     },
     pitch::{seal_tint, step_intensity},
 };
@@ -1181,12 +1181,17 @@ fn test_music_system_runs_in_main_menu() {
     assert_eq!(pousses(&app), manager(&app).current_gains);
     assert_eq!(journal(&app).bus_gain(Bus::Music), 0.5);
 
-    // Le ducking est lu : il multiplie ce qui part, sans toucher aux gains courants.
-    app.world_mut().resource_mut::<AdaptiveMusicManager>().duck = 0.5;
+    // Le ducking multiplie ce qui part, sans toucher aux gains courants. Le champ est réécrit à
+    // chaque image depuis le minuteur (TASK-106) : l'armer, et non écrire le champ.
+    app.world_mut()
+        .resource_mut::<AdaptiveMusicManager>()
+        .duck_timer
+        .reset();
     avancer(&mut app, 16);
-    let attendus = manager(&app).current_gains.map(|gain| gain * 0.5);
-    assert_eq!(pousses(&app), attendus);
-    assert!(attendus[0] > 0.0, "le test ne prouve rien");
+    let courant = manager(&app).current_gains[0];
+    assert!(courant > 0.164, "le ducking a touché au gain courant");
+    let rapport = millioniemes(pousses(&app)[0] / courant);
+    assert!((501_186..=501_188).contains(&rapport), "{rapport}");
 }
 
 #[test]
@@ -2262,5 +2267,183 @@ fn test_reader_runs_after_the_drainer() {
         journal(&app).played().len(),
         3,
         "hors du décompte, le lecteur s'est tu"
+    );
+}
+
+// ------------------------------------------------------------------ TASK-106
+
+fn fanfares(app: &App) -> Vec<PlayedSound> {
+    let clip = banque(app).victory_fanfare;
+    let joues = journal(app).played().iter();
+    joues.filter(|son| son.clip == clip).copied().collect()
+}
+
+fn ducking(app: &App) -> f32 {
+    manager(app).duck
+}
+
+/// Une main jouée jusqu'à la fin de manche, par la machine à états.
+fn jouer_une_main(app: &mut App) {
+    vers_phase(app, RunPhase::Scoring, false);
+    vers_phase(app, RunPhase::RoundEnd, false);
+}
+
+#[test]
+fn test_fanfare_plays_once_per_beaten_blind() {
+    let mut app = timed_app();
+    app.world_mut().insert_resource(volumes(0.5, 0.5, 0.5));
+    app.world_mut()
+        .insert_resource(manche(BlindType::Small, 1_000, 1_000, 3));
+    entrer_en_run(&mut app, RunPhase::Roll);
+    // La fanfare sonne à l'entrée de la **fin de manche**, pas à celle du décompte : le score
+    // de la main n'y est pas encore commis.
+    vers_phase(&mut app, RunPhase::Scoring, false);
+    assert!(
+        fanfares(&app).is_empty(),
+        "la fanfare sonne avant la fin de manche"
+    );
+    vers_phase(&mut app, RunPhase::RoundEnd, false);
+
+    // Une fanfare, sur le bus SFX, à la part locale du volume et à hauteur fixe.
+    let attendue = PlayedSound {
+        clip: banque(&app).victory_fanfare,
+        bus: Bus::Sfx,
+        volume: 1.0,
+        pitch: 1.0,
+    };
+    assert_eq!(fanfares(&app), [attendue]);
+
+    // Deux entrées réflexives dans la fin de manche, sur la même blind : l'enveloppe court, la
+    // garde de réentrance les refuse.
+    for _ in 0..2 {
+        vers_phase(&mut app, RunPhase::RoundEnd, true);
+    }
+    assert_eq!(
+        fanfares(&app).len(),
+        1,
+        "une seconde fanfare pour la même blind"
+    );
+
+    // La blind suivante, perdue à sa première main puis battue, une fois l'enveloppe retombée :
+    // la garde n'avale pas une fanfare légitime.
+    vers_phase(&mut app, RunPhase::Shop, false);
+    vers_phase(&mut app, RunPhase::BlindSelect, false);
+    app.world_mut()
+        .insert_resource(manche(BlindType::Big, 2_000, 500, 3));
+    avancer(&mut app, 1_300);
+    vers_phase(&mut app, RunPhase::Roll, false);
+    jouer_une_main(&mut app);
+    assert_eq!(fanfares(&app).len(), 1, "une fanfare sur une main perdue");
+    app.world_mut().resource_mut::<BlindContext>().current_score = 2_000;
+    vers_phase(&mut app, RunPhase::Roll, false);
+    jouer_une_main(&mut app);
+    assert_eq!(fanfares(&app).len(), 2);
+}
+
+#[test]
+fn test_no_fanfare_on_a_lost_hand() {
+    let mut app = timed_app();
+    app.world_mut()
+        .insert_resource(manche(BlindType::Small, 1_000, 0, 3));
+    entrer_en_run(&mut app, RunPhase::Roll);
+    for restantes in [2_u8, 1, 0] {
+        jouer_une_main(&mut app);
+        {
+            let mut blind = app.world_mut().resource_mut::<BlindContext>();
+            blind.hands_remaining = restantes;
+            blind.current_score += 100;
+        }
+        avancer(&mut app, 100);
+        assert!(fanfares(&app).is_empty(), "une fanfare sur une main perdue");
+        assert_eq!(ducking(&app), 1.0);
+        if restantes > 0 {
+            vers_phase(&mut app, RunPhase::Roll, false);
+        }
+    }
+    // Les seuls sons de ces trois mains sont leurs trois lancers.
+    assert_eq!(journal(&app).played().len(), lancers(&app).len());
+    assert_eq!(lancers(&app).len(), 3);
+}
+
+#[test]
+fn test_no_fanfare_on_game_over() {
+    let mut app = timed_app();
+    app.world_mut()
+        .insert_resource(manche(BlindType::Boss, 1_000, 999, 0));
+    entrer_en_run(&mut app, RunPhase::Roll);
+    jouer_une_main(&mut app);
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::GameOver);
+    for _ in 0..3 {
+        avancer(&mut app, 100);
+    }
+    assert!(fanfares(&app).is_empty(), "une fanfare sur une défaite");
+    assert_eq!(ducking(&app), 1.0);
+}
+
+#[test]
+fn test_duck_lasts_1_2_seconds() {
+    let mut app = timed_app();
+    app.world_mut()
+        .insert_resource(manche(BlindType::Small, 1_000, 1_000, 3));
+    entrer_en_run(&mut app, RunPhase::Roll);
+    assert_eq!(ducking(&app), 1.0, "un ducking sans fanfare");
+    jouer_une_main(&mut app);
+    assert_eq!(fanfares(&app).len(), 1);
+
+    // Un plateau : à chaque image le gain vaut le ducking ou l'unité, jamais une valeur
+    // intermédiaire. Des pas de 50 ms ; la fin de l'enveloppe est à 1 200 ms.
+    let mut ecoule = 0;
+    while ecoule < 1_500 {
+        avancer(&mut app, 50);
+        ecoule += 50;
+        let attendu = if ecoule < 1_200 {
+            FANFARE_DUCK_GAIN
+        } else {
+            1.0
+        };
+        assert_eq!(ducking(&app), attendu, "à {ecoule} ms");
+    }
+}
+
+#[test]
+fn test_duck_applies_after_target_gains() {
+    let mut app = timed_app();
+    entrer_en_run(&mut app, RunPhase::Roll);
+    let cibles = [1.0, 1.0, 0.0, 0.0];
+    app.world_mut()
+        .resource_mut::<AdaptiveMusicManager>()
+        .current_gains = cibles;
+    avancer(&mut app, 16);
+    assert_eq!(pousses(&app), cibles);
+
+    // L'enveloppe armée : ce qui part est multiplié, les cibles et les gains courants intacts.
+    app.world_mut()
+        .resource_mut::<AdaptiveMusicManager>()
+        .duck_timer
+        .reset();
+    avancer(&mut app, 16);
+    assert_eq!(ducking(&app), FANFARE_DUCK_GAIN);
+    assert_eq!(manager(&app).target_gains, cibles);
+    assert_eq!(manager(&app).current_gains, cibles);
+    let pousses_sous_ducking = pousses(&app);
+    assert_eq!(millioniemes(pousses_sous_ducking[0]), 501_187);
+    assert_eq!(millioniemes(pousses_sous_ducking[1]), 501_187);
+    assert_eq!(pousses_sous_ducking[2..], [0.0, 0.0]);
+
+    // L'enveloppe retombée, le mix remonte à son niveau : rien n'a été contaminé.
+    avancer(&mut app, 1_300);
+    assert_eq!(pousses(&app), cibles);
+    assert_eq!(manager(&app).current_gains, cibles);
+}
+
+#[test]
+fn test_duck_gain_matches_the_decibel_formula() {
+    // −6 dB en amplitude. Le littéral est écrit en clair, et tenu aligné sur la formule.
+    assert_eq!(millioniemes(FANFARE_DUCK_GAIN), 501_187);
+    assert_eq!(
+        millioniemes(FANFARE_DUCK_GAIN),
+        millioniemes(10f32.powf(-6.0 / 20.0))
     );
 }
