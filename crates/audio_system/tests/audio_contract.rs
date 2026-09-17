@@ -5,8 +5,10 @@
 use std::{collections::BTreeSet, path::PathBuf, process::Command};
 
 use audio_system::{
-    AudioBackendHandle, AudioClip, BackendKind, Bus, GameAudioPlugin, NullBackend, PlayedSound,
+    AudioBackendHandle, AudioBusVolumes, AudioClip, BackendKind, Bus, GameAudioPlugin, NullBackend,
+    PlayedSound,
     backend::resolve_kind,
+    bus::{layer_gain, local_gain, music_gain, sfx_volume},
 };
 use bevy::{prelude::*, state::app::StatesPlugin};
 use ui_and_juice::JuicePlugin;
@@ -409,4 +411,142 @@ fn test_load_layer_rejects_a_fifth_layer() {
     let server = app.world().resource::<AssetServer>().clone();
     let mut handle = app.world_mut().resource_mut::<AudioBackendHandle>();
     handle.0.load_layer(&server, "audio/stem_de_trop.ogg", 4);
+}
+
+// ------------------------------------------------------------------ TASK-98
+
+fn volumes(master: f32, music: f32, sfx: f32) -> AudioBusVolumes {
+    AudioBusVolumes { master, music, sfx }
+}
+
+#[test]
+fn test_bus_volume_multiplication() {
+    // Des valeurs dyadiques : leurs produits sont exacts en `f32`. L'attendu est un littéral,
+    // jamais la formule sous test, et l'égalité est exacte.
+    let cas = [
+        (0.5, 0.5, 0.5, 0.125),
+        (1.0, 1.0, 1.0, 1.0),
+        (0.25, 0.5, 1.0, 0.125),
+        (0.75, 0.5, 0.5, 0.1875),
+        (1.0, 0.25, 0.25, 0.0625),
+        (0.0, 1.0, 1.0, 0.0),
+        (0.5, 1.0, 0.75, 0.375),
+        (0.125, 0.5, 0.5, 0.03125),
+        (1.0, 0.5, 0.25, 0.125),
+        (0.75, 0.75, 1.0, 0.5625),
+    ];
+    for (sfx, master, local, attendu) in cas {
+        let rendu = sfx_volume(&volumes(master, 1.0, sfx), local);
+        assert_eq!(rendu, attendu, "sfx {sfx}, master {master}, local {local}");
+        assert!((0.0..=1.0).contains(&rendu));
+    }
+    // Le curseur Music ne touche pas un son du bus SFX.
+    assert_eq!(sfx_volume(&volumes(0.5, 0.0, 0.5), 0.5), 0.125);
+}
+
+#[test]
+fn test_music_gain_multiplication() {
+    // Quatre facteurs distincts deux à deux.
+    assert_eq!(music_gain(&volumes(0.75, 0.5, 1.0), 0.25, 0.5), 0.046875);
+    assert_eq!(music_gain(&volumes(1.0, 1.0, 1.0), 1.0, 1.0), 1.0);
+    // Le curseur SFX ne touche pas une couche.
+    assert_eq!(music_gain(&volumes(0.75, 0.5, 0.0), 0.25, 0.5), 0.046875);
+    // Ce que l'on remet à la façade ne porte aucun volume utilisateur.
+    assert_eq!(layer_gain(0.25, 0.5), 0.125);
+    assert_eq!(local_gain(0.5), 0.5);
+}
+
+#[test]
+fn test_volume_clamps_above_one() {
+    let unite = volumes(1.0, 1.0, 1.0);
+    assert_eq!(music_gain(&unite, 1.4, 1.0), 1.0);
+    assert_eq!(sfx_volume(&unite, 2.0), 1.0);
+    assert_eq!(layer_gain(1.000_000_1, 1.0), 1.0);
+    assert_eq!(local_gain(2.0), 1.0);
+    // Et sous zéro : le silence, jamais un gain négatif qui inverserait la phase.
+    assert_eq!(sfx_volume(&unite, -0.5), 0.0);
+    assert_eq!(music_gain(&volumes(-1.0, 1.0, 1.0), 1.0, 1.0), 0.0);
+}
+
+#[test]
+fn test_default_volumes_are_audible() {
+    assert_eq!(AudioBusVolumes::default(), volumes(1.0, 1.0, 1.0));
+
+    // `Default` s'écrit à la main : dérivé, il rendrait trois zéros et un jeu muet sans erreur.
+    let source = lire("crates/audio_system/src/bus.rs");
+    assert!(source.contains("impl Default for AudioBusVolumes {"));
+    let derive = source
+        .lines()
+        .zip(source.lines().skip(1))
+        .find(|(_, suivante)| suivante.starts_with("pub struct AudioBusVolumes"))
+        .map(|(derive, _)| derive)
+        .expect("dérivés de la ressource");
+    assert!(derive.contains("Resource"), "{derive}");
+    assert!(
+        !derive.contains("Default"),
+        "`Default` est dérivé : {derive}"
+    );
+    assert!(
+        !derive.contains("Component"),
+        "`Component` et `Resource` : {derive}"
+    );
+}
+
+#[test]
+fn test_bus_volumes_is_resource_only() {
+    // Le plugin insère la ressource : `GameAudioPlugin::build` appelle `bus_plugin`.
+    let app = headless_app();
+    assert_eq!(
+        *app.world().resource::<AudioBusVolumes>(),
+        volumes(1.0, 1.0, 1.0)
+    );
+}
+
+#[test]
+fn test_bus_gain_pushed_only_when_changed() {
+    let mut app = headless_app();
+
+    // À l'image de son insertion la ressource est « changée » : les valeurs d'ouverture partent.
+    app.update();
+    let ouverture = [(Bus::Master, 1.0), (Bus::Music, 1.0), (Bus::Sfx, 1.0)];
+    assert_eq!(journal(&app).bus_gain_writes(), ouverture);
+
+    // Cinq images inertes : rien de plus.
+    for _ in 0..5 {
+        app.update();
+    }
+    assert_eq!(journal(&app).bus_gain_writes().len(), 3);
+
+    // Une écriture de l'utilisateur : exactement trois poussées de plus, dans l'ordre.
+    app.world_mut().resource_mut::<AudioBusVolumes>().music = 0.5;
+    app.update();
+    let ecritures = journal(&app).bus_gain_writes();
+    assert_eq!(ecritures.len(), 6);
+    assert_eq!(
+        ecritures[3..],
+        [(Bus::Master, 1.0), (Bus::Music, 0.5), (Bus::Sfx, 1.0)]
+    );
+    assert_eq!(journal(&app).bus_gain(Bus::Music), 0.5);
+
+    // Le routage réverbéré rejoint le bus SFX : il n'a pas de curseur, il n'est jamais poussé.
+    assert!(ecritures.iter().all(|(bus, _)| *bus != Bus::SfxReverb));
+    // Et un changement de volume ne relance aucun son.
+    assert!(journal(&app).played().is_empty());
+}
+
+#[test]
+fn test_non_finite_volume_reads_as_the_default() {
+    // `clamp` laisse passer un `NaN`, et un `NaN` poussé au backend donne des échantillons `NaN`.
+    let mut app = headless_app();
+    app.world_mut()
+        .insert_resource(volumes(f32::NAN, f32::INFINITY, 0.25));
+    app.update();
+    let attendues = [(Bus::Master, 1.0), (Bus::Music, 1.0), (Bus::Sfx, 0.25)];
+    assert_eq!(journal(&app).bus_gain_writes(), attendues);
+
+    assert_eq!(sfx_volume(&volumes(f32::NAN, 1.0, 0.5), 0.5), 0.25);
+    assert_eq!(
+        music_gain(&volumes(0.5, f32::NEG_INFINITY, 1.0), 0.5, 1.0),
+        0.25
+    );
 }

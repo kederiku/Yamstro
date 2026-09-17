@@ -151,6 +151,7 @@ pub struct NullBackend {
     layers: LayerSlots<String>,
     layer_gains: [f32; LAYER_COUNT],
     bus_gains: [f32; Bus::ALL.len()],
+    bus_gain_writes: Vec<(Bus, f32)>,
 }
 
 impl Default for NullBackend {
@@ -161,6 +162,7 @@ impl Default for NullBackend {
             layers: LayerSlots::default(),
             layer_gains: [0.0; LAYER_COUNT],
             bus_gains: [1.0; Bus::ALL.len()],
+            bus_gain_writes: Vec::new(),
         }
     }
 }
@@ -201,10 +203,18 @@ impl NullBackend {
         self.bus_gains[bus.index()]
     }
 
-    /// Vide le journal des sons joués, entre deux phases d'un même test. Le catalogue, les
-    /// couches et les gains sont un état, pas un journal : ils restent.
+    /// Un enregistrement par appel à `set_bus_gain`, dans l'ordre : les gains de bus ne bougent
+    /// que sur action de l'utilisateur, leurs poussées se comptent. Les gains de couche, poussés
+    /// à chaque image, ne sont pas journalisés : seule leur dernière valeur est tenue.
+    pub fn bus_gain_writes(&self) -> &[(Bus, f32)] {
+        &self.bus_gain_writes
+    }
+
+    /// Vide les deux journaux, sons joués et poussées de bus, entre deux phases d'un même test.
+    /// Le catalogue, les couches et les gains sont un état, pas un journal : ils restent.
     pub fn clear(&mut self) {
         self.played.clear();
+        self.bus_gain_writes.clear();
     }
 }
 
@@ -236,6 +246,7 @@ impl AudioBackend for NullBackend {
 
     fn set_bus_gain(&mut self, bus: Bus, gain: f32) {
         self.bus_gains[bus.index()] = gain;
+        self.bus_gain_writes.push((bus, gain));
     }
 }
 

@@ -19,6 +19,7 @@ pub use backend::{
     AudioBackend, AudioBackendHandle, AudioClip, BackendKind, Bus, LayerHandle, NullBackend,
     PlayedSound,
 };
+pub use bus::AudioBusVolumes;
 
 /// Monte l'audio du jeu.
 ///
@@ -67,5 +68,6 @@ impl Default for GameAudioPlugin {
 impl Plugin for GameAudioPlugin {
     fn build(&self, app: &mut App) {
         backend::install(app, self.kind);
+        bus::bus_plugin(app);
     }
 }

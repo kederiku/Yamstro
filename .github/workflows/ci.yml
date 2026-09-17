@@ -2322,6 +2322,34 @@ jobs:
           require "TASK-97  le backend réel est écouté"            --files "$AUDIO/tests" -g 'real_backend.rs'
           require "TASK-97  le pilote hors ligne des tests"        --files "$AUDIO/tests/support" -g 'offline.rs'
 
+          # TASK-98 : trois volumes utilisateur, une seule source de vérité. Les
+          # trois champs n'existent qu'ici, `Default` s'écrit à la main (dérivé, il
+          # rendrait trois zéros et un jeu muet sans erreur), `Resource` seule.
+          BUSRS=$AUDIO/src/bus.rs
+          count   "TASK-98  une seule ressource de volumes" 1      -n '^pub struct AudioBusVolumes \{$' crates/
+          count   "TASK-98  trois champs, dans la ressource" 3     -n '^\s+pub (master|music|sfx): f32,$' "$BUSRS"
+          # Ancrée sur la **forme d'un champ**, dans les sources : un test doit
+          # pouvoir nommer ses paramètres `master`, `music` et `sfx`.
+          forbid  "TASK-98  copie d'un volume hors de la ressource" -n '^\s+(pub(\([a-z]+\))? )?(master|music|sfx): f32,$' -g '**/src/**' -g '!**/audio_system/src/bus.rs' crates/
+          require "TASK-98  Default écrit à la main"               -n '^impl Default for AudioBusVolumes \{$' "$BUSRS"
+          forbid  "TASK-98  Default ou Component dérivés sur la ressource" -U -n '#\[derive\([^)]*(Default|Component)[^)]*\)\]\npub struct AudioBusVolumes' "$BUSRS"
+
+          # **Les curseurs s'appliquent sur les bus, et nulle part ailleurs.** La
+          # poussée est gardée par `is_changed` et vise trois bus, jamais le
+          # routage réverbéré, qui rejoint le bus SFX. Un changement de volume ne
+          # relance aucun son. Et personne ne remet à la façade les deux formules
+          # de ce que l'auditeur entend : les curseurs sortiraient au carré, sans
+          # qu'un test sur le backend nul le voie.
+          require "TASK-98  poussée gardée par is_changed"         -n '^\s+if !volumes\.is_changed\(\) \{$' "$BUSRS"
+          count   "TASK-98  exactement trois bus poussés" 3        -n '^\s+\(Bus::(Master|Music|Sfx), volumes\.(master|music|sfx), "' "$BUSRS"
+          forbid  "TASK-98  routage réverbéré poussé"              -n 'Bus::SfxReverb' "$BUSRS"
+          forbid  "TASK-98  son relancé par un changement de volume" -n '\.play\(' "$BUSRS"
+          count   "TASK-98  quatre fonctions pures" 4              -n '^pub fn (sfx_volume\(v: &AudioBusVolumes, local_volume: f32\)|music_gain\(v: &AudioBusVolumes, stem_weight: f32, duck: f32\)|local_gain\(local_volume: f32\)|layer_gain\(stem_weight: f32, duck: f32\)) -> f32 \{$' "$BUSRS"
+          forbid  "TASK-98  formule entendue remise à la façade"   -U -n '\.(play|set_layer_gain|set_bus_gain)\([^;]*\b(sfx_volume|music_gain)\(' "$AUDIO/src"
+          require "TASK-98  valeur non finie lue comme le défaut"  -n '^\s+if value\.is_finite\(\) \{$' "$BUSRS"
+          require "TASK-98  le plugin branche les volumes"         -n '^\s+bus::bus_plugin\(app\);$' "$AUDIO/src/lib.rs"
+          require "TASK-98  les poussées de bus se comptent"       -n '^\s+pub fn bus_gain_writes\(&self\) -> &\[\(Bus, f32\)\] \{$' "$BACKEND"
+
           exit $status
 
       # ---- Passe rand 0.10 et Default (15 septembre 2026) ----
