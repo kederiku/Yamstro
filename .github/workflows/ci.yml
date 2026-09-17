@@ -2443,7 +2443,7 @@ jobs:
           # était datée : elle est levée ici, et remplacée par un comptage.)
           require "TASK-101 phase de run optionnelle"              -n '^\s+phase: Option<Res<State<RunPhase>>>,$' "$MUSIC"
           require "TASK-101 contexte de blind optionnel"           -n '^\s+blind: Option<Res<BlindContext>>,$' "$MUSIC"
-          forbid  "TASK-101 paramètre pris nu"                     -n '^[^/]*[ (]Res<(State<RunPhase>|BlindContext)>' "$AUDIO/src"
+          forbid  "TASK-101 paramètre pris nu"                     -n '^[^/]*[ (]Res<(State<RunPhase>|BlindContext|HandContext)>' "$AUDIO/src"
           require "TASK-101 état de l'application pris nu"         -n '^\s+app_state: Res<State<AppState>>,$' "$MUSIC"
           forbid  "TASK-101 état de l'application optionnel"       -n '^[^/]*Option<Res<State<AppState>>>' "$AUDIO/src"
           require "TASK-101 build exige la machine à états"        -n '^\s+app\.world\(\)\.contains_resource::<State<AppState>>\(\)$' "$LIB"
@@ -2527,6 +2527,57 @@ jobs:
           require "TASK-102 stem absent dit une fois"              -n '^\s+if failed && !backend\.layer_warned\[index\] \{$' "$BACKEND"
           require "TASK-102 le bip s'écoute sur le son rendu"      -n '^fn test_a_missing_clip_is_heard_as_a_beep\(\) \{$' "$AUDIO/tests/real_backend.rs"
           require "TASK-102 le stem absent s'observe"              -n '^fn test_a_missing_stem_is_said_once\(\) \{$' "$AUDIO/tests/real_backend.rs"
+
+          # TASK-103 : trois sons pilotés par l'observation de l'état. Un seul
+          # patron : comparer à une copie locale, jouer sur la différence,
+          # réécrire la copie **après** la boucle. Les trois systèmes tournent en
+          # `Update`, sans condition d'état, et l'audio ne crée ni n'émet aucun
+          # événement : il reste un pur lecteur.
+          require "TASK-103 trois systèmes, en Update"             -n '^\s+app\.add_systems\(Update, \(play_hand_consumed, play_dice_roll, play_die_lock\)\);$' "$SFX"
+          forbid  "TASK-103 condition d'état ou accroche à une transition" -n '^[^/]*(run_if\(|in_state\(|OnEnter\(|OnExit\()' "$SFX"
+          forbid  "TASK-103 événement créé ou émis par l'audio"    -n '^[^/]*(MessageWriter|add_message|derive\([^)]*(Message|Event)|EventWriter|add_event)' "$AUDIO/src"
+          require "TASK-103 contexte de blind optionnel"           -n '^\s+blind: Option<Res<BlindContext>>,$' "$SFX"
+          require "TASK-103 contexte de main optionnel"            -n '^\s+hand: Option<Res<HandContext>>,$' "$SFX"
+          require "TASK-103 phase de run optionnelle"              -n '^\s+phase: Option<Res<State<RunPhase>>>,$' "$SFX"
+
+          # La case consommée : le bloc du document, copie `Local` comprise, à
+          # hauteur fixe. La grille est `Copy` depuis l'Étape 1 : la copie sort de
+          # la ressource sans clone, et rien n'est redéclaré ici.
+          require "TASK-103 copie locale de la grille"             -n '^\s+mut seen: Local<HandGrid>, // HandGrid : bitset des 13 figures \(Étape 1\)$' "$SFX"
+          require "TASK-103 un bit nouvellement posé"              -n '^\s+if blind\.used_hands\.contains\(hand\) && !seen\.contains\(hand\) \{$' "$SFX"
+          require "TASK-103 la grille recopiée après la boucle"    -U -n '^    \}\n    \*seen = blind\.used_hands;\n\}$' "$SFX"
+          require "TASK-103 la grille est Copy"                    -U -n '^#\[derive\(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize\)\]\npub struct HandGrid\(u16\);$' crates/core_engine/src/hands.rs
+          # Ancrée sur la liste des figures et sur les deux types, pas sur
+          # `const ALL` nu : la façade a la sienne, celle des routages.
+          forbid  "TASK-103 figures ou grille redéclarées"         -n '^[^/]*(const ALL: \[YahtzeeHand|enum YahtzeeHand|struct HandGrid)' "$AUDIO/src"
+          count   "TASK-103 un seul lecteur du loquet de case" 1   -n '^[^/]*bank\.hand_consumed' "$AUDIO/src"
+
+          # Le lancer : l'entrée dans la phase, ou une baisse du compteur à phase
+          # constante ; jamais les deux dans une image. `dice_roll()` a ici son
+          # seul appelant, et la hauteur n'est pas recalculée (le comptage des
+          # tirages de TASK-102 le tient).
+          count   "TASK-103 un seul appelant du tirage" 1          -n '^[^/]*\.dice_roll\(' "$AUDIO/src"
+          require "TASK-103 clip et hauteur viennent de la banque" -U -n '^\s+let \(clip, pitch\) = bank\.dice_roll\(\);\n\s+backend\.0\.play\(clip, Bus::Sfx, local_gain\(1\.0\), pitch\);$' "$SFX"
+          require "TASK-103 entrée dans la phase de lancer"        -n '^\s+let entered = rolling && seen\.phase != Some\(RunPhase::Roll\);$' "$SFX"
+          require "TASK-103 baisse du compteur, en phase de lancer" -U -n '^\s+let rerolled = rolling\n\s+&& matches!\(\(seen\.rerolls_left, now\.rerolls_left\), \(Some\(before\), Some\(after\)\) if after < before\);$' "$SFX"
+          require "TASK-103 un seul son pour les deux raisons"     -n '^\s+if entered \|\| rerolled \{$' "$SFX"
+          require "TASK-103 le témoin recopié en fin de corps"     -U -n '^    \}\n    \*seen = now;\n\}$' "$SFX"
+
+          # Le verrouillage : le champ du dé, pas le marqueur posé avec lui ; le
+          # déverrouillage est muet ; la copie est réécrite après la boucle.
+          require "TASK-103 dés verrouillés, par le champ"         -n '^\s+\.filter\(\|die\| die\.locked\)$' "$SFX"
+          forbid  "TASK-103 marqueur de verrouillage observé"      -n '^[^/]*\bLocked\b' "$AUDIO/src"
+          require "TASK-103 les verrous recopiés après la boucle"  -U -n '^    \}\n    \*seen = locked;\n\}$' "$SFX"
+          count   "TASK-103 un seul lecteur du loquet de dé" 1     -n '^[^/]*bank\.die_lock' "$AUDIO/src"
+
+          # Ce qui part à la façade est la part locale du volume : les curseurs
+          # s'appliquent sur les bus. Ni le loquet de case ni celui de dé ne sont
+          # transposés. Trois clips restent sans appelant : l'interface attend
+          # l'Étape 11, et la pièce a pour observable l'or de la session de run.
+          count   "TASK-103 deux loquets à hauteur fixe" 2         -n '^\s+backend\.0\.play\(latch, Bus::Sfx, local_gain\(1\.0\), 1\.0\);$' "$SFX"
+          forbid  "TASK-103 curseurs lus par les sons d'état"      -n '^[^/]*(AudioBusVolumes|volumes\.)' "$SFX"
+          forbid  "TASK-103 son d'état transposé"                  -n '^[^/]*PitchScaleTracker' "$SFX"
+          forbid  "TASK-103 clip sans geste câblé de force"        -n '^[^/]*bank\.(ui_hover|ui_click|coin)' "$AUDIO/src"
 
           exit $status
 

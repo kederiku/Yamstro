@@ -19,11 +19,12 @@ use core_engine::{
     blinds::{BlindContext, BlindDefinition, BlindType},
     config::RunConfig,
     cups::{CupId, definitions::cup},
-    hands::{HandGrid, HandLevels},
+    dice::{Die, DieId},
+    hands::{HandGrid, HandLevels, YahtzeeHand},
     rng::RunRng,
 };
 use game_state::{
-    resources::RunSession,
+    resources::{HandContext, RunSession},
     states::{AppState, RunPhase},
 };
 use rand::Rng;
@@ -1482,4 +1483,310 @@ fn test_bank_is_never_serialized() {
         !directes.contains("serde"),
         "la crate audio dépend d'une crate de sérialisation : {directes}"
     );
+}
+
+// ------------------------------------------------------------------ TASK-103
+
+/// Une application démarrée : la banque est chargée, et les curseurs sont à mi-course, pour
+/// qu'un volume utilisateur remis à la façade se voie.
+fn app_des_sons_d_etat() -> App {
+    let mut app = headless_app();
+    app.world_mut().insert_resource(volumes(0.5, 0.5, 0.5));
+    app.update();
+    app
+}
+
+fn marquer(app: &mut App, figure: YahtzeeHand) {
+    app.world_mut()
+        .resource_mut::<BlindContext>()
+        .used_hands
+        .mark(figure);
+}
+
+fn images(app: &mut App, combien: usize) {
+    for _ in 0..combien {
+        app.update();
+    }
+}
+
+fn loquets_de_case(app: &App) -> Vec<PlayedSound> {
+    let clip = banque(app).hand_consumed;
+    let joues = journal(app).played().iter();
+    joues.filter(|son| son.clip == clip).copied().collect()
+}
+
+fn lancers(app: &App) -> Vec<PlayedSound> {
+    let clips = banque(app).dice_rolls;
+    let joues = journal(app).played().iter();
+    joues
+        .filter(|son| clips.contains(&son.clip))
+        .copied()
+        .collect()
+}
+
+fn loquets_de_de(app: &App) -> Vec<PlayedSound> {
+    let clip = banque(app).die_lock;
+    let joues = journal(app).played().iter();
+    joues.filter(|son| son.clip == clip).copied().collect()
+}
+
+fn relances(app: &mut App, restantes: u8) {
+    app.world_mut().insert_resource(HandContext {
+        rerolls_left: restantes,
+        active_evaluations: Vec::new(),
+        selected_hand: None,
+    });
+}
+
+fn verrouiller(app: &mut App, de: Entity, verrou: bool) {
+    app.world_mut().get_mut::<Die>(de).expect("dé").locked = verrou;
+}
+
+#[test]
+fn test_hand_consumed_sound_fires_once_per_case() {
+    let mut app = app_des_sons_d_etat();
+    app.world_mut()
+        .insert_resource(manche(BlindType::Small, 1_000, 0, 4));
+
+    marquer(&mut app, YahtzeeHand::Yahtzee);
+    images(&mut app, 10);
+    assert_eq!(
+        loquets_de_case(&app).len(),
+        1,
+        "un par case, jamais un par image"
+    );
+
+    marquer(&mut app, YahtzeeHand::Chance);
+    images(&mut app, 10);
+    assert_eq!(loquets_de_case(&app).len(), 2);
+    // Rien d'autre n'a sonné.
+    assert_eq!(journal(&app).played().len(), 2);
+}
+
+#[test]
+fn test_grid_clear_allows_the_same_hand_to_sound_again() {
+    let mut app = app_des_sons_d_etat();
+    app.world_mut()
+        .insert_resource(manche(BlindType::Small, 1_000, 0, 4));
+    marquer(&mut app, YahtzeeHand::Yahtzee);
+    images(&mut app, 1);
+
+    // La grille se vide : aucun son, et la copie se remet en phase en une image.
+    app.world_mut()
+        .resource_mut::<BlindContext>()
+        .used_hands
+        .clear();
+    images(&mut app, 2);
+    assert_eq!(loquets_de_case(&app).len(), 1, "le vidage a sonné");
+    marquer(&mut app, YahtzeeHand::Yahtzee);
+    images(&mut app, 1);
+    assert_eq!(loquets_de_case(&app).len(), 2);
+
+    // Le geste réel de la blind suivante : le contexte est **remplacé** par un contexte neuf.
+    app.world_mut()
+        .insert_resource(manche(BlindType::Big, 2_000, 0, 4));
+    images(&mut app, 2);
+    assert_eq!(loquets_de_case(&app).len(), 2, "le contexte neuf a sonné");
+    marquer(&mut app, YahtzeeHand::Yahtzee);
+    images(&mut app, 1);
+    assert_eq!(loquets_de_case(&app).len(), 3);
+}
+
+#[test]
+fn test_no_sound_outside_a_blind() {
+    let mut app = app_des_sons_d_etat();
+    assert!(!app.world().contains_resource::<BlindContext>());
+    images(&mut app, 50);
+    assert!(journal(&app).played().is_empty());
+
+    app.world_mut()
+        .insert_resource(manche(BlindType::Small, 1_000, 0, 4));
+    images(&mut app, 10);
+    assert!(
+        journal(&app).played().is_empty(),
+        "un contexte neuf a sonné"
+    );
+
+    // Le système **tourne** : un bit posé ensuite s'entend. Un journal vide ne le prouvait pas.
+    marquer(&mut app, YahtzeeHand::FullHouse);
+    images(&mut app, 1);
+    assert_eq!(loquets_de_case(&app).len(), 1);
+}
+
+#[test]
+fn test_two_hands_marked_in_one_frame_produce_two_sounds() {
+    let mut app = app_des_sons_d_etat();
+    app.world_mut()
+        .insert_resource(manche(BlindType::Small, 1_000, 0, 4));
+    images(&mut app, 1);
+    marquer(&mut app, YahtzeeHand::Aces);
+    marquer(&mut app, YahtzeeHand::LargeStraight);
+    images(&mut app, 3);
+    assert_eq!(loquets_de_case(&app).len(), 2);
+}
+
+#[test]
+fn test_hand_consumed_is_not_pitched() {
+    let mut app = app_des_sons_d_etat();
+    app.world_mut()
+        .insert_resource(manche(BlindType::Small, 1_000, 0, 4));
+    marquer(&mut app, YahtzeeHand::Sixes);
+    images(&mut app, 1);
+
+    // Hauteur fixe, bus SFX, et la part locale du volume seule : les curseurs sont à 0,5, et ce
+    // qui part à la façade vaut 1,0.
+    let attendu = PlayedSound {
+        clip: banque(&app).hand_consumed,
+        bus: Bus::Sfx,
+        volume: 1.0,
+        pitch: 1.0,
+    };
+    assert_eq!(journal(&app).played(), [attendu]);
+}
+
+#[test]
+fn test_dice_roll_sound_fires_once_per_roll() {
+    let mut app = app_des_sons_d_etat();
+    relances(&mut app, 2);
+    entrer_en_run(&mut app, RunPhase::Roll);
+    images(&mut app, 10);
+    assert_eq!(lancers(&app).len(), 1, "l'entrée dans la phase de lancer");
+
+    relances(&mut app, 1);
+    images(&mut app, 10);
+    assert_eq!(lancers(&app).len(), 2, "première relance");
+    relances(&mut app, 0);
+    images(&mut app, 10);
+    assert_eq!(lancers(&app).len(), 3, "seconde relance");
+
+    // Une relance refusée ne décrémente rien : le contexte est réécrit à l'identique.
+    relances(&mut app, 0);
+    images(&mut app, 10);
+    assert_eq!(lancers(&app).len(), 3, "la relance refusée a sonné");
+
+    // Rien d'autre n'a sonné, et chaque lancer vient de la banque : clip, hauteur, part locale.
+    assert_eq!(journal(&app).played().len(), 3);
+    for son in lancers(&app) {
+        assert!((0.95..=1.05).contains(&son.pitch), "hauteur {}", son.pitch);
+        assert_eq!((son.bus, son.volume), (Bus::Sfx, 1.0));
+    }
+}
+
+#[test]
+fn test_dice_roll_sounds_on_phase_entry_alone() {
+    // Un gobelet à zéro relance : le compteur ne bouge jamais, seul l'entrée dans la phase parle.
+    let mut app = app_des_sons_d_etat();
+    relances(&mut app, 0);
+    entrer_en_run(&mut app, RunPhase::Roll);
+    images(&mut app, 10);
+    assert_eq!(lancers(&app).len(), 1);
+
+    // La main suivante : le compteur **remonte**, dans l'image même de l'entrée. Un son, pas deux.
+    vers_phase(&mut app, RunPhase::Scoring, false);
+    vers_phase(&mut app, RunPhase::RoundEnd, false);
+    assert_eq!(lancers(&app).len(), 1, "une autre phase a sonné");
+    relances(&mut app, 2);
+    vers_phase(&mut app, RunPhase::Roll, false);
+    assert_eq!(lancers(&app).len(), 2);
+
+    // Une baisse hors de la phase de lancer est muette ; une transition réflexive aussi.
+    vers_phase(&mut app, RunPhase::Scoring, false);
+    relances(&mut app, 1);
+    images(&mut app, 5);
+    assert_eq!(lancers(&app).len(), 2, "une baisse hors du lancer a sonné");
+    vers_phase(&mut app, RunPhase::RoundEnd, false);
+    vers_phase(&mut app, RunPhase::Roll, false);
+    assert_eq!(lancers(&app).len(), 3);
+    vers_phase(&mut app, RunPhase::Roll, true);
+    assert_eq!(lancers(&app).len(), 3, "la transition réflexive a sonné");
+}
+
+#[test]
+fn test_die_lock_sound_fires_on_lock_only() {
+    let mut app = app_des_sons_d_etat();
+    let des: Vec<Entity> = (0..3)
+        .map(|rang| app.world_mut().spawn(Die::new(DieId(rang), 6)).id())
+        .collect();
+    images(&mut app, 2);
+    assert!(journal(&app).played().is_empty());
+
+    verrouiller(&mut app, des[0], true);
+    images(&mut app, 1);
+    assert_eq!(loquets_de_de(&app).len(), 1);
+    images(&mut app, 10);
+    assert_eq!(loquets_de_de(&app).len(), 1, "jamais un par image");
+
+    // Deux dés dans la même image : deux loquets.
+    verrouiller(&mut app, des[1], true);
+    verrouiller(&mut app, des[2], true);
+    images(&mut app, 1);
+    assert_eq!(loquets_de_de(&app).len(), 3);
+
+    // Le déverrouillage est muet, et reverrouiller sonne de nouveau.
+    for de in &des {
+        verrouiller(&mut app, *de, false);
+    }
+    images(&mut app, 10);
+    assert_eq!(loquets_de_de(&app).len(), 3, "le déverrouillage a sonné");
+    verrouiller(&mut app, des[0], true);
+    images(&mut app, 1);
+    assert_eq!(loquets_de_de(&app).len(), 4);
+
+    assert_eq!(journal(&app).played().len(), 4);
+    for son in loquets_de_de(&app) {
+        assert_eq!((son.bus, son.volume, son.pitch), (Bus::Sfx, 1.0, 1.0));
+    }
+}
+
+#[test]
+fn test_state_driven_sounds_never_advance_run_rng() {
+    let mut app = app_des_sons_d_etat();
+    app.world_mut().insert_resource(session());
+    app.world_mut()
+        .insert_resource(manche(BlindType::Small, 1_000, 0, 4));
+    let de = app.world_mut().spawn(Die::new(DieId(0), 6)).id();
+    relances(&mut app, 3);
+    entrer_en_run(&mut app, RunPhase::Roll);
+    let avant = octets_du_generateur(&app);
+
+    for tour in 0..100_usize {
+        // Une case, un verrouillage une image sur deux, une relance à chaque tour.
+        let figure = YahtzeeHand::ALL[tour % 13];
+        if tour % 13 == 0 {
+            app.world_mut()
+                .resource_mut::<BlindContext>()
+                .used_hands
+                .clear();
+            app.update();
+        }
+        marquer(&mut app, figure);
+        verrouiller(&mut app, de, tour % 2 == 0);
+        relances(&mut app, 3);
+        app.update();
+        relances(&mut app, 2);
+        app.update();
+    }
+
+    // Les trois systèmes ont bien sonné, et beaucoup : le test ne passe pas à vide.
+    assert_eq!(loquets_de_case(&app).len(), 100);
+    assert_eq!(loquets_de_de(&app).len(), 50);
+    assert_eq!(lancers(&app).len(), 101);
+    // Le lancer passe bien par le tirage de la banque : les hauteurs varient, les clips aussi.
+    let hauteurs: BTreeSet<u32> = lancers(&app).iter().map(|s| s.pitch.to_bits()).collect();
+    let clips: BTreeSet<usize> = lancers(&app).iter().map(|s| rang(s.clip)).collect();
+    assert!(
+        hauteurs.len() > 50,
+        "{} hauteurs distinctes",
+        hauteurs.len()
+    );
+    assert_eq!(clips.len(), 6, "les six variations ne sortent pas");
+    assert_eq!(octets_du_generateur(&app), avant);
+
+    // Témoin : un seul tirage sur un flux de la run change ces octets.
+    app.world_mut()
+        .resource_mut::<RunSession>()
+        .rng
+        .dice
+        .next_u64();
+    assert_ne!(octets_du_generateur(&app), avant);
 }

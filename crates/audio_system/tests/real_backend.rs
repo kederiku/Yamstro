@@ -423,6 +423,10 @@ fn blind(kind: BlindType, target_score: u64, current_score: u64) -> BlindContext
 fn test_state_changes_are_heard() {
     let mut app = offline_app();
     let mut left = Vec::new();
+    // Ce test écoute la musique : l'entrée dans la phase de lancer fait sonner un lancer de dés
+    // (TASK-103), qui est ici un bip, ses fichiers manquant à cette racine. Le curseur SFX le tait.
+    app.world_mut()
+        .insert_resource(AudioBusVolumes { sfx: 0.0, ..UNITY });
     app.world_mut()
         .resource_mut::<NextState<AppState>>()
         .set(AppState::InRun);
@@ -527,6 +531,10 @@ fn go_phase(app: &mut App, phase: RunPhase, reflexive: bool, left: &mut Vec<f32>
 fn test_music_survives_the_state_cycle() {
     let mut app = offline_app();
     let mut left = Vec::new();
+    // Le lancer de dés sonne à chaque entrée dans sa phase (TASK-103) : le curseur SFX le tait,
+    // ce test écoute les impulsions de la musique.
+    app.world_mut()
+        .insert_resource(AudioBusVolumes { sfx: 0.0, ..UNITY });
     layers_with_gains(&mut app, [1.0; 4], &mut left);
     render(&mut app, 0.5, &mut left);
     let voices = players(&mut app);
