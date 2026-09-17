@@ -38,3 +38,11 @@ firewheel = { version = "0.12", default-features = false, features = ["freeverb_
 # `SmallRng` est exporté sans feature en 0.10 : celle que le ticket nommait
 # n'existe pas. Le générateur local de la banque de sons arrive à TASK-102.
 rand = { workspace = true }
+# La feature de journalisation de Bevy monte son plugin par `DefaultPlugins` et pèse 741 971
+# octets de WASM (mesuré à TASK-92) ; la crate `log` est déjà dans l'arbre et ne coûte rien.
+log = "0.4"
+
+[dev-dependencies]
+# Les tampons que le processeur du moteur attend : `tests/real_backend.rs` fait avancer le
+# contexte audio lui-même, sans périphérique, sur le patron du banc de TASK-95.
+audioadapter-buffers = "4"

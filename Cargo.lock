@@ -362,11 +362,13 @@ checksum = "f93ebbf82d06013f4c41fe71303feb980cddd78496d904d06be627972de51a24"
 name = "audio_system"
 version = "0.1.0"
 dependencies = [
+ "audioadapter-buffers",
  "bevy",
  "bevy_seedling",
  "core_engine",
  "firewheel",
  "game_state",
+ "log",
  "rand",
  "ui_and_juice",
 ]

@@ -426,7 +426,13 @@ jobs:
           # aujourd'hui : le titre de section de `lib.rs` et le commentaire de
           # `Cargo.toml` documentent tous deux cette absence.
           forbid  "critère 4  ressource de son déclarée ou employée" -n '(struct|enum|impl|::<|Res<|ResMut<|insert_resource\()\s*(AudioFeedbackConfig|ScoringAudioPool|SoundEffectBank)' crates/
-          forbid  "critère 4  API audio de Bevy dans le juice" -n '\b(AudioPlayer|AudioSource|AudioSink|AudioBundle|PlaybackSettings)\b' crates/
+          # **Scindée à TASK-97.** Les quatre premiers noms sont ceux du lecteur de
+          # Bevy : proscrits partout, façade comprise, la branche A ne l'emploie
+          # pas. Le cinquième est aussi le nom des réglages de lecture du backend
+          # retenu : il reste proscrit partout **sauf dans la façade**, exclue par
+          # son nom, seul fichier du dépôt qui ait le droit de parler au backend.
+          forbid  "critère 4  API audio de Bevy dans le juice" -n '\b(AudioPlayer|AudioSource|AudioSink|AudioBundle)\b' crates/
+          forbid  "critère 4  réglages de lecture hors de la façade" -n '\bPlaybackSettings\b' -g '!**/audio_system/src/backend.rs' crates/
           forbid  "critère 4  module audio dans le juice" --files crates/ui_and_juice/src -g 'audio.rs'
           # La hauteur est un livrable de l'Étape 8 (demi-ton tempéré, C41).
           # Ancré sur des identifiants : le `0\.05` que réclamait le ticket
@@ -2267,7 +2273,8 @@ jobs:
           require "TASK-96  le seul nœud de réverbération"         -n '^firewheel = \{ version = "0\.12", default-features = false, features = \["freeverb_node"\] \}$' "$AUDIO/Cargo.toml"
           forbid  "TASK-96  feature son de Bevy dans la crate audio" -n '"(audio|bevy_audio|vorbis|symphonia-[a-z]+|flac|mp3|wav)"' "$AUDIO/Cargo.toml"
           forbid  "TASK-96  dépendance inverse vers la crate audio" -n '^\s*audio_system\s*=' crates/core_engine/Cargo.toml crates/game_state/Cargo.toml crates/ui_and_juice/Cargo.toml crates/shop_system/Cargo.toml crates/sim_harness/Cargo.toml
-          require "TASK-96  le plugin vit dans lib.rs"             -n '^pub struct GameAudioPlugin;$' "$AUDIO/src/lib.rs"
+          # La forme du plugin a changé à TASK-97 : il porte un discriminant.
+          require "TASK-96  le plugin vit dans lib.rs"             -n '^pub struct GameAudioPlugin \{$' "$AUDIO/src/lib.rs"
           count   "TASK-96  cinq modules posés une fois pour toutes" 5 -n '^pub mod (backend|bus|music|pitch|sfx);$' "$AUDIO/src/lib.rs"
           require "TASK-96  le contrat de la crate existe"         --files "$AUDIO/tests" -g 'audio_contract.rs'
 
@@ -2281,6 +2288,39 @@ jobs:
           # et les porter avant le premier cargo du job.
           require "TASK-96  ALSA installé sur le runner"           -n '^\s+sudo apt-get install -y libasound2-dev$' .github/workflows/ci.yml
           require "TASK-96  ALSA avant le premier cargo"           -U -n 'libasound2-dev\n\n      - run: cargo fmt --check' .github/workflows/ci.yml
+
+          # TASK-97 : la façade est la seule frontière avec le backend. Les cinq
+          # autres fichiers de sources ne le nomment pas, pas même en prose, et
+          # aucun handle du backend n'en sort : ils ne connaissent que des index.
+          BACKEND=$AUDIO/src/backend.rs
+          forbid  "TASK-97  la façade fuit hors de backend.rs"     -n 'bevy_seedling|firewheel|kira|bevy_audio|rodio|cpal|Handle<' "$AUDIO/src/lib.rs" "$AUDIO/src/bus.rs" "$AUDIO/src/music.rs" "$AUDIO/src/pitch.rs" "$AUDIO/src/sfx.rs"
+          require "TASK-97  le trait, objet-sûr et lisible par Any" -n '^pub trait AudioBackend: Any \+ Send \+ Sync \{$' "$BACKEND"
+          count   "TASK-97  cinq méthodes, celles du ticket" 5     -n '^\s+fn (load_clip|play|load_layer|set_layer_gain|set_bus_gain)\(&mut self.*;$' "$BACKEND"
+          forbid  "TASK-97  une voie nommée sans être chargée"     -n 'fn layer\(' "$BACKEND"
+          forbid  "TASK-97  implémentation sous attribut de test ou feature" -n 'cfg\(test\)|cfg\(feature|feature = "' "$BACKEND"
+          forbid  "TASK-97  feature de fixtures déclarée"          -n '^test-fixtures\s*=' --glob '**/Cargo.toml' Cargo.toml crates/
+          require "TASK-97  ressource porteuse, Resource seule"    -U -n '#\[derive\(Resource\)\]\npub struct AudioBackendHandle\(pub Box<dyn AudioBackend>\);' "$BACKEND"
+          require "TASK-97  le plugin porte un discriminant"       -n '^\s+kind: BackendKind,$' "$AUDIO/src/lib.rs"
+          forbid  "TASK-97  le plugin porte le backend"            -n 'Box<dyn' "$AUDIO/src/lib.rs"
+          require "TASK-97  build monte le backend"                -n '^\s+backend::install\(app, self\.kind\);$' "$AUDIO/src/lib.rs"
+
+          # Ce que TASK-95 a mesuré et que ce fichier applique. L'unité de la
+          # façade est l'amplitude linéaire : un volume « linéaire » du moteur
+          # vaut son carré, il ne s'écrit donc jamais tel quel. La réverbération
+          # ne rend que l'humide : en parallèle, jamais chaînée. Les couches
+          # partent sous un même horodatage, jamais créées en pause. Le graphe
+          # part du gabarit vide : celui par défaut impose un limiteur.
+          require "TASK-97  amplitude convertie en décibels"       -n '^\s+Volume::Decibels\(20\.0 \* gain\.log10\(\)\)$' "$BACKEND"
+          forbid  "TASK-97  volume linéaire du moteur écrit tel quel" -n 'Volume::Linear\(' "$BACKEND"
+          require "TASK-97  réverbération en parallèle du bus"     -U -n '\.connect\(SfxBus\)\n\s+\.connect\(reverb\);' "$BACKEND"
+          forbid  "TASK-97  réverbération chaînée en série"        -n 'chain_node\(FreeverbNode' "$BACKEND"
+          require "TASK-97  couches sous un même horodatage"       -n '^\s+DiffTimestamp::new\(&time\),$' "$BACKEND"
+          forbid  "TASK-97  lecteur créé en pause"                 -n 'with_playback\(false\)' "$BACKEND"
+          require "TASK-97  graphe posé sur le gabarit vide"       -n '^\s+\.insert_resource\(AudioGraphTemplate::Empty\)$' "$BACKEND"
+          forbid  "TASK-97  limiteur dans le graphe"               -n 'LimiterNode' "$BACKEND"
+          require "TASK-97  la tuyauterie tourne en PostUpdate"    -n '^\s+\.add_systems\(PostUpdate, apply_seedling_backend\);$' "$BACKEND"
+          require "TASK-97  le backend réel est écouté"            --files "$AUDIO/tests" -g 'real_backend.rs'
+          require "TASK-97  le pilote hors ligne des tests"        --files "$AUDIO/tests/support" -g 'offline.rs'
 
           exit $status
 
