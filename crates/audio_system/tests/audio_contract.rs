@@ -9,8 +9,14 @@ use audio_system::{
     PlayedSound,
     backend::resolve_kind,
     bus::{layer_gain, local_gain, music_gain, sfx_volume},
+    music::{CLIMAX_THRESHOLD_PERCENT, blind_in_play, target_gains},
 };
 use bevy::{prelude::*, state::app::StatesPlugin};
+use core_engine::{
+    blinds::{BlindContext, BlindDefinition, BlindType},
+    hands::HandGrid,
+};
+use game_state::states::{AppState, RunPhase};
 use ui_and_juice::JuicePlugin;
 
 fn racine() -> PathBuf {
@@ -549,4 +555,226 @@ fn test_non_finite_volume_reads_as_the_default() {
         music_gain(&volumes(0.5, f32::NEG_INFINITY, 1.0), 0.5, 1.0),
         0.25
     );
+}
+
+// ------------------------------------------------------------------ TASK-99
+
+/// Tests purs : aucune `App`, aucun backend, aucun son.
+fn manche(
+    kind: BlindType,
+    target_score: u64,
+    current_score: u64,
+    hands_remaining: u8,
+) -> BlindContext {
+    BlindContext {
+        blind: BlindDefinition {
+            kind,
+            target_score,
+            ..Default::default()
+        },
+        target_score,
+        current_score,
+        hands_remaining,
+        used_hands: HandGrid::default(),
+    }
+}
+
+const EN_MANCHE: (AppState, Option<RunPhase>) = (AppState::InRun, Some(RunPhase::Roll));
+
+fn climax(target_score: u64, current_score: u64) -> f32 {
+    let manche = manche(BlindType::Small, target_score, current_score, 3);
+    target_gains(EN_MANCHE.0, EN_MANCHE.1, Some(&manche))[3]
+}
+
+#[test]
+fn test_climax_threshold_is_75_percent() {
+    // Le scénario du document, en littéraux : la valeur du seuil est tenue par le comportement.
+    assert_eq!(climax(1000, 740), 0.0);
+    assert_eq!(climax(1000, 749), 0.0);
+    assert_eq!(climax(1000, 750), 1.0);
+    // Petites cibles : deux tiers ne suffisent pas, et l'arithmétique reste entière.
+    assert_eq!(climax(3, 2), 0.0);
+    assert_eq!(climax(3, 3), 1.0);
+    assert_eq!(climax(4, 3), 1.0);
+    // Une cible nulle est atteinte d'emblée.
+    assert_eq!(climax(0, 0), 1.0);
+}
+
+#[test]
+fn test_target_gains_are_pure() {
+    let boss = manche(BlindType::Boss, 1000, 800, 2);
+    let petite = manche(BlindType::Small, 500, 10, 4);
+    let attendu = target_gains(AppState::InRun, Some(RunPhase::Scoring), Some(&boss));
+    assert_eq!(attendu, [1.0, 1.0, 1.0, 1.0]);
+
+    // Mille appels, entrelacés avec d'autres entrées : aucun ne dépend de ceux qui le précèdent.
+    for tour in 0..1_000 {
+        match tour % 3 {
+            0 => assert_eq!(
+                target_gains(AppState::MainMenu, None, None),
+                [0.6, 0.4, 0.0, 0.0]
+            ),
+            1 => {
+                let autre = target_gains(AppState::InRun, Some(RunPhase::Roll), Some(&petite));
+                assert_eq!(autre, [1.0, 1.0, 0.0, 0.0]);
+            }
+            _ => {}
+        }
+        assert_eq!(
+            target_gains(AppState::InRun, Some(RunPhase::Scoring), Some(&boss)),
+            attendu
+        );
+    }
+}
+
+#[test]
+fn test_tension_on_boss_and_last_hand() {
+    let tension = |kind, hands| {
+        target_gains(
+            EN_MANCHE.0,
+            EN_MANCHE.1,
+            Some(&manche(kind, 1000, 0, hands)),
+        )[2]
+    };
+    // Les deux conditions se lèvent indépendamment.
+    assert_eq!(tension(BlindType::Boss, 4), 1.0);
+    assert_eq!(tension(BlindType::Small, 1), 1.0);
+    assert_eq!(tension(BlindType::Small, 2), 0.0);
+    assert_eq!(tension(BlindType::Big, 4), 0.0);
+    // À zéro main la blind est perdue mais l'image existe encore : la Tension ne retombe pas.
+    assert_eq!(tension(BlindType::Small, 0), 1.0);
+}
+
+#[test]
+fn test_gains_are_zero_outside_a_run() {
+    for app in [AppState::Codex, AppState::GameOver, AppState::Victory] {
+        assert_eq!(target_gains(app, None, None), [0.0; 4], "{app:?}");
+    }
+    // Le transitoire : la run est entrée, sa phase n'est pas encore dans le monde.
+    assert_eq!(target_gains(AppState::InRun, None, None), [0.0; 4]);
+}
+
+#[test]
+fn test_climax_holds_at_u64_extremes() {
+    // Les bornes se calculent ici, en `u128`, à partir de la constante : le plus petit score qui
+    // atteint le seuil. Un flottant ne représente plus les entiers un à un à cette échelle, et
+    // une multiplication en `u64` y déborde : ce test est le seul qui distingue ces écritures.
+    for target in [u64::MAX, u64::MAX - 1, (1 << 60) + 1, (1 << 53) + 1] {
+        let seuil = (u128::from(target) * CLIMAX_THRESHOLD_PERCENT).div_ceil(100);
+        let seuil = u64::try_from(seuil).expect("le seuil tient dans un u64");
+        assert_eq!(
+            climax(target, seuil - 1),
+            0.0,
+            "cible {target}, une unité sous le seuil"
+        );
+        assert_eq!(climax(target, seuil), 1.0, "cible {target}, au seuil");
+        assert_eq!(
+            climax(target, target - 1),
+            1.0,
+            "cible {target}, juste sous la cible"
+        );
+        assert_eq!(
+            climax(target, u64::MAX),
+            1.0,
+            "cible {target}, score maximal"
+        );
+    }
+}
+
+#[test]
+fn test_menu_and_shop_gains_match_the_table() {
+    // Les cinq lignes du tableau de l'étape, une à une.
+    assert_eq!(
+        target_gains(AppState::MainMenu, None, None),
+        [0.6, 0.4, 0.0, 0.0]
+    );
+    assert_eq!(
+        target_gains(AppState::CupSelect, None, None),
+        [0.6, 0.4, 0.0, 0.0]
+    );
+    assert_eq!(
+        target_gains(AppState::InRun, Some(RunPhase::Shop), None),
+        [0.5, 0.5, 0.0, 0.0]
+    );
+
+    let calme = manche(BlindType::Small, 1000, 0, 4);
+    for phase in [
+        RunPhase::BlindSelect,
+        RunPhase::Roll,
+        RunPhase::Scoring,
+        RunPhase::RoundEnd,
+    ] {
+        assert_eq!(
+            target_gains(AppState::InRun, Some(phase), Some(&calme)),
+            [1.0, 1.0, 0.0, 0.0]
+        );
+    }
+
+    // La quatrième ligne s'ajoute à la troisième, elle ne la remplace pas.
+    let boss = manche(BlindType::Boss, 1000, 0, 4);
+    assert_eq!(
+        target_gains(EN_MANCHE.0, EN_MANCHE.1, Some(&boss)),
+        [1.0, 1.0, 1.0, 0.0]
+    );
+    // La cinquième laisse la Tension « inchangée » : à zéro ici, à un sur une Mise Boss.
+    let euphorie = manche(BlindType::Small, 1000, 900, 3);
+    assert_eq!(
+        target_gains(EN_MANCHE.0, EN_MANCHE.1, Some(&euphorie)),
+        [1.0, 1.0, 0.0, 1.0]
+    );
+    let tout = manche(BlindType::Boss, 1000, 900, 3);
+    assert_eq!(
+        target_gains(EN_MANCHE.0, EN_MANCHE.1, Some(&tout)),
+        [1.0, 1.0, 1.0, 1.0]
+    );
+}
+
+#[test]
+fn test_blind_in_play_filters_stale_contexts() {
+    // Le contexte de blind n'est jamais retiré du monde : en boutique, c'est celui de la blind
+    // qu'on vient de battre, score au-dessus de la cible.
+    let battu = manche(BlindType::Boss, 1000, 1200, 2);
+    let boutique = (AppState::InRun, Some(RunPhase::Shop));
+
+    // **Le piège** : la fonction pure fait ce qu'on lui dit. C'est une erreur d'appelant.
+    assert_eq!(
+        target_gains(boutique.0, boutique.1, Some(&battu)),
+        [0.5, 0.5, 1.0, 1.0]
+    );
+    // Filtré, le mix de la boutique est celui du tableau.
+    let filtre = blind_in_play(boutique.0, boutique.1, Some(&battu));
+    assert!(filtre.is_none());
+    assert_eq!(
+        target_gains(boutique.0, boutique.1, filtre),
+        [0.5, 0.5, 0.0, 0.0]
+    );
+
+    // Hors d'une run, le contexte d'une run finie ne compte pas davantage.
+    for app in [
+        AppState::MainMenu,
+        AppState::CupSelect,
+        AppState::Codex,
+        AppState::GameOver,
+        AppState::Victory,
+    ] {
+        for phase in [None, Some(RunPhase::Roll)] {
+            assert!(
+                blind_in_play(app, phase, Some(&battu)).is_none(),
+                "{app:?} {phase:?}"
+            );
+        }
+    }
+    assert!(blind_in_play(AppState::InRun, None, Some(&battu)).is_none());
+
+    // En jeu, le contexte passe tel quel : de la sélection de blind à la fin de manche.
+    for phase in [
+        RunPhase::BlindSelect,
+        RunPhase::Roll,
+        RunPhase::Scoring,
+        RunPhase::RoundEnd,
+    ] {
+        let rendu = blind_in_play(AppState::InRun, Some(phase), Some(&battu));
+        assert!(rendu.is_some_and(|b| std::ptr::eq(b, &battu)), "{phase:?}");
+    }
+    assert!(blind_in_play(EN_MANCHE.0, EN_MANCHE.1, None).is_none());
 }

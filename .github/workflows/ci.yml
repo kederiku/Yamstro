@@ -2350,6 +2350,27 @@ jobs:
           require "TASK-98  le plugin branche les volumes"         -n '^\s+bus::bus_plugin\(app\);$' "$AUDIO/src/lib.rs"
           require "TASK-98  les poussées de bus se comptent"       -n '^\s+pub fn bus_gain_writes\(&self\) -> &\[\(Bus, f32\)\] \{$' "$BACKEND"
 
+          # TASK-99 : les gains cibles, fonction pure de l'état. Le seuil du
+          # Climax n'est écrit **qu'une fois** dans les sources de la crate, sous
+          # son nom, et la comparaison est entière, en u128 : un flottant perd
+          # des unités au-delà de 2^53, une multiplication en u64 déborde. Les
+          # tests vivent hors de `src` : ils tiennent la valeur par le
+          # comportement, en littéraux, sans la récrire ici.
+          MUSIC=$AUDIO/src/music.rs
+          require "TASK-99  le seuil, sous son nom, et il vaut ce qu'il vaut" -n '^pub const CLIMAX_THRESHOLD_PERCENT: u128 = 75; //' "$MUSIC"
+          count   "TASK-99  le seuil n'est écrit qu'une fois" 1    -n '75' "$AUDIO/src"
+          count   "TASK-99  une seule définition du seuil" 1       -n 'const CLIMAX_THRESHOLD_PERCENT' crates/
+          require "TASK-99  comparaison entière en u128"           -n '^\s+if \(b\.current_score as u128\) \* 100 >= \(b\.target_score as u128\) \* CLIMAX_THRESHOLD_PERCENT \{$' "$MUSIC"
+          forbid  "TASK-99  flottant double dans la musique"       -n 'f64' "$MUSIC"
+          require "TASK-99  tension sur Boss ou dernière main"     -n '^\s+if b\.blind\.kind == BlindType::Boss \|\| b\.hands_remaining <= 1 \{$' "$MUSIC"
+          require "TASK-99  signature pure de target_gains"        -U -n '^pub fn target_gains\(\n\s+app: AppState,\n\s+phase: Option<RunPhase>,\n\s+blind: Option<&BlindContext>,\n\) -> \[f32; 4\] \{$' "$MUSIC"
+          require "TASK-99  le filtre des contextes périmés"       -U -n '^pub fn blind_in_play\(\n\s+app: AppState,\n\s+phase: Option<RunPhase>,\n\s+blind: Option<&BlindContext>,\n\) -> Option<&BlindContext> \{$' "$MUSIC"
+          require "TASK-99  chemin réel des types de blind"        -n '^use core_engine::blinds::\{BlindContext, BlindType\};$' "$MUSIC"
+          forbid  "TASK-99  chemin mort des types de blind"        -n 'crate::blind\b|core_engine::blind::|blinds::definition' "$AUDIO/src"
+          # L'audio ne calcule jamais un score et n'anticipe aucun total : il lit
+          # le score commis, et rien de la file de dépilement.
+          forbid  "TASK-99  total anticipé par l'audio"            -n 'ScoringStepQueue|ScoringReport|final_score' "$AUDIO/src"
+
           exit $status
 
       # ---- Passe rand 0.10 et Default (15 septembre 2026) ----
