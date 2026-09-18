@@ -372,7 +372,13 @@ jobs:
           # y compris une ligne `audio_system = …` dans un manifeste amont, que ce
           # motif attrape. Les features son de Bevy y sont interdites par le bloc
           # de l'Étape 8.
-          forbid  "critère 4  dépendance de tweening ou audio" -n '^\s*[a-z0-9_-]*(tween|kira|rodio|audio|vorbis|symphonia|seedling)[a-z0-9_-]*\s*=|"(bevy_audio|vorbis)"' --glob '**/Cargo.toml' -g '!**/audio_system/Cargo.toml' crates/
+          #
+          # **Seconde exclusion nominative, depuis TASK-108** : la cible de mesure
+          # dépend de la crate audio, c'est sa raison d'être, et elle porte une
+          # feature `audio`. Son manifeste sort de la portée par son nom ; ce
+          # qu'il n'a pas le droit de déclarer (un backend, le lecteur de Bevy)
+          # est tenu par le bloc de l'Étape 8.
+          forbid  "critère 4  dépendance de tweening ou audio" -n '^\s*[a-z0-9_-]*(tween|kira|rodio|audio|vorbis|symphonia|seedling)[a-z0-9_-]*\s*=|"(bevy_audio|vorbis)"' --glob '**/Cargo.toml' -g '!**/audio_system/Cargo.toml' -g '!**/wasm_size/Cargo.toml' crates/
           # Ancrée sur l'**acte** — la ligne de manifeste, l'import, le chemin —
           # et non sur le nom : la note qui explique pourquoi ce site d'appel
           # n'ordonne rien côté juice doit pouvoir le nommer. Vingt-quatrième
@@ -1618,24 +1624,31 @@ jobs:
           # déclaration. Mesuré : une dépendance `kira` posée dans le manifeste
           # de la boutique fait tomber ces deux gardes-là.
 
-          # ---- Étape 6 : la cible de mesure suit le sommet du graphe (TASK-81 bis) ----
-          # La mesure WASM ne vaut que si son binaire monte le jeu entier, et le
-          # jeu entier n'est visible que depuis la crate dont toutes les autres
-          # sont des dépendances. Mesuré à TASK-81 : posée dans la crate de mise
-          # en scène, la cible ignorait toute la boutique, et l'écart jouait à la
-          # baisse, donc sans déclencher la porte de taille. La cible vit dans la
-          # crate du sommet, monte chacun des plugins, et il n'en existe qu'une :
-          # deux cibles feraient deux chiffres et deux références, donc aucune
-          # garde. Le jour où une crate s'ajoute au-dessus de la boutique, la
-          # cible y remonte et ces lignes suivent.
-          CIBLE_WASM=$BOUTIQUE/src/bin/wasm_size.rs
-          require "critère 8  cible de mesure au sommet du graphe" -n '^fn main\(\)' "$CIBLE_WASM"
-          require "critère 8  la cible monte les états"      -n '^\s+GameStatePlugin,$' "$CIBLE_WASM"
-          require "critère 8  la cible monte la mise en scène" -n '^\s+JuicePlugin,$' "$CIBLE_WASM"
-          require "critère 8  la cible monte la boutique"    -n '^\s+ShopPlugin,$' "$CIBLE_WASM"
-          require "critère 8  le script mesure la crate du sommet" -n '^\s+-p shop_system --features measure --bin' ci/measure-wasm.sh
-          forbid  "critère 8  seconde cible de mesure"       --files crates -g '**/src/bin/*.rs' -g '!**/shop_system/src/bin/wasm_size.rs'
-          forbid  "critère 8  cible restée en dessous du sommet" -n 'name = "wasm_size"' crates/ -g '!crates/shop_system/Cargo.toml'
+          # ---- Étape 6 : la cible de mesure monte le jeu entier (TASK-81 bis) ----
+          # La mesure WASM ne vaut que si son binaire monte le jeu entier. Mesuré
+          # à TASK-81 : posée dans la crate de mise en scène, la cible ignorait
+          # toute la boutique, et l'écart jouait à la baisse, donc sans déclencher
+          # la porte de taille. Elle est alors montée dans la crate du sommet du
+          # graphe. **Revue à TASK-108** : avec le son, le graphe n'a plus de
+          # sommet, la boutique et le son sont sœurs. La cible est donc une crate
+          # binaire à elle, qui dépend de tout, et ces lignes l'ont suivie. Il
+          # n'en existe qu'une : deux cibles feraient deux chiffres et deux
+          # références, donc aucune garde.
+          CIBLE_WASM=crates/wasm_size/src
+          require "critère 8  la cible de mesure est un binaire" -n '^fn main\(\)' "$CIBLE_WASM/main.rs"
+          require "critère 8  la cible monte les états"      -n '^\s+app\.add_plugins\(GameStatePlugin\)$' "$CIBLE_WASM/lib.rs"
+          require "critère 8  la cible monte la mise en scène" -n '^\s+\.add_plugins\(JuicePlugin\)$' "$CIBLE_WASM/lib.rs"
+          require "critère 8  la cible monte la boutique"    -n '^\s+\.add_plugins\(ShopPlugin\)$' "$CIBLE_WASM/lib.rs"
+          require "critère 8  le script mesure la crate qui dépend de tout" -n '^\s+-p wasm_size "\$\{FEATURES\[@\]\}" --bin' ci/measure-wasm.sh
+          forbid  "critère 8  seconde cible de mesure"       --files crates -g '**/src/bin/*.rs'
+          # Ancrée sur l'**acte** : un binaire qui monte le jeu. Le harnais de
+          # simulation est un binaire en ligne de commande, il ne monte rien, et
+          # aucune garde ne l'exclut par son nom (l'audit de l'Étape 6 bis
+          # l'interdit). Le jour où le vrai binaire du jeu arrive, cette ligne
+          # tombe, et c'est voulu : il absorbe la cible ou la remplace, il ne la
+          # double pas.
+          forbid  "critère 8  second binaire de jeu dans le dépôt" -n '^[^/]*DefaultPlugins' crates/ -g '**/src/main.rs' -g '**/src/bin/*.rs' -g '!crates/wasm_size/src/main.rs'
+          forbid  "critère 8  cible déclarée ailleurs"       -n 'name = "wasm_size"' crates/ -g '!crates/wasm_size/Cargo.toml'
 
           exit $status
 
@@ -1910,7 +1923,7 @@ jobs:
           # Critère 8 : la cible de mesure monte le plugin. Une cible qui
           # l'omettrait mesurerait un binaire amputé, et l'écart jouerait à la
           # baisse, sans déclencher la porte de taille.
-          require "critère 8  plugin monté dans la cible" -n '^\s+VisualEffectsPlugin,$' crates/shop_system/src/bin/wasm_size.rs
+          require "critère 8  plugin monté dans la cible" -n '^\s+\.add_plugins\(VisualEffectsPlugin\)$' crates/wasm_size/src/lib.rs
 
           # TASK-83 : les réglages du filtre et le mode dégradé, déclarés dans
           # `settings.rs` à côté de `JuiceSettings` (raccord B), posés par le
@@ -2177,7 +2190,7 @@ jobs:
           require "TASK-93  les limites de l'adaptateur"       -n '^\s+priority: WgpuSettingsPriority::Functionality,$' "$PLG"
           forbid  "TASK-93  limites minimales WebGL2 figées"   -n 'WgpuSettingsPriority::(WebGL2|WebGPU)\b' crates/ -g '!**/graphics/plugin.rs'
           forbid  "TASK-93  limites figées dans la configuration" -n 'priority: WgpuSettingsPriority::(WebGL2|WebGPU)' "$PLG"
-          require "TASK-93  la cible monte la configuration de rendu" -n '^\s+DefaultPlugins\.set\(render_plugin\(\)\),$' crates/shop_system/src/bin/wasm_size.rs
+          require "TASK-93  la cible monte la configuration de rendu" -n '^\s+app\.add_plugins\(DefaultPlugins\.set\(render_plugin\(\)\)\);$' crates/wasm_size/src/main.rs
           require "TASK-93  les assets pesés"                 -n '^assets=\$\(find assets -type f -exec cat \{\} \+ \| wc -c' ci/check-wasm-size.sh
           require "TASK-93  le total comparé à la cible"      -n '^if \[ "\$\{total\}" -gt "\$\{CIBLE_ABSOLUE\}" \]; then$' ci/check-wasm-size.sh
           require "TASK-93  la page charge le module"         -n '^\s+import init from "\./wasm_size\.js";$' ci/web/index.html
@@ -2276,7 +2289,10 @@ jobs:
           # du backend**, pesés à ce ticket : le décodeur OGG, la sortie audio, et
           # le seul nœud de réverbération pris dans le moteur.
           AUDIO=crates/audio_system
-          require "TASK-96  six membres, dans l'ordre du graphe"   -U -n 'members = \[\n  "crates/core_engine",\n  "crates/game_state",\n  "crates/ui_and_juice",\n  "crates/shop_system",\n  "crates/audio_system",\n  "crates/sim_harness",\n\]' Cargo.toml
+          # **Revue à TASK-108** : « six membres » était une photographie, tombée
+          # à l'arrivée du septième. La forme durable tient l'ordre du graphe, pas
+          # le compte.
+          require "TASK-96  la crate audio à sa place dans le graphe" -U -n 'members = \[\n  "crates/core_engine",\n  "crates/game_state",\n  "crates/ui_and_juice",\n  "crates/shop_system",\n  "crates/audio_system",\n  "crates/sim_harness",\n' Cargo.toml
           require "TASK-96  backend épinglé, sans ses défauts"     -n '^bevy_seedling = \{ version = "=0\.8\.0", default-features = false, features = \["ogg", "cpal"\] \}$' "$AUDIO/Cargo.toml"
           require "TASK-96  le seul nœud de réverbération"         -n '^firewheel = \{ version = "0\.12", default-features = false, features = \["freeverb_node"\] \}$' "$AUDIO/Cargo.toml"
           forbid  "TASK-96  feature son de Bevy dans la crate audio" -n '"(audio|bevy_audio|vorbis|symphonia-[a-z]+|flac|mp3|wav)"' "$AUDIO/Cargo.toml"
@@ -2737,6 +2753,51 @@ jobs:
           require "TASK-107 le registre a son titre"               -n '^## Registre$' assets/CREDITS.md
           require "TASK-107 le registre a ses cinq colonnes"       -n '^\| Fichier \| Source \| Auteur \| Licence \| Ajouté le \|$' assets/CREDITS.md
           require "TASK-107 la licence se lit dans la colonne"     -n '^\s+let \(path, licence\) = \(&row\[0\], row\[3\]\.as_str\(\)\);$' "$ASSETS_CONTRACT"
+
+          # TASK-108 : **la mesure lie le son, sur son backend réel.** Le mode de
+          # défaillance n'est pas une panne : c'est un chiffre stable et faux.
+          # Deux gardiens, qui ne voient pas la même chose, mesuré au banc : le
+          # **texte** refuse le backend nul dans la cible, que la balance ne voit
+          # pas (même poids à l'octet près, le plugin choisit son backend à
+          # l'exécution, les deux sont liés) ; le **plancher du coût du son**, dans
+          # la porte de taille, voit un son qui ne serait plus lié du tout, ce
+          # qu'aucun motif ne voit.
+          MESURE=crates/wasm_size
+          require "TASK-108 la cible monte le son, sur son backend réel" -n '^\s+app\.add_plugins\(audio_system::GameAudioPlugin::new\(\)\);$' "$MESURE/src/main.rs"
+          count   "TASK-108 le son n'est monté qu'une fois par la cible" 1 -n '^[^/]*GameAudioPlugin' "$MESURE/src"
+          forbid  "TASK-108 backend nul ou hors ligne dans la cible" -n '^[^/]*(headless|offline)\(\)' "$MESURE/src"
+          require "TASK-108 le son se retire par une feature"      -U -n '^\s+#\[cfg\(feature = "audio"\)\]\n\s+app\.add_plugins\(audio_system::GameAudioPlugin::new\(\)\);$' "$MESURE/src/main.rs"
+          require "TASK-108 le son après les plugins de jeu"       -U -n '^\s+add_game_plugins\(&mut app\);\n\s+#\[cfg\(feature = "audio"\)\]$' "$MESURE/src/main.rs"
+          require "TASK-108 la feature audio, par défaut"          -n '^default = \["audio"\]$' "$MESURE/Cargo.toml"
+          require "TASK-108 la feature audio porte la dépendance"  -n '^audio = \["dep:audio_system"\]$' "$MESURE/Cargo.toml"
+          require "TASK-108 le son, dépendance optionnelle"        -n '^audio_system = \{ path = "\.\./audio_system", version = "0\.1\.0", optional = true \}$' "$MESURE/Cargo.toml"
+          require "TASK-108 le binaire reste derrière son verrou"  -n '^required-features = \["measure"\]$' "$MESURE/Cargo.toml"
+          require "TASK-108 la cible, dernier membre du workspace" -U -n '^  "crates/wasm_size",\n\]$' Cargo.toml
+          forbid  "TASK-108 backend déclaré par la cible"          -n '^\s*(kira|rodio|bevy_seedling|firewheel|cpal|symphonia|bevy_tweening)[a-z0-9_-]*\s*=' "$MESURE/Cargo.toml"
+
+          # De l'outillage, pas du code de jeu : une liste de plugins et une
+          # caméra d'observation. Branche A : ni le lecteur de Bevy, ni son décodeur.
+          forbid  "TASK-108 logique de jeu dans la cible"          -n '^[^/]*(derive\((Component|Resource|Message|Event)|impl Plugin for|fn .*\(.*(Query|Res|ResMut)<)' "$MESURE/src"
+          count   "TASK-108 un seul système dans la cible, la caméra" 1 -n '^[^/]*add_systems\(' "$MESURE/src"
+          forbid  "TASK-108 lecteur audio de Bevy dans le binaire" -n '^[^#]*"(bevy_audio|vorbis|symphonia-vorbis)"' "$MESURE/Cargo.toml"
+          forbid  "TASK-108 feature 3D dans le binaire"            -n '^[^#]*"(bevy_pbr|bevy_gltf|3d|bevy_animation)"' "$MESURE/Cargo.toml"
+          require "TASK-108 le jeu mesuré démarre"                 -n '^fn test_the_measured_game_boots\(\) \{$' "$MESURE/tests/boot.rs"
+          require "TASK-108 le test de démarrage monte la liste de la cible" -U -n '^\s+let mut app = headless_base\(\);\n\s+add_game_plugins\(&mut app\);$' "$MESURE/tests/boot.rs"
+
+          # Aucun cycle ouvert : seule la cible dépend du son. La boutique a perdu
+          # son binaire et son verrou.
+          forbid  "TASK-108 le son nommé sous la cible"            -n 'audio_system' crates/core_engine crates/game_state crates/ui_and_juice crates/shop_system crates/sim_harness
+          forbid  "TASK-108 verrou de mesure resté dans la boutique" -n '^measure = ' crates/shop_system/Cargo.toml
+
+          # La porte de taille : deux builds, le coût du son et son plancher, la
+          # marge restante. La référence ne s'écrit jamais depuis un script.
+          require "TASK-108 le jeu sans le son est mesuré"         -n '^sans_son=\$\(ci/measure-wasm\.sh "\$\{SORTIE\}-sans-audio" sans-audio\)$' ci/check-wasm-size.sh
+          require "TASK-108 le coût du son est une différence"     -n '^son=\$\(\( mesure - sans_son \)\)$' ci/check-wasm-size.sh
+          require "TASK-108 le plancher du coût du son"            -n '^PLANCHER_SON=1000000$' ci/check-wasm-size.sh
+          require "TASK-108 le plancher fait tomber la porte"      -n '^if \[ "\$\{son\}" -lt "\$\{PLANCHER_SON\}" \]; then$' ci/check-wasm-size.sh
+          require "TASK-108 le mode sans son retire la feature"    -n '^\s+sans-audio\) FEATURES=\(--no-default-features --features measure\) ;;$' ci/measure-wasm.sh
+          forbid  "TASK-108 référence écrite par un script"        -n '>\s*"?(\$\{REFERENCE_FICHIER\}|ci/wasm-size-baseline\.txt)' ci/ .github/workflows/ci.yml
+          require "TASK-108 l'arbre complet sans la feature proscrite" -n '^fn test_no_symphonia_vorbis_in_workspace_tree\(\) \{$' "$AUDIO/tests/audio_contract.rs"
 
           exit $status
 

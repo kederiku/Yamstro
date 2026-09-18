@@ -8,6 +8,7 @@ members = [
   "crates/shop_system",
   "crates/audio_system",
   "crates/sim_harness",
+  "crates/wasm_size",
 ]
 
 [workspace.package]

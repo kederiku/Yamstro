@@ -1,0 +1,59 @@
+# crates/wasm_size/Cargo.toml
+#
+# **La cible de mesure de la taille WebAssembly, et rien d'autre.** Un substitut
+# daté du binaire du jeu : l'étape qui créera ce binaire l'absorbe ou le remplace.
+# De l'outillage : aucune règle, aucune constante de jeu, aucun composant.
+[package]
+name = "wasm_size"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+# Aligné sur les autres crates : sans cela, `cargo deny` compte la crate comme
+# non licenciée, `deny.toml` n'ignorant que les paquets privés.
+publish = false
+
+[dependencies]
+# **Elle dépend de tout ce que le jeu livrera**, et c'est sa raison d'être. Tant
+# que la cible vivait dans une crate de fonctionnalité, elle ne voyait que les
+# dépendances de cette crate : posée dans la mise en scène, elle a ignoré la
+# boutique (mesuré à TASK-81) ; laissée dans la boutique, elle aurait ignoré le
+# son, qui est sa sœur et non son ancêtre. La version accompagne le chemin : une
+# dépendance de chemin nue est comptée comme un joker, que `deny.toml` refuse.
+game_state = { path = "../game_state", version = "0.1.0" }
+ui_and_juice = { path = "../ui_and_juice", version = "0.1.0" }
+shop_system = { path = "../shop_system", version = "0.1.0" }
+# Optionnelle, pour que le coût du son se **mesure** : voir `[features]`.
+audio_system = { path = "../audio_system", version = "0.1.0", optional = true }
+# La liste du binaire : celle des crates d'affichage, à l'identique. Ni
+# `bevy_audio`, ni `vorbis` : le son passe par `bevy_seedling`, qui décode seul
+# (branche A de l'addendum de l'ADR-006). Aucune feature 3D : en 0.19 elles ne
+# s'impliquent plus les unes les autres, et chacune se paie en mégaoctets.
+bevy = { workspace = true, default-features = false, features = [
+  "bevy_asset", "bevy_color", "bevy_core_pipeline",
+  "bevy_render", "bevy_sprite", "bevy_state", "bevy_text",
+  "bevy_ui", "bevy_window", "bevy_winit",
+  "multi_threaded", "png", "x11", "webgl2",
+] }
+
+[features]
+# `audio` est active par défaut : la mesure de référence lie le son. Elle se
+# retire (`--no-default-features --features measure`) pour mesurer le jeu sans
+# lui, et la différence des deux `.wasm` **est** le coût du son. Sans cette table,
+# `--no-default-features` ne retirerait rien, et ce coût se publierait à zéro.
+default = ["audio"]
+audio = ["dep:audio_system"]
+# Réserve le binaire à qui le demande. Sans ce verrou, `cargo build --workspace`
+# et `cargo test --workspace` lieraient un jeu Bevy complet à chaque ticket.
+measure = []
+
+[[bin]]
+name = "wasm_size"
+path = "src/main.rs"
+required-features = ["measure"]
+
+[dev-dependencies]
+# Le test de démarrage monte le son sur son backend nul : aucun périphérique
+# n'est ouvert par un test.
+audio_system = { path = "../audio_system", version = "0.1.0" }
+# La trace que la boutique laisse dans le monde est une ressource du moteur.
+core_engine = { path = "../core_engine", version = "0.1.0", features = ["bevy"] }

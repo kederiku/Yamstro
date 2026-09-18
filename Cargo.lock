@@ -5352,6 +5352,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasm_size"
+version = "0.1.0"
+dependencies = [
+ "audio_system",
+ "bevy",
+ "core_engine",
+ "game_state",
+ "shop_system",
+ "ui_and_juice",
+]
+
+[[package]]
 name = "wayland-sys"
 version = "0.31.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"

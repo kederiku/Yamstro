@@ -142,6 +142,31 @@ fn test_no_symphonia_vorbis_in_tree() {
     }
 }
 
+/// TASK-108 : le même contrôle, sur **tout le workspace**, la cible de mesure comprise. C'est
+/// elle qui porte les features du binaire : la plus susceptible de tirer la feature proscrite,
+/// ou le lecteur de Bevy, que la branche A refuse.
+#[test]
+fn test_no_symphonia_vorbis_in_workspace_tree() {
+    let arbre = arbre(&["-e", "features", "--workspace"]);
+    assert!(
+        arbre.contains("wasm_size"),
+        "la cible de mesure n'est pas dans l'arbre lu"
+    );
+    assert!(
+        arbre.contains("symphonia-codec-vorbis"),
+        "le décodeur du backend a quitté l'arbre"
+    );
+
+    let proscrite = format!("feature \"{}-{}\"", "symphonia", "vorbis");
+    assert!(
+        !arbre.contains(&proscrite),
+        "la feature proscrite est activée quelque part dans le workspace"
+    );
+    for absent in ["bevy_audio", "rodio", "lewton"] {
+        assert!(!arbre.contains(absent), "`{absent}` est entré dans l'arbre");
+    }
+}
+
 #[test]
 fn test_juice_plugin_still_registers_no_audio_resource() {
     // L'inventaire de la mise en scène, vu d'ici : trois ressources, celles que

@@ -119,3 +119,37 @@ TASK-96 a pesé des jeux plus étroits et retenu 2 495 750 octets, voir plus hau
 octets avant le premier fichier son. La porte de +5 % (24 242 759) sera franchie quand la cible de
 mesure liera le backend : 23 088 342 + 2 495 750 = 25 584 092. TASK-108 réécrit la référence à la
 main et tient le budget des stems dans ce qui reste.
+
+## La mesure liée (TASK-108, 18 septembre 2026)
+
+La prévision ci-dessus pesait le backend dans le banc. TASK-108 l'a **lié au jeu** : la cible de
+mesure est devenue une crate binaire à elle, `crates/wasm_size/`, qui dépend de tout, et elle est
+construite deux fois, sans le son puis avec lui. Après `wasm-opt -Oz` :
+
+| Grandeur | Octets |
+| :-- | --: |
+| le jeu sans le son, quatre plugins | 23 088 790 |
+| ancienne référence, même jeu mesuré depuis la boutique | 23 088 342 |
+| **le jeu, son compris : nouvelle référence** | **25 350 138** |
+| coût du son, par différence | 2 261 348 |
+| `assets/`, dont 462 939 de son | 478 485 |
+| total comparé à la cible | 25 828 623 |
+| **marge restante sous 26 214 400** | **385 777** |
+
+Le banc surestimait le backend de 234 402 octets (2 495 750 prévus). Le déménagement de la cible
+pèse 448 octets : l'ancienne montait déjà les quatre plugins depuis TASK-81, il n'y avait rien à
+rattraper. Le saut de référence, +9,8 %, est donc **le son, et lui seul**.
+
+**Il reste 385 777 octets pour les Étapes 10, 9 et 11**, polices et traductions comprises. Tant
+que cette marge est inférieure à 5 % de la référence, le plafond de +5 % (26 617 644) passe
+au-dessus de la cible absolue : c'est elle qui mord la première, et c'est la marge que la porte
+de taille publie désormais.
+
+**Un levier est mesuré, et il n'est pas tiré.** Le profil `release` est à `opt-level = 3`, et
+il sert aussi au desktop. Le même jeu, son compris, par la seule variable
+`CARGO_PROFILE_RELEASE_OPT_LEVEL` : 19 284 488 octets à `"s"` (−6,07 Mo), 16 165 602 à `"z"`
+(−9,18 Mo). Le coût en fluidité dans un navigateur n'est pas mesuré : aucun build jouable
+n'existe sur cette branche pour le chronométrer. Un `[profile.wasm-release]` qui hérite de
+`release` est la forme attendue ; la décision revient à un ticket de réduction, que l'audit de
+clôture de l'étape reçoit comme point ouvert. TASK-108 ne l'a pas prise : changer le profil et
+lier le son dans le même commit aurait fait bouger la référence pour deux causes à la fois.
