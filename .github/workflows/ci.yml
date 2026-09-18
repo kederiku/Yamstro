@@ -2799,6 +2799,28 @@ jobs:
           forbid  "TASK-108 référence écrite par un script"        -n '>\s*"?(\$\{REFERENCE_FICHIER\}|ci/wasm-size-baseline\.txt)' ci/ .github/workflows/ci.yml
           require "TASK-108 l'arbre complet sans la feature proscrite" -n '^fn test_no_symphonia_vorbis_in_workspace_tree\(\) \{$' "$AUDIO/tests/audio_contract.rs"
 
+          # TASK-109 : **l'audit de clôture ne refait pas le travail des gardes, il
+          # vérifie qu'elles existent.** Sa concordance dit, critère par critère,
+          # quelles gardes et quels tests le tiennent, et tombe si l'un d'eux
+          # disparaît. Les recherches sur nom nu du ticket d'audit ne sont pas
+          # recopiées ici : plusieurs mordaient la prose qui explique l'interdit.
+          # Une seule manquait, l'énumération d'états de la v1.
+          forbid  "TASK-109 énumération d'états de la v1"          -n '^[^/]*\bGameState\b' crates/ assets/
+          require "TASK-109 l'audit de l'étape existe"             --files "$AUDIO/tests" -g 'step8_audit.rs'
+          require "TASK-109 la concordance est éprouvée"           -n '^fn test_every_criterion_keeps_its_guardians\(\) \{$' "$AUDIO/tests/step8_audit.rs"
+          require "TASK-109 le glossaire se compare au code"       -n '^fn test_glossary_block_matches_the_code_both_ways\(\) \{$' "$AUDIO/tests/step8_audit.rs"
+          forbid  "TASK-109 outil externe dans l'audit"            -n '^[^/]*(Command::new|current_dir)' "$AUDIO/tests/step8_audit.rs"
+          require "TASK-109 le bloc de glossaire livré"            -n '^## § 2\.6 — Types déclarés par les Étapes \(registre\) : lignes de l.Étape 8$' reports/glossaire-etape-8.md
+          require "TASK-109 un clip est un identifiant opaque"     -n '^\| `AudioClip` \| newtype de façade \| 8 \|' reports/glossaire-etape-8.md
+          require "TASK-109 une couche est un identifiant opaque"  -n '^\| `LayerHandle` \| newtype de façade \| 8 \|' reports/glossaire-etape-8.md
+
+          # Le banc d'écoute : de l'outillage, qui monte le vrai plugin sur les
+          # fichiers de production. Trois critères de l'étape ne s'automatisent
+          # pas, ils s'écoutent ; aucun build jouable n'existe avant l'Étape 11.
+          require "TASK-109 le banc d'écoute monte le vrai plugin" -n '^\s+app\.add_plugins\(GameAudioPlugin::new\(\)\);$' "$AUDIO/examples/listen.rs"
+          require "TASK-109 le banc d'écoute lit la racine de production" -n '^\s+file_path: concat!\(env!\("CARGO_MANIFEST_DIR"\), "/\.\./\.\./assets"\)\.to_string\(\),$' "$AUDIO/examples/listen.rs"
+          forbid  "TASK-109 lint éteint dans le banc d'écoute"     -n '^[^/]*#\[allow\(' "$AUDIO/examples"
+
           exit $status
 
       # ---- Passe rand 0.10 et Default (15 septembre 2026) ----
