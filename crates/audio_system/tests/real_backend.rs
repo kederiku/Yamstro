@@ -32,7 +32,7 @@ use core_engine::{
     scoring::{ScoreAction, StepSource},
 };
 use game_state::states::{AppState, RunPhase};
-use offline::{RATE, offline_app, offline_app_at, render, step, wait_loaded, wait_settled};
+use offline::{RATE, offline_app_at, render, step, wait_loaded, wait_settled};
 use ui_and_juice::events::ScoreStepPlayed;
 
 const LAYER_FRAMES: usize = 48_000;
@@ -44,6 +44,11 @@ const UNITY: AudioBusVolumes = AudioBusVolumes {
     music: 1.0,
     sfx: 1.0,
 };
+
+/// L'application des tests du son, sur les fichiers de `tests/assets`.
+fn offline_app() -> App {
+    offline_app_at("tests/assets")
+}
 
 fn with_backend<R>(
     app: &mut App,

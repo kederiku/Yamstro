@@ -4,3 +4,4 @@
 CLAUDE.md
 /dist
 /tools/audio_probe/target
+__pycache__/

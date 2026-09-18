@@ -85,15 +85,10 @@ fn start_stream(
 }
 
 /// Une application sans fenêtre ni périphérique, avec le **backend réel**, la machine à états
-/// du jeu, que le plugin audio exige, et les fichiers de `tests/assets`. Les quatre couches y
-/// portent leurs noms de production : le jeu les charge lui-même au démarrage, aucun test ne le
-/// fait à sa place.
-pub fn offline_app() -> App {
-    offline_app_at("tests/assets")
-}
-
-/// La même, sur une autre racine d'assets : une racine sans dossier `audio` est le terrain des
-/// fichiers manquants.
+/// du jeu, que le plugin audio exige, et les fichiers de la racine `root`, relative à la crate.
+/// Les quatre couches se chargent sous leurs noms de production : le jeu les charge lui-même au
+/// démarrage, aucun test ne le fait à sa place. Une racine sans dossier `audio` est le terrain
+/// des fichiers manquants ; `../../assets` est la racine de production.
 pub fn offline_app_at(root: &str) -> App {
     let mut app = App::new();
     app.add_plugins((

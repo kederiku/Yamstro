@@ -2696,6 +2696,48 @@ jobs:
           count   "TASK-106 un seul site écrit le ducking" 1       -n '^[^/]*\.duck = ' "$AUDIO/src"
           require "TASK-106 le ducking s'écoute sur le son rendu"  -n '^fn test_the_fanfare_ducks_the_music_for_1_2_seconds\(\) \{$' "$AUDIO/tests/real_backend.rs"
 
+          # TASK-107 : **trois listes qui doivent dire la même chose**, les
+          # fichiers de `assets/audio/`, les lignes de `assets/CREDITS.md` et les
+          # chemins que le jeu charge. Les faits se tiennent par des tests, qui
+          # lisent le disque ; les gardes tiennent que ces tests existent, qu'ils
+          # lisent la racine de production et le journal du jeu, et qu'ils ne
+          # dépendent ni du répertoire courant ni d'un outil absent du runner.
+          ASSETS_CONTRACT="$AUDIO/tests/assets_contract.rs"
+          PRODUCTION="$AUDIO/tests/production_assets.rs"
+          for test in test_every_audio_asset_has_a_credit test_project_written_assets_are_credited \
+                      test_every_licence_is_allowed test_licence_rule_refuses_what_the_policy_refuses \
+                      test_all_audio_is_ogg test_no_placeholder_asset_ships \
+                      test_audio_fits_the_wasm_budget test_the_game_loads_exactly_the_shipped_audio; do
+            require "TASK-107 contrat des assets : $test" -n "^fn $test\\(\\) \\{\$" "$ASSETS_CONTRACT"
+          done
+          require "TASK-107 la durée des couches se mesure sur le décodeur du jeu" -n '^fn test_stems_have_identical_duration\(\) \{$' "$PRODUCTION"
+          require "TASK-107 le jeu démarre sur ses vrais fichiers sans un bip" -n '^fn test_production_assets_load_without_a_beep\(\) \{$' "$PRODUCTION"
+          require "TASK-107 la racine lue est celle de production" -n '^const PRODUCTION_ROOT: &str = "\.\./\.\./assets";$' "$PRODUCTION"
+          forbid  "TASK-107 application montée hors de la racine de production" -n '^[^/]*offline_app_at\("' "$PRODUCTION"
+
+          # Les chemins chargés se lisent **dans le jeu**, sur le journal du backend
+          # nul : une liste recopiée dans le test dériverait sans que rien tombe.
+          require "TASK-107 les clips chargés, lus sur le journal"   -n '^\s+let clips: Vec<&String> = journal\.loaded\(\)\.iter\(\)\.collect\(\);$' "$ASSETS_CONTRACT"
+          require "TASK-107 les couches chargées, lues sur le journal" -n '^\s+let layers: Vec<&String> = journal\.layer_loads\(\)\.iter\(\)\.map\(\|\(path, _\)\| path\)\.collect\(\);$' "$ASSETS_CONTRACT"
+
+          # Le plafond de poids : écrit une fois. La porte de taille compare le
+          # `.wasm` **plus `assets/`** à 25 Mo, et laisserait passer aujourd'hui
+          # six fois ce que le backend lié laissera.
+          require "TASK-107 le plafond du son, écrit une fois"     -n '^const AUDIO_BUDGET_BYTES: u64 = 500_000;$' "$ASSETS_CONTRACT"
+          count   "TASK-107 le plafond du son n'est pas recopié" 1 -n '^[^/]*500_000' "$AUDIO/tests"
+
+          # Ni répertoire courant, ni outil externe : `cargo test --workspace` part
+          # de la racine, `cargo test -p` de la crate, et le runner n'a pas `ffprobe`.
+          require "TASK-107 contrat : chemins depuis le manifeste"  -n '^\s+Path::new\(env!\("CARGO_MANIFEST_DIR"\)\)$' "$ASSETS_CONTRACT"
+          require "TASK-107 production : chemins depuis le manifeste" -n '^\s+let dir = Path::new\(env!\("CARGO_MANIFEST_DIR"\)\)$' "$PRODUCTION"
+          forbid  "TASK-107 chemin relatif au répertoire courant"  -n '^[^/]*current_dir' "$ASSETS_CONTRACT" "$PRODUCTION"
+          forbid  "TASK-107 outil externe dans un test d'assets"   -n '^[^/]*(Command::new|ffprobe|ffmpeg)' "$ASSETS_CONTRACT" "$PRODUCTION"
+
+          # Le registre : sa table, et la liste blanche lue dans la colonne.
+          require "TASK-107 le registre a son titre"               -n '^## Registre$' assets/CREDITS.md
+          require "TASK-107 le registre a ses cinq colonnes"       -n '^\| Fichier \| Source \| Auteur \| Licence \| Ajouté le \|$' assets/CREDITS.md
+          require "TASK-107 la licence se lit dans la colonne"     -n '^\s+let \(path, licence\) = \(&row\[0\], row\[3\]\.as_str\(\)\);$' "$ASSETS_CONTRACT"
+
           exit $status
 
       # ---- Passe rand 0.10 et Default (15 septembre 2026) ----
