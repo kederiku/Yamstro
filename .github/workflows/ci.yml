@@ -32,6 +32,16 @@ jobs:
           rustup show active-toolchain
           cargo --version
 
+      # TASK-96 : la crate audio lie `cpal`, qui se lie à `libasound` sous Linux.
+      # Sans ces en-têtes, le workspace ne compile plus sur le runner, et
+      # `--all-features` compile le backend quoi qu'on fasse. Le job de taille
+      # WASM et la campagne nocturne ne compilent pas cette crate : ils s'en
+      # passent. Avant le premier `cargo`, jamais après.
+      - name: ALSA (cpal se lie à libasound sous Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev
+
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
@@ -40,6 +50,16 @@ jobs:
 
       - name: cargo deny
         uses: EmbarkStudios/cargo-deny-action@v2
+
+      # TASK-95 : le banc d'essai audio est détaché du workspace, donc hors du
+      # `cargo deny` ci-dessus. Sa politique reprend celle du dépôt, plus neuf
+      # exceptions MPL-2.0 nommées ; elle se vérifie ici, sur son propre verrou.
+      # Le banc n'est **pas compilé** en CI : ce serait une seconde compilation
+      # complète de Bevy, avec ALSA, pour un paquet qui ne survit pas à l'étape.
+      - name: cargo deny (banc audio détaché)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: tools/audio_probe/Cargo.toml
 
       # Le volet 1 emploie les commandes du corpus **telles qu'elles sont
       # écrites**, en rg. ripgrep n'est préinstallé sur aucune image de runner
@@ -346,7 +366,19 @@ jobs:
           # que le commentaire du manifeste qui dit qu'on n'en veut pas, et le
           # `//!` qui explique que ces combinateurs n'existent plus. Vingt-
           # deuxième et vingt-troisième fois dans ce projet.
-          forbid  "critère 4  dépendance de tweening ou audio" -n '^\s*[a-z0-9_-]*(tween|kira|rodio|audio|vorbis|symphonia|seedling)[a-z0-9_-]*\s*=|"(bevy_audio|vorbis)"' --glob '**/Cargo.toml' crates/
+          # **Exclusion nominative, depuis TASK-96** : la crate audio est la seule
+          # qui ait le droit de déclarer un backend, et son manifeste sort de la
+          # portée par son nom, jamais par son répertoire. Tout le reste y demeure,
+          # y compris une ligne `audio_system = …` dans un manifeste amont, que ce
+          # motif attrape. Les features son de Bevy y sont interdites par le bloc
+          # de l'Étape 8.
+          #
+          # **Seconde exclusion nominative, depuis TASK-108** : la cible de mesure
+          # dépend de la crate audio, c'est sa raison d'être, et elle porte une
+          # feature `audio`. Son manifeste sort de la portée par son nom ; ce
+          # qu'il n'a pas le droit de déclarer (un backend, le lecteur de Bevy)
+          # est tenu par le bloc de l'Étape 8.
+          forbid  "critère 4  dépendance de tweening ou audio" -n '^\s*[a-z0-9_-]*(tween|kira|rodio|audio|vorbis|symphonia|seedling)[a-z0-9_-]*\s*=|"(bevy_audio|vorbis)"' --glob '**/Cargo.toml' -g '!**/audio_system/Cargo.toml' -g '!**/wasm_size/Cargo.toml' crates/
           # Ancrée sur l'**acte** — la ligne de manifeste, l'import, le chemin —
           # et non sur le nom : la note qui explique pourquoi ce site d'appel
           # n'ordonne rien côté juice doit pouvoir le nommer. Vingt-quatrième
@@ -399,8 +431,22 @@ jobs:
           # TASK-44. Une garde sur le mot « audio » serait déjà rouge
           # aujourd'hui : le titre de section de `lib.rs` et le commentaire de
           # `Cargo.toml` documentent tous deux cette absence.
-          forbid  "critère 4  ressource de son déclarée ou employée" -n '(struct|enum|impl|::<|Res<|ResMut<|insert_resource\()\s*(AudioFeedbackConfig|ScoringAudioPool|SoundEffectBank)' crates/
-          forbid  "critère 4  API audio de Bevy dans le juice" -n '\b(AudioPlayer|AudioSource|AudioSink|AudioBundle|PlaybackSettings)\b' crates/
+          # **Un chemin qualifié ne passe pas** (contre-épreuve de TASK-102) : le
+          # motif admet un préfixe de modules entre l'acte et le nom, sans quoi
+          # `Res<audio_system::SoundEffectBank>` échappait à la garde.
+          forbid  "critère 4  ressource de son déclarée ou employée" -n '(struct|enum|impl|::<|Res<|ResMut<|insert_resource\()\s*([A-Za-z_]+::)*(AudioFeedbackConfig|ScoringAudioPool)' crates/
+          # **Scindée à TASK-102.** Les deux premiers noms restent proscrits
+          # partout. Le troisième est la banque unique de l'Étape 8 : elle existe
+          # désormais, dans la crate audio et nulle part ailleurs, ni déclarée,
+          # ni employée, ni importée.
+          forbid  "critère 4  banque de sons hors de la crate audio" -n '(struct|enum|impl|::<|Res<|ResMut<|insert_resource\()\s*([A-Za-z_]+::)*SoundEffectBank|^\s*(pub )?use [^;]*SoundEffectBank' crates/ -g '!**/audio_system/**'
+          # **Scindée à TASK-97.** Les quatre premiers noms sont ceux du lecteur de
+          # Bevy : proscrits partout, façade comprise, la branche A ne l'emploie
+          # pas. Le cinquième est aussi le nom des réglages de lecture du backend
+          # retenu : il reste proscrit partout **sauf dans la façade**, exclue par
+          # son nom, seul fichier du dépôt qui ait le droit de parler au backend.
+          forbid  "critère 4  API audio de Bevy dans le juice" -n '\b(AudioPlayer|AudioSource|AudioSink|AudioBundle)\b' crates/
+          forbid  "critère 4  réglages de lecture hors de la façade" -n '\bPlaybackSettings\b' -g '!**/audio_system/src/backend.rs' crates/
           forbid  "critère 4  module audio dans le juice" --files crates/ui_and_juice/src -g 'audio.rs'
           # La hauteur est un livrable de l'Étape 8 (demi-ton tempéré, C41).
           # Ancré sur des identifiants : le `0\.05` que réclamait le ticket
@@ -1578,24 +1624,31 @@ jobs:
           # déclaration. Mesuré : une dépendance `kira` posée dans le manifeste
           # de la boutique fait tomber ces deux gardes-là.
 
-          # ---- Étape 6 : la cible de mesure suit le sommet du graphe (TASK-81 bis) ----
-          # La mesure WASM ne vaut que si son binaire monte le jeu entier, et le
-          # jeu entier n'est visible que depuis la crate dont toutes les autres
-          # sont des dépendances. Mesuré à TASK-81 : posée dans la crate de mise
-          # en scène, la cible ignorait toute la boutique, et l'écart jouait à la
-          # baisse, donc sans déclencher la porte de taille. La cible vit dans la
-          # crate du sommet, monte chacun des plugins, et il n'en existe qu'une :
-          # deux cibles feraient deux chiffres et deux références, donc aucune
-          # garde. Le jour où une crate s'ajoute au-dessus de la boutique, la
-          # cible y remonte et ces lignes suivent.
-          CIBLE_WASM=$BOUTIQUE/src/bin/wasm_size.rs
-          require "critère 8  cible de mesure au sommet du graphe" -n '^fn main\(\)' "$CIBLE_WASM"
-          require "critère 8  la cible monte les états"      -n '^\s+GameStatePlugin,$' "$CIBLE_WASM"
-          require "critère 8  la cible monte la mise en scène" -n '^\s+JuicePlugin,$' "$CIBLE_WASM"
-          require "critère 8  la cible monte la boutique"    -n '^\s+ShopPlugin,$' "$CIBLE_WASM"
-          require "critère 8  le script mesure la crate du sommet" -n '^\s+-p shop_system --features measure --bin' ci/measure-wasm.sh
-          forbid  "critère 8  seconde cible de mesure"       --files crates -g '**/src/bin/*.rs' -g '!**/shop_system/src/bin/wasm_size.rs'
-          forbid  "critère 8  cible restée en dessous du sommet" -n 'name = "wasm_size"' crates/ -g '!crates/shop_system/Cargo.toml'
+          # ---- Étape 6 : la cible de mesure monte le jeu entier (TASK-81 bis) ----
+          # La mesure WASM ne vaut que si son binaire monte le jeu entier. Mesuré
+          # à TASK-81 : posée dans la crate de mise en scène, la cible ignorait
+          # toute la boutique, et l'écart jouait à la baisse, donc sans déclencher
+          # la porte de taille. Elle est alors montée dans la crate du sommet du
+          # graphe. **Revue à TASK-108** : avec le son, le graphe n'a plus de
+          # sommet, la boutique et le son sont sœurs. La cible est donc une crate
+          # binaire à elle, qui dépend de tout, et ces lignes l'ont suivie. Il
+          # n'en existe qu'une : deux cibles feraient deux chiffres et deux
+          # références, donc aucune garde.
+          CIBLE_WASM=crates/wasm_size/src
+          require "critère 8  la cible de mesure est un binaire" -n '^fn main\(\)' "$CIBLE_WASM/main.rs"
+          require "critère 8  la cible monte les états"      -n '^\s+app\.add_plugins\(GameStatePlugin\)$' "$CIBLE_WASM/lib.rs"
+          require "critère 8  la cible monte la mise en scène" -n '^\s+\.add_plugins\(JuicePlugin\)$' "$CIBLE_WASM/lib.rs"
+          require "critère 8  la cible monte la boutique"    -n '^\s+\.add_plugins\(ShopPlugin\)$' "$CIBLE_WASM/lib.rs"
+          require "critère 8  le script mesure la crate qui dépend de tout" -n '^\s+-p wasm_size "\$\{FEATURES\[@\]\}" --bin' ci/measure-wasm.sh
+          forbid  "critère 8  seconde cible de mesure"       --files crates -g '**/src/bin/*.rs'
+          # Ancrée sur l'**acte** : un binaire qui monte le jeu. Le harnais de
+          # simulation est un binaire en ligne de commande, il ne monte rien, et
+          # aucune garde ne l'exclut par son nom (l'audit de l'Étape 6 bis
+          # l'interdit). Le jour où le vrai binaire du jeu arrive, cette ligne
+          # tombe, et c'est voulu : il absorbe la cible ou la remplace, il ne la
+          # double pas.
+          forbid  "critère 8  second binaire de jeu dans le dépôt" -n '^[^/]*DefaultPlugins' crates/ -g '**/src/main.rs' -g '**/src/bin/*.rs' -g '!crates/wasm_size/src/main.rs'
+          forbid  "critère 8  cible déclarée ailleurs"       -n 'name = "wasm_size"' crates/ -g '!crates/wasm_size/Cargo.toml'
 
           exit $status
 
@@ -1870,7 +1923,7 @@ jobs:
           # Critère 8 : la cible de mesure monte le plugin. Une cible qui
           # l'omettrait mesurerait un binaire amputé, et l'écart jouerait à la
           # baisse, sans déclencher la porte de taille.
-          require "critère 8  plugin monté dans la cible" -n '^\s+VisualEffectsPlugin,$' crates/shop_system/src/bin/wasm_size.rs
+          require "critère 8  plugin monté dans la cible" -n '^\s+\.add_plugins\(VisualEffectsPlugin\)$' crates/wasm_size/src/lib.rs
 
           # TASK-83 : les réglages du filtre et le mode dégradé, déclarés dans
           # `settings.rs` à côté de `JuiceSettings` (raccord B), posés par le
@@ -2137,7 +2190,7 @@ jobs:
           require "TASK-93  les limites de l'adaptateur"       -n '^\s+priority: WgpuSettingsPriority::Functionality,$' "$PLG"
           forbid  "TASK-93  limites minimales WebGL2 figées"   -n 'WgpuSettingsPriority::(WebGL2|WebGPU)\b' crates/ -g '!**/graphics/plugin.rs'
           forbid  "TASK-93  limites figées dans la configuration" -n 'priority: WgpuSettingsPriority::(WebGL2|WebGPU)' "$PLG"
-          require "TASK-93  la cible monte la configuration de rendu" -n '^\s+DefaultPlugins\.set\(render_plugin\(\)\),$' crates/shop_system/src/bin/wasm_size.rs
+          require "TASK-93  la cible monte la configuration de rendu" -n '^\s+app\.add_plugins\(DefaultPlugins\.set\(render_plugin\(\)\)\);$' crates/wasm_size/src/main.rs
           require "TASK-93  les assets pesés"                 -n '^assets=\$\(find assets -type f -exec cat \{\} \+ \| wc -c' ci/check-wasm-size.sh
           require "TASK-93  le total comparé à la cible"      -n '^if \[ "\$\{total\}" -gt "\$\{CIBLE_ABSOLUE\}" \]; then$' ci/check-wasm-size.sh
           require "TASK-93  la page charge le module"         -n '^\s+import init from "\./wasm_size\.js";$' ci/web/index.html
@@ -2146,6 +2199,627 @@ jobs:
           # relit est livré avec le code.
           require "TASK-94  l'audit de l'étape existe"        --files crates/ui_and_juice/tests -g 'step7_audit.rs'
           require "TASK-94  le bloc de glossaire livré"       -n '^## § 3 — Types canoniques, couche Bevy : lignes de l.Étape 7$' reports/glossaire-etape-7.md
+
+          exit $status
+
+      # ---- Étape 8 : audio dynamique et musique adaptative (TASK-95 et suivants) ----
+      #
+      # **L'étape est ouverte le 17 septembre 2026, avant les Étapes 10 et 9**,
+      # par l'ADR-012 : l'audio est un pur lecteur d'état, il ne doit rien au
+      # recalibrage. TASK-95 n'écrit aucune ligne dans `crates/` : un banc
+      # d'essai **détaché du workspace** mesure les trois critères de la tâche 0
+      # et l'addendum à l'ADR-006 consigne la branche retenue.
+      #
+      # **Ancrer sur l'acte.** Les manifestes des crates de jeu nomment
+      # `bevy_seedling` en commentaire pour dire qu'il arrive à cette étape :
+      # la garde porte sur une ligne de dépendance, jamais sur le nom nu.
+      - name: Invariants normatifs Étape 8
+        run: |
+          set -euo pipefail
+          status=0
+          forbid() {
+            label=$1; shift
+            out=$(rg "$@" 2>&1) && rc=0 || rc=$?
+            case $rc in
+              1) printf '  ok    %s\n' "$label" ;;
+              0) printf '  ECHEC %s\n%s\n' "$label" "$out"; status=1 ;;
+              *) printf '  ECHEC %s : rg a échoué (code %s)\n%s\n' "$label" "$rc" "$out"; status=1 ;;
+            esac
+          }
+          require() {
+            label=$1; shift
+            out=$(rg "$@" 2>&1) && rc=0 || rc=$?
+            case $rc in
+              0) printf '  ok    %s\n' "$label" ;;
+              *) printf '  ECHEC %s : motif attendu absent (code %s)\n%s\n' "$label" "$rc" "$out"; status=1 ;;
+            esac
+          }
+          count() {
+            label=$1; expected=$2; shift 2
+            n=$( (rg "$@" || true) | wc -l | tr -d ' ')
+            if [ "$n" = "$expected" ]; then printf '  ok    %s\n' "$label"; else printf '  ECHEC %s : %s occurrence(s), %s attendue(s)\n' "$label" "$n" "$expected"; status=1; fi
+          }
+
+          PROBE=tools/audio_probe
+          ADDENDUM=docs/adr/ADR-006-addendum.md
+
+          # TASK-95 : le banc est une racine de workspace à lui seul. La table
+          # vide suffit ; le manifeste racine ne le nomme pas, et la résolution
+          # du workspace ne le voit pas. `cargo metadata` est interrogé, pas un
+          # fichier : c'est la sortie de l'outil qui fait foi.
+          require "TASK-95  le banc porte sa table workspace vide" -n '^\[workspace\]( #.*)?$' "$PROBE/Cargo.toml"
+          forbid  "TASK-95  le manifeste racine nomme le banc"     -n 'audio_probe' Cargo.toml
+          meta=$(cargo metadata --format-version 1 --locked) || { printf '  ECHEC TASK-95  cargo metadata a échoué\n'; status=1; meta=audio_probe; }
+          if printf '%s' "$meta" | rg -q 'audio_probe'; then
+            printf '  ECHEC TASK-95  le banc est visible de cargo metadata à la racine\n'; status=1
+          else
+            printf '  ok    TASK-95  le banc est invisible de cargo metadata à la racine\n'
+          fi
+
+          # Les deux épingles, au signe égal. 0.8.0 est la seule version de
+          # `bevy_seedling` qui cible Bevy 0.19.
+          require "TASK-95  bevy épinglée dans le banc"            -n '^bevy = \{ version = "=0\.19\.1", default-features = false' "$PROBE/Cargo.toml"
+          require "TASK-95  bevy_seedling épinglée au signe égal"  -n '^bevy_seedling = \{ version = "=0\.8\.0"' "$PROBE/Cargo.toml"
+          forbid  "TASK-95  bevy_audio activée dans le banc"       -n '^\s*"[^#]*"bevy_audio"|^\s*"bevy_audio"' "$PROBE/Cargo.toml"
+
+          # Licences : la liste globale reste permissive, MPL-2.0 n'y entre
+          # pas, neuf exceptions nommées et rien d'autre, aucun copyleft fort.
+          count   "TASK-95  neuf exceptions MPL-2.0 nommées" 9     -n '^\s+\{ allow = \["MPL-2\.0"\], crate = "(symphonia(-[a-z-]+)?|triple_buffer)" \},$' "$PROBE/deny.toml"
+          count   "TASK-95  aucune autre exception" 9              -n '^\s+\{ allow = ' "$PROBE/deny.toml"
+          forbid  "TASK-95  MPL dans la liste globale du banc"     -U -n '^allow = \[[^\]]*MPL' "$PROBE/deny.toml"
+          forbid  "TASK-95  copyleft fort dans une politique"      -n 'GPL' "$PROBE/deny.toml" deny.toml
+          require "TASK-95  cargo deny tourne dans le banc"        -n '^\s+manifest-path: tools/audio_probe/Cargo\.toml$' .github/workflows/ci.yml
+
+          # Aucun DSP maison : le banc n'implémente aucun nœud Firewheel, il
+          # monte ceux de la crate. Et aucun backend audio n'entre dans une
+          # crate amont, ni maintenant ni après TASK-96.
+          forbid  "TASK-95  nœud audio écrit à la main dans le banc" -n 'impl\s+(AudioNode|AudioNodeProcessor)\b' "$PROBE/src"
+          forbid  "TASK-95  backend audio dans une crate amont"    -n '^\s*(bevy_seedling|firewheel|kira|rodio)\s*=' Cargo.toml crates/core_engine/Cargo.toml crates/game_state/Cargo.toml crates/ui_and_juice/Cargo.toml crates/shop_system/Cargo.toml crates/sim_harness/Cargo.toml
+
+          # L'addendum : la branche, la version, les trois rectifications, et
+          # des chiffres. « Environ » n'est pas une mesure.
+          require "TASK-95  l'addendum nomme la branche et la version" -n '^\*\*Branche retenue : A, `bevy_seedling` `=0\.8\.0`' "$ADDENDUM"
+          count   "TASK-95  trois critères, trois verdicts" 3       -n '^\| [123] \| .* \| \*\*passe\*\* \|$' "$ADDENDUM"
+          count   "TASK-95  trois rectifications de l'ADR-006" 3    -n '^- \*\*Rectification [123]\.\*\*' "$ADDENDUM"
+          forbid  "TASK-95  valeur estimée dans l'addendum"        -n -i '\benviron\b|a priori|à peu près|~ ?[0-9]' "$ADDENDUM"
+
+          # TASK-96 : la crate audio entre dans le workspace, sixième membre, à
+          # sa place dans le graphe : après sa sœur la boutique, avant le harnais.
+          # Son manifeste applique la branche A de l'addendum, **sans les défauts
+          # du backend**, pesés à ce ticket : le décodeur OGG, la sortie audio, et
+          # le seul nœud de réverbération pris dans le moteur.
+          AUDIO=crates/audio_system
+          # **Revue à TASK-108** : « six membres » était une photographie, tombée
+          # à l'arrivée du septième. La forme durable tient l'ordre du graphe, pas
+          # le compte.
+          require "TASK-96  la crate audio à sa place dans le graphe" -U -n 'members = \[\n  "crates/core_engine",\n  "crates/game_state",\n  "crates/ui_and_juice",\n  "crates/shop_system",\n  "crates/audio_system",\n  "crates/sim_harness",\n' Cargo.toml
+          require "TASK-96  backend épinglé, sans ses défauts"     -n '^bevy_seedling = \{ version = "=0\.8\.0", default-features = false, features = \["ogg", "cpal"\] \}$' "$AUDIO/Cargo.toml"
+          require "TASK-96  le seul nœud de réverbération"         -n '^firewheel = \{ version = "0\.12", default-features = false, features = \["freeverb_node"\] \}$' "$AUDIO/Cargo.toml"
+          forbid  "TASK-96  feature son de Bevy dans la crate audio" -n '"(audio|bevy_audio|vorbis|symphonia-[a-z]+|flac|mp3|wav)"' "$AUDIO/Cargo.toml"
+          forbid  "TASK-96  dépendance inverse vers la crate audio" -n '^\s*audio_system\s*=' crates/core_engine/Cargo.toml crates/game_state/Cargo.toml crates/ui_and_juice/Cargo.toml crates/shop_system/Cargo.toml crates/sim_harness/Cargo.toml
+          # La forme du plugin a changé à TASK-97 : il porte un discriminant.
+          require "TASK-96  le plugin vit dans lib.rs"             -n '^pub struct GameAudioPlugin \{$' "$AUDIO/src/lib.rs"
+          count   "TASK-96  cinq modules posés une fois pour toutes" 5 -n '^pub mod (backend|bus|music|pitch|sfx);$' "$AUDIO/src/lib.rs"
+          require "TASK-96  le contrat de la crate existe"         --files "$AUDIO/tests" -g 'audio_contract.rs'
+
+          # Les licences constatées à TASK-95 entrent dans la politique du dépôt
+          # sous la même forme que dans le banc : neuf exceptions nommées.
+          count   "TASK-96  neuf exceptions MPL-2.0 à la racine" 9 -n '^\s+\{ allow = \["MPL-2\.0"\], crate = "(symphonia(-[a-z-]+)?|triple_buffer)" \},$' deny.toml
+          count   "TASK-96  aucune autre exception à la racine" 9  -n '^\s+\{ allow = ' deny.toml
+          forbid  "TASK-96  MPL dans la liste globale du dépôt"    -U -n '^allow = \[[^\]]*MPL' deny.toml
+
+          # Le runner doit porter les en-têtes ALSA tant que le backend lie cpal,
+          # et les porter avant le premier cargo du job.
+          require "TASK-96  ALSA installé sur le runner"           -n '^\s+sudo apt-get install -y libasound2-dev$' .github/workflows/ci.yml
+          require "TASK-96  ALSA avant le premier cargo"           -U -n 'libasound2-dev\n\n      - run: cargo fmt --check' .github/workflows/ci.yml
+
+          # TASK-97 : la façade est la seule frontière avec le backend. Les cinq
+          # autres fichiers de sources ne le nomment pas, pas même en prose, et
+          # aucun handle du backend n'en sort : ils ne connaissent que des index.
+          BACKEND=$AUDIO/src/backend.rs
+          forbid  "TASK-97  la façade fuit hors de backend.rs"     -n 'bevy_seedling|firewheel|kira|bevy_audio|rodio|cpal|Handle<' "$AUDIO/src/lib.rs" "$AUDIO/src/bus.rs" "$AUDIO/src/music.rs" "$AUDIO/src/pitch.rs" "$AUDIO/src/sfx.rs"
+          require "TASK-97  le trait, objet-sûr et lisible par Any" -n '^pub trait AudioBackend: Any \+ Send \+ Sync \{$' "$BACKEND"
+          count   "TASK-97  cinq méthodes, celles du ticket" 5     -n '^\s+fn (load_clip|play|load_layer|set_layer_gain|set_bus_gain)\(&mut self.*;$' "$BACKEND"
+          forbid  "TASK-97  une voie nommée sans être chargée"     -n 'fn layer\(' "$BACKEND"
+          forbid  "TASK-97  implémentation sous attribut de test ou feature" -n 'cfg\(test\)|cfg\(feature|feature = "' "$BACKEND"
+          forbid  "TASK-97  feature de fixtures déclarée"          -n '^test-fixtures\s*=' --glob '**/Cargo.toml' Cargo.toml crates/
+          require "TASK-97  ressource porteuse, Resource seule"    -U -n '#\[derive\(Resource\)\]\npub struct AudioBackendHandle\(pub Box<dyn AudioBackend>\);' "$BACKEND"
+          require "TASK-97  le plugin porte un discriminant"       -n '^\s+kind: BackendKind,$' "$AUDIO/src/lib.rs"
+          forbid  "TASK-97  le plugin porte le backend"            -n 'Box<dyn' "$AUDIO/src/lib.rs"
+          require "TASK-97  build monte le backend"                -n '^\s+backend::install\(app, self\.kind\);$' "$AUDIO/src/lib.rs"
+
+          # Ce que TASK-95 a mesuré et que ce fichier applique. L'unité de la
+          # façade est l'amplitude linéaire : un volume « linéaire » du moteur
+          # vaut son carré, il ne s'écrit donc jamais tel quel. La réverbération
+          # ne rend que l'humide : en parallèle, jamais chaînée. Les couches
+          # partent sous un même horodatage, jamais créées en pause. Le graphe
+          # part du gabarit vide : celui par défaut impose un limiteur.
+          require "TASK-97  amplitude convertie en décibels"       -n '^\s+Volume::Decibels\(20\.0 \* gain\.log10\(\)\)$' "$BACKEND"
+          forbid  "TASK-97  volume linéaire du moteur écrit tel quel" -n 'Volume::Linear\(' "$BACKEND"
+          require "TASK-97  réverbération en parallèle du bus"     -U -n '\.connect\(SfxBus\)\n\s+\.connect\(reverb\);' "$BACKEND"
+          forbid  "TASK-97  réverbération chaînée en série"        -n 'chain_node\(FreeverbNode' "$BACKEND"
+          require "TASK-97  couches sous un même horodatage"       -n '^\s+DiffTimestamp::new\(&time\),$' "$BACKEND"
+          forbid  "TASK-97  lecteur créé en pause"                 -n 'with_playback\(false\)' "$BACKEND"
+          require "TASK-97  graphe posé sur le gabarit vide"       -n '^\s+\.insert_resource\(AudioGraphTemplate::Empty\)$' "$BACKEND"
+          forbid  "TASK-97  limiteur dans le graphe"               -n 'LimiterNode' "$BACKEND"
+          require "TASK-97  la tuyauterie tourne en PostUpdate"    -n '^\s+\.add_systems\(PostUpdate, apply_seedling_backend\);$' "$BACKEND"
+          require "TASK-97  le backend réel est écouté"            --files "$AUDIO/tests" -g 'real_backend.rs'
+          require "TASK-97  le pilote hors ligne des tests"        --files "$AUDIO/tests/support" -g 'offline.rs'
+
+          # TASK-98 : trois volumes utilisateur, une seule source de vérité. Les
+          # trois champs n'existent qu'ici, `Default` s'écrit à la main (dérivé, il
+          # rendrait trois zéros et un jeu muet sans erreur), `Resource` seule.
+          BUSRS=$AUDIO/src/bus.rs
+          count   "TASK-98  une seule ressource de volumes" 1      -n '^pub struct AudioBusVolumes \{$' crates/
+          count   "TASK-98  trois champs, dans la ressource" 3     -n '^\s+pub (master|music|sfx): f32,$' "$BUSRS"
+          # Ancrée sur la **forme d'un champ**, dans les sources : un test doit
+          # pouvoir nommer ses paramètres `master`, `music` et `sfx`.
+          forbid  "TASK-98  copie d'un volume hors de la ressource" -n '^\s+(pub(\([a-z]+\))? )?(master|music|sfx): f32,$' -g '**/src/**' -g '!**/audio_system/src/bus.rs' crates/
+          require "TASK-98  Default écrit à la main"               -n '^impl Default for AudioBusVolumes \{$' "$BUSRS"
+          forbid  "TASK-98  Default ou Component dérivés sur la ressource" -U -n '#\[derive\([^)]*(Default|Component)[^)]*\)\]\npub struct AudioBusVolumes' "$BUSRS"
+
+          # **Les curseurs s'appliquent sur les bus, et nulle part ailleurs.** La
+          # poussée est gardée par `is_changed` et vise trois bus, jamais le
+          # routage réverbéré, qui rejoint le bus SFX. Un changement de volume ne
+          # relance aucun son. Et personne ne remet à la façade les deux formules
+          # de ce que l'auditeur entend : les curseurs sortiraient au carré, sans
+          # qu'un test sur le backend nul le voie.
+          require "TASK-98  poussée gardée par is_changed"         -n '^\s+if !volumes\.is_changed\(\) \{$' "$BUSRS"
+          count   "TASK-98  exactement trois bus poussés" 3        -n '^\s+\(Bus::(Master|Music|Sfx), volumes\.(master|music|sfx), "' "$BUSRS"
+          forbid  "TASK-98  routage réverbéré poussé"              -n 'Bus::SfxReverb' "$BUSRS"
+          forbid  "TASK-98  son relancé par un changement de volume" -n '\.play\(' "$BUSRS"
+          count   "TASK-98  quatre fonctions pures" 4              -n '^pub fn (sfx_volume\(v: &AudioBusVolumes, local_volume: f32\)|music_gain\(v: &AudioBusVolumes, stem_weight: f32, duck: f32\)|local_gain\(local_volume: f32\)|layer_gain\(stem_weight: f32, duck: f32\)) -> f32 \{$' "$BUSRS"
+          forbid  "TASK-98  formule entendue remise à la façade"   -U -n '\.(play|set_layer_gain|set_bus_gain)\([^;]*\b(sfx_volume|music_gain)\(' "$AUDIO/src"
+          require "TASK-98  valeur non finie lue comme le défaut"  -n '^\s+if value\.is_finite\(\) \{$' "$BUSRS"
+          require "TASK-98  le plugin branche les volumes"         -n '^\s+bus::bus_plugin\(app\);$' "$AUDIO/src/lib.rs"
+          require "TASK-98  les poussées de bus se comptent"       -n '^\s+pub fn bus_gain_writes\(&self\) -> &\[\(Bus, f32\)\] \{$' "$BACKEND"
+
+          # TASK-99 : les gains cibles, fonction pure de l'état. Le seuil du
+          # Climax n'est écrit **qu'une fois** dans les sources de la crate, sous
+          # son nom, et la comparaison est entière, en u128 : un flottant perd
+          # des unités au-delà de 2^53, une multiplication en u64 déborde. Les
+          # tests vivent hors de `src` : ils tiennent la valeur par le
+          # comportement, en littéraux, sans la récrire ici.
+          MUSIC=$AUDIO/src/music.rs
+          require "TASK-99  le seuil, sous son nom, et il vaut ce qu'il vaut" -n '^pub const CLIMAX_THRESHOLD_PERCENT: u128 = 75; //' "$MUSIC"
+          count   "TASK-99  le seuil n'est écrit qu'une fois" 1    -n '75' "$AUDIO/src"
+          count   "TASK-99  une seule définition du seuil" 1       -n 'const CLIMAX_THRESHOLD_PERCENT' crates/
+          require "TASK-99  comparaison entière en u128"           -n '^\s+if \(b\.current_score as u128\) \* 100 >= \(b\.target_score as u128\) \* CLIMAX_THRESHOLD_PERCENT \{$' "$MUSIC"
+          forbid  "TASK-99  flottant double dans la musique"       -n 'f64' "$MUSIC"
+          require "TASK-99  tension sur Boss ou dernière main"     -n '^\s+if b\.blind\.kind == BlindType::Boss \|\| b\.hands_remaining <= 1 \{$' "$MUSIC"
+          require "TASK-99  signature pure de target_gains"        -U -n '^pub fn target_gains\(\n\s+app: AppState,\n\s+phase: Option<RunPhase>,\n\s+blind: Option<&BlindContext>,\n\) -> \[f32; 4\] \{$' "$MUSIC"
+          require "TASK-99  le filtre des contextes périmés"       -U -n '^pub fn blind_in_play\(\n\s+app: AppState,\n\s+phase: Option<RunPhase>,\n\s+blind: Option<&BlindContext>,\n\) -> Option<&BlindContext> \{$' "$MUSIC"
+          require "TASK-99  chemin réel des types de blind"        -n '^use core_engine::blinds::\{BlindContext, BlindType\};$' "$MUSIC"
+          forbid  "TASK-99  chemin mort des types de blind"        -n 'crate::blind\b|core_engine::blind::|blinds::definition' "$AUDIO/src"
+          # L'audio ne calcule jamais un score et n'anticipe aucun total : il lit
+          # le score commis, et rien de la file de dépilement.
+          forbid  "TASK-99  total anticipé par l'audio"            -n 'ScoringStepQueue|ScoringReport|final_score' "$AUDIO/src"
+
+          # TASK-100 : la ressource qui pilote les quatre couches, et leurs voies
+          # créées une seule fois, au démarrage, hors de toute portée d'état. Les
+          # gardes sont ancrées sur une **ligne de code** (`^[^/]*`) : la doc a le
+          # droit de nommer ce qu'elle interdit.
+          LIB=$AUDIO/src/lib.rs
+          require "TASK-100 ressource musicale, Resource seule"    -U -n '#\[derive\(Resource\)\]\npub struct AdaptiveMusicManager \{$' "$MUSIC"
+          count   "TASK-100 une seule ressource musicale" 1        -n '^pub struct AdaptiveMusicManager \{$' crates/
+          require "TASK-100 six champs, ceux du document source"   -U -n '^pub struct AdaptiveMusicManager \{\n\s+pub layers: \[LayerHandle; 4\],\n\s+pub current_gains: \[f32; 4\],\n\s+pub target_gains: \[f32; 4\],\n\s+pub fade_per_second: f32,\n\s+pub duck: f32,\n\s+pub duck_timer: Timer,\n\}$' "$MUSIC"
+          forbid  "TASK-100 Default écrit pour la ressource"       -n '^impl Default for AdaptiveMusicManager' crates/
+          forbid  "TASK-100 ressource musicale en init_resource"   -n '^[^/]*init_resource::<AdaptiveMusicManager>' crates/
+          count   "TASK-100 la ressource est insérée une fois" 1   -n '^\s+commands\.insert_resource\(AdaptiveMusicManager \{$' "$AUDIO/src"
+
+          # **Aucune entité musicale sous portée d'état**, et l'audio n'écrit
+          # aucune transition : il faut nommer `NextState` pour en écrire une.
+          # Les voies naissent au démarrage, jamais à une entrée d'état, où elles
+          # seraient recréées à chaque passage.
+          forbid  "TASK-100 marqueur de despawn lié à un état"     -n '^[^/]*DespawnOn(Enter|Exit)' "$AUDIO/src"
+          forbid  "TASK-100 transition écrite par l'audio"         -n '^[^/]*NextState' "$AUDIO/src"
+          require "TASK-100 point d'enregistrement de la musique"  -n '^pub fn music_plugin\(app: &mut App\) \{$' "$MUSIC"
+          require "TASK-100 voies créées au démarrage"             -n '^\s+app\.add_systems\(Startup, setup_music_layers\);$' "$MUSIC"
+          count   "TASK-100 un seul enregistrement du chargeur" 1  -n '^[^/]*add_systems\([^;]*setup_music_layers' "$AUDIO/src"
+          require "TASK-100 build branche la musique"              -n '^\s+music::music_plugin\(app\);$' "$LIB"
+          forbid  "TASK-100 système enregistré dans lib.rs"        -n '^[^/]*add_systems' "$LIB"
+
+          # **Charger, pas seulement nommer.** Un seul site appelle le chargement
+          # des couches, avec les quatre fichiers dans l'ordre des index ; les
+          # chemins sont relatifs à la racine des assets. Le backend nul compte
+          # les appels, l'état des couches étant plafonné à quatre cases.
+          count   "TASK-100 un seul site charge les couches" 1     -n '^[^/]*\.load_layer\(' "$AUDIO/src"
+          require "TASK-100 quatre couches, par la constante"      -n '^\s+std::array::from_fn\(\|index\| backend\.load_layer\(&assets, STEM_PATHS\[index\], index as u8\)\);$' "$MUSIC"
+          require "TASK-100 quatre stems, dans l'ordre des index"  -U -n '^pub const STEM_PATHS: \[&str; 4\] = \[\n\s+"audio/stem_base\.ogg",\n\s+"audio/stem_melody\.ogg",\n\s+"audio/stem_tension\.ogg",\n\s+"audio/stem_climax\.ogg",\n\];$' "$MUSIC"
+          forbid  "TASK-100 chemin écrit depuis la racine du dépôt" -n '^[^/]*"assets/' "$AUDIO/src"
+          require "TASK-100 les chargements de couche se comptent" -n '^\s+pub fn layer_loads\(&self\) -> &\[\(String, u8\)\] \{$' "$BACKEND"
+
+          # Le minuteur du ducking : durée exacte, mode `Once`, **né terminé par
+          # un `tick`** (écrire l'horloge ne recalcule rien), puis un `tick` nul
+          # pour que rien ne « vienne de se terminer » au lancement. La méthode
+          # `finished()` du corpus n'existe plus en 0.19.
+          require "TASK-100 durée du ducking, exacte"              -n '^pub const DUCK_DURATION: Duration = Duration::from_millis\(1_200\);$' "$MUSIC"
+          require "TASK-100 minuteur à un coup"                    -n '^\s+let mut timer = Timer::new\(DUCK_DURATION, TimerMode::Once\);$' "$MUSIC"
+          require "TASK-100 minuteur né terminé, par deux tick"    -U -n '^\s+timer\.tick\(DUCK_DURATION\);\n\s+timer\.tick\(Duration::ZERO\);$' "$MUSIC"
+          forbid  "TASK-100 horloge écrite au lieu du tick"        -n '^[^/]*set_elapsed' "$MUSIC"
+          forbid  "TASK-100 méthode disparue du minuteur"          -n '^[^/]*\.finished\(\)' "$AUDIO/src"
+          require "TASK-100 vitesse de fondu, sous son nom"        -n '^pub const DEFAULT_FADE_PER_SECOND: f32 = 2\.0;$' "$MUSIC"
+
+          # `AssetPlugin` est exigé des trois constructeurs, et `build` le dit :
+          # en 0.19 une ressource manquante fait paniquer le système, sous un
+          # message qui ne nomme ni le système ni le paramètre.
+          require "TASK-100 build exige l'AssetPlugin"             -n '^\s+app\.world\(\)\.contains_resource::<AssetServer>\(\),$' "$LIB"
+
+          # Le backend nul ne crée aucune entité : la survie des voies s'écoute
+          # sur le backend réel, dont les tests passent par le chargeur du jeu.
+          require "TASK-100 la survie s'écoute sur le son rendu"   -n '^fn test_music_survives_the_state_cycle\(\) \{$' "$AUDIO/tests/real_backend.rs"
+          require "TASK-100 chaque couche s'écoute seule"          -n '^fn test_each_layer_handle_drives_its_own_stem\(\) \{$' "$AUDIO/tests/real_backend.rs"
+          forbid  "TASK-100 un test du son charge ses couches"     -n '^[^/]*\.load_layer\(' "$AUDIO/tests/real_backend.rs"
+          count   "TASK-100 fixtures aux noms de production" 4     --files "$AUDIO/tests/assets/audio" -g 'stem_{base,melody,tension,climax}.ogg'
+
+          # TASK-101 : le seul système qui fait sonner la musique. Il tourne
+          # partout, menu compris : la phase de run et le contexte de blind sont
+          # optionnels, l'état de l'application ne l'est pas, et `build` exige la
+          # machine à états. (La garde de TASK-100 « gain poussé par ce ticket »
+          # était datée : elle est levée ici, et remplacée par un comptage.)
+          require "TASK-101 phase de run optionnelle"              -n '^\s+phase: Option<Res<State<RunPhase>>>,$' "$MUSIC"
+          require "TASK-101 contexte de blind optionnel"           -n '^\s+blind: Option<Res<BlindContext>>,$' "$MUSIC"
+          forbid  "TASK-101 paramètre pris nu"                     -n '^[^/]*[ (]Res<(State<RunPhase>|BlindContext|HandContext)>' "$AUDIO/src"
+          require "TASK-101 état de l'application pris nu"         -n '^\s+app_state: Res<State<AppState>>,$' "$MUSIC"
+          forbid  "TASK-101 état de l'application optionnel"       -n '^[^/]*Option<Res<State<AppState>>>' "$AUDIO/src"
+          require "TASK-101 build exige la machine à états"        -n '^\s+app\.world\(\)\.contains_resource::<State<AppState>>\(\)$' "$LIB"
+          require "TASK-101 build exige la sous-phase de run"      -n '^\s+\.contains_resource::<Messages<StateTransitionEvent<RunPhase>>>\(\),$' "$LIB"
+          # Ancrée sur l'appel, par son point : le message de `build` nomme ces
+          # méthodes pour dire à qui les appeler.
+          forbid  "TASK-101 états initialisés par l'audio"         -n '^[^/]*\.(init_state|add_sub_state|insert_state)(::<|\()' "$AUDIO/src"
+          require "TASK-101 système enregistré en Update"          -n '^\s+app\.add_systems\(Update, update_music_gains\);$' "$MUSIC"
+          forbid  "TASK-101 condition d'état ou de changement"     -n '^[^/]*(run_if\(|in_state\(|is_changed\(\))' "$MUSIC"
+
+          # Les cibles passent par le filtre des contextes périmés (TASK-99).
+          # L'interpolation est exponentielle, écrite une fois, sur le pas de
+          # temps de l'image. Ce qui part à la façade est `layer_gain` : les
+          # curseurs s'appliquent sur les bus, la musique ne les lit pas.
+          require "TASK-101 cibles filtrées par blind_in_play"     -n '^\s+manager\.target_gains = target_gains\(app, phase, blind_in_play\(app, phase, blind\.as_deref\(\)\)\);$' "$MUSIC"
+          require "TASK-101 interpolation exponentielle"           -n '^\s+let t = 1\.0 - \(-manager\.fade_per_second \* time\.delta_secs\(\)\)\.exp\(\);$' "$MUSIC"
+          count   "TASK-101 une seule exponentielle" 1             -n '^[^/]*\.exp\(\)' "$MUSIC"
+          require "TASK-101 pas vers la cible"                     -n '^\s+manager\.current_gains\[i\] \+= \(target - manager\.current_gains\[i\]\) \* t;$' "$MUSIC"
+          require "TASK-101 gain remis à la façade"                -n '^\s+let gain = layer_gain\(manager\.current_gains\[i\], manager\.duck\);$' "$MUSIC"
+          count   "TASK-101 un seul site pousse les gains de couche" 1 -n '^[^/]*\.set_layer_gain\(' "$AUDIO/src"
+          forbid  "TASK-101 curseurs lus par la musique"           -n '^[^/]*(AudioBusVolumes|volumes\.|music \* master)' "$MUSIC"
+          # **Revue à TASK-106** : « aucun `.play(` dans `music.rs` » tombait sur
+          # la fanfare. La forme durable : un seul son part de ce fichier, le
+          # jingle, et il n'est pas dans le système qui applique les gains.
+          count   "TASK-101 un seul son part de la musique, le jingle" 1 -n '^[^/]*\.play\(' "$MUSIC"
+
+          # Le backend nul compte les poussées, il ne les journalise pas : il est
+          # aussi celui d'une machine sans sortie audio, quatre poussées par image.
+          require "TASK-101 les poussées de gain se comptent"      -n '^\s+pub fn layer_gain_pushes\(&self\) -> usize \{$' "$BACKEND"
+          forbid  "TASK-101 journal des gains de couche"           -n '^[^/]*layer_gain[a-z_]*: Vec<' "$BACKEND"
+
+          # Le mix s'écoute sur le son rendu, et les tests du son tiennent leurs
+          # gains par la ressource : un gain posé par la façade serait écrasé.
+          require "TASK-101 le mix s'écoute sur le son rendu"      -n '^fn test_state_changes_are_heard\(\) \{$' "$AUDIO/tests/real_backend.rs"
+          forbid  "TASK-101 un test du son pousse un gain de couche" -n '^[^/]*\.set_layer_gain\(' "$AUDIO/tests/real_backend.rs"
+
+          # TASK-102 : la banque de sons unique. Une seule ressource pour un rôle,
+          # douze champs de clips, `Resource` seule, jamais sérialisée : son
+          # générateur n'entre dans aucune sauvegarde.
+          SFX=$AUDIO/src/sfx.rs
+          count   "TASK-102 une seule banque de sons" 1            -n '^pub struct SoundEffectBank \{$' crates/
+          require "TASK-102 la banque, Resource seule"             -U -n '#\[derive\(Resource\)\]\npub struct SoundEffectBank \{$' "$SFX"
+          count   "TASK-102 douze champs de clips" 12              -n '^\s+pub [a-z_]+: (AudioClip|\[AudioClip; 6\]),$' "$SFX"
+          require "TASK-102 le timbre de la figure de base"        -n '^\s+pub hand_base_chord: AudioClip,$' "$SFX"
+          require "TASK-102 générateur privé"                      -n '^\s+rng: SmallRng,$' "$SFX"
+          forbid  "TASK-102 générateur public"                     -n '^\s+pub(\([a-z]+\))? rng:' "$SFX"
+          forbid  "TASK-102 l'audio sérialisé"                     -n '^[^/]*(Serialize|Deserialize|serde)' "$AUDIO/src"
+
+          # **Jamais un flux du générateur de la run**, ni un cinquième flux : il
+          # est sérialisé, et le nombre de sons joués dépend du volume et des
+          # images. La portée s'arrête à `src` : le test central construit une
+          # session, et il vit dans `tests/`.
+          forbid  "TASK-102 générateur de la run nommé par l'audio" -n '^[^/]*(RunSession|RunRng)' "$AUDIO/src"
+          forbid  "TASK-102 cinquième flux dans le générateur de la run" -n 'STREAM_AUDIO|pub audio: ChaCha8Rng' crates/
+          count   "TASK-102 quatre flux, toujours" 4               -n '^\s+pub (dice|shop|boss|relic_effects): ChaCha8Rng,$' crates/core_engine/src/rng.rs
+          require "TASK-102 le test central du générateur"         -n '^fn test_audio_never_advances_run_rng\(\) \{$' "$AUDIO/tests/audio_contract.rs"
+
+          # Le tirage, verbatim aux deux corrections actées près : la méthode de
+          # `rand` 0.10, et aucun clone d'un clip, qui est `Copy`. Le graine est
+          # infaillible (`rand_core` 0.10, `SeedableRng::from_rng`).
+          require "TASK-102 tirage de la variation"                -n '^\s+let idx = self\.rng\.random_range\(0\.\.6\);$' "$SFX"
+          require "TASK-102 tirage de la hauteur, à cinq pour cent" -n '^\s+let pitch = 1\.0 \+ self\.rng\.random_range\(-0\.05\.\.=0\.05\);$' "$SFX"
+          count   "TASK-102 deux tirages, pas un de plus" 2        -n '^[^/]*random_range' "$SFX"
+          require "TASK-102 générateur à l'entropie système"       -n '^\s+rng: SmallRng::from_rng\(&mut rand::rng\(\)\),$' "$SFX"
+          forbid  "TASK-102 méthodes disparues de rand"            -n '^[^/]*(gen_range|from_entropy|thread_rng\(|OsRng|rand::random\()' "$AUDIO/src"
+          forbid  "TASK-102 clone d'un clip"                       -n '^[^/]*\.clone\(\)' "$SFX"
+
+          # Un seul site charge les clips, au démarrage, et rien ne sort de la
+          # façade. Un fichier absent n'arrête rien : ni résultat à déballer ici,
+          # ni résultat ajouté à la façade.
+          count   "TASK-102 un seul site charge les clips" 1       -n '^[^/]*\.load_clip\(' "$AUDIO/src"
+          count   "TASK-102 dix-sept chemins de clips" 17          -n '^\s+(chip_tick: load\(|hand_base_chord: load\(|relic_chord: load\(|mult_hit: load\(|seal_tick: load\(|die_lock: load\(|hand_consumed: load\(|ui_hover: load\(|ui_click: load\(|coin: load\(|victory_fanfare: load\()?"audio/[a-z_0-9]+\.ogg"\)?,$' "$SFX"
+          require "TASK-102 banque chargée au démarrage"           -n '^\s+app\.add_systems\(Startup, load_sound_effect_bank\);$' "$SFX"
+          require "TASK-102 build branche la banque"               -n '^\s+sfx::sfx_plugin\(app\);$' "$LIB"
+          forbid  "TASK-102 échec déballé dans la banque"          -n '^[^/]*(unwrap\(\)|expect\(|panic!)' "$SFX"
+          require "TASK-102 load_clip rend toujours un clip"       -n '^\s+fn load_clip\(&mut self, assets: &AssetServer, path: &str\) -> AudioClip;$' "$BACKEND"
+
+          # Le repli vit dans le backend réel : un chargement échoué est remplacé
+          # par le bip et dit une fois, et un son dont le clip n'est pas résolu
+          # attend dans la file. Un stem absent se dit, sans être remplacé.
+          require "TASK-102 chargement échoué détecté"             -n '^\s+LoadState::Failed\(_\) => \{$' "$BACKEND"
+          require "TASK-102 substitution dite, avec le chemin"     -n '^\s+Some\(path\) => warn!\("son introuvable, remplacé par un bip : \{path\}"\),$' "$BACKEND"
+          require "TASK-102 son non résolu gardé en file"          -U -n '^\s+if !clip\.resolved \{\n\s+backend\.pending\.push\(sound\);$' "$BACKEND"
+          require "TASK-102 stem absent dit une fois"              -n '^\s+if failed && !backend\.layer_warned\[index\] \{$' "$BACKEND"
+          require "TASK-102 le bip s'écoute sur le son rendu"      -n '^fn test_a_missing_clip_is_heard_as_a_beep\(\) \{$' "$AUDIO/tests/real_backend.rs"
+          require "TASK-102 le stem absent s'observe"              -n '^fn test_a_missing_stem_is_said_once\(\) \{$' "$AUDIO/tests/real_backend.rs"
+
+          # TASK-103 : trois sons pilotés par l'observation de l'état. Un seul
+          # patron : comparer à une copie locale, jouer sur la différence,
+          # réécrire la copie **après** la boucle. Les trois systèmes tournent en
+          # `Update`, sans condition d'état, et l'audio ne crée ni n'émet aucun
+          # événement : il reste un pur lecteur.
+          require "TASK-103 trois systèmes, en Update"             -n '^\s+app\.add_systems\(Update, \(play_hand_consumed, play_dice_roll, play_die_lock\)\);$' "$SFX"
+          forbid  "TASK-103 condition d'état ou accroche à une transition" -n '^[^/]*(run_if\(|in_state\(|OnEnter\(|OnExit\()' "$SFX"
+          forbid  "TASK-103 événement créé ou émis par l'audio"    -n '^[^/]*(MessageWriter|add_message|derive\([^)]*(Message|Event)|EventWriter|add_event)' "$AUDIO/src"
+          require "TASK-103 contexte de blind optionnel"           -n '^\s+blind: Option<Res<BlindContext>>,$' "$SFX"
+          require "TASK-103 contexte de main optionnel"            -n '^\s+hand: Option<Res<HandContext>>,$' "$SFX"
+          require "TASK-103 phase de run optionnelle"              -n '^\s+phase: Option<Res<State<RunPhase>>>,$' "$SFX"
+
+          # La case consommée : le bloc du document, copie `Local` comprise, à
+          # hauteur fixe. La grille est `Copy` depuis l'Étape 1 : la copie sort de
+          # la ressource sans clone, et rien n'est redéclaré ici.
+          require "TASK-103 copie locale de la grille"             -n '^\s+mut seen: Local<HandGrid>, // HandGrid : bitset des 13 figures \(Étape 1\)$' "$SFX"
+          require "TASK-103 un bit nouvellement posé"              -n '^\s+if blind\.used_hands\.contains\(hand\) && !seen\.contains\(hand\) \{$' "$SFX"
+          require "TASK-103 la grille recopiée après la boucle"    -U -n '^    \}\n    \*seen = blind\.used_hands;\n\}$' "$SFX"
+          require "TASK-103 la grille est Copy"                    -U -n '^#\[derive\(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize\)\]\npub struct HandGrid\(u16\);$' crates/core_engine/src/hands.rs
+          # Ancrée sur la liste des figures et sur les deux types, pas sur
+          # `const ALL` nu : la façade a la sienne, celle des routages.
+          forbid  "TASK-103 figures ou grille redéclarées"         -n '^[^/]*(const ALL: \[YahtzeeHand|enum YahtzeeHand|struct HandGrid)' "$AUDIO/src"
+          count   "TASK-103 un seul lecteur du loquet de case" 1   -n '^[^/]*bank\.hand_consumed' "$AUDIO/src"
+
+          # Le lancer : l'entrée dans la phase, ou une baisse du compteur à phase
+          # constante ; jamais les deux dans une image. `dice_roll()` a ici son
+          # seul appelant, et la hauteur n'est pas recalculée (le comptage des
+          # tirages de TASK-102 le tient).
+          count   "TASK-103 un seul appelant du tirage" 1          -n '^[^/]*\.dice_roll\(' "$AUDIO/src"
+          require "TASK-103 clip et hauteur viennent de la banque" -U -n '^\s+let \(clip, pitch\) = bank\.dice_roll\(\);\n\s+backend\.0\.play\(clip, Bus::Sfx, local_gain\(1\.0\), pitch\);$' "$SFX"
+          require "TASK-103 entrée dans la phase de lancer"        -n '^\s+let entered = rolling && seen\.phase != Some\(RunPhase::Roll\);$' "$SFX"
+          require "TASK-103 baisse du compteur, en phase de lancer" -U -n '^\s+let rerolled = rolling\n\s+&& matches!\(\(seen\.rerolls_left, now\.rerolls_left\), \(Some\(before\), Some\(after\)\) if after < before\);$' "$SFX"
+          require "TASK-103 un seul son pour les deux raisons"     -n '^\s+if entered \|\| rerolled \{$' "$SFX"
+          require "TASK-103 le témoin recopié en fin de corps"     -U -n '^    \}\n    \*seen = now;\n\}$' "$SFX"
+
+          # Le verrouillage : le champ du dé, pas le marqueur posé avec lui ; le
+          # déverrouillage est muet ; la copie est réécrite après la boucle.
+          require "TASK-103 dés verrouillés, par le champ"         -n '^\s+\.filter\(\|die\| die\.locked\)$' "$SFX"
+          forbid  "TASK-103 marqueur de verrouillage observé"      -n '^[^/]*\bLocked\b' "$AUDIO/src"
+          require "TASK-103 les verrous recopiés après la boucle"  -U -n '^    \}\n    \*seen = locked;\n\}$' "$SFX"
+          count   "TASK-103 un seul lecteur du loquet de dé" 1     -n '^[^/]*bank\.die_lock' "$AUDIO/src"
+
+          # Ce qui part à la façade est la part locale du volume : les curseurs
+          # s'appliquent sur les bus. Ni le loquet de case ni celui de dé ne sont
+          # transposés. Trois clips restent sans appelant : l'interface attend
+          # l'Étape 11, et la pièce a pour observable l'or de la session de run.
+          count   "TASK-103 deux loquets à hauteur fixe" 2         -n '^\s+backend\.0\.play\(latch, Bus::Sfx, local_gain\(1\.0\), 1\.0\);$' "$SFX"
+          forbid  "TASK-103 curseurs lus par les sons d'état"      -n '^[^/]*(AudioBusVolumes|volumes\.)' "$SFX"
+          forbid  "TASK-103 son d'état transposé"                  -n '^[^/]*PitchScaleTracker' "$SFX"
+          forbid  "TASK-103 clip sans geste câblé de force"        -n '^[^/]*bank\.(ui_hover|ui_click|coin)' "$AUDIO/src"
+
+          # TASK-104 : le demi-ton tempéré, **seul modèle de hauteur du projet**.
+          # Trois champs, `Resource` seule, `Default` écrit à la main (dérivé, il
+          # rendrait une hauteur de base nulle et un plafond à zéro).
+          PITCH=$AUDIO/src/pitch.rs
+          require "TASK-104 trois champs, Resource seule"          -U -n '^#\[derive\(Resource\)\]\npub struct PitchScaleTracker \{\n\s+pub base_pitch: f32, // 1\.0\n\s+pub current_semitone: i32,\n\s+pub max_semitone: i32, // 24\n\}$' "$PITCH"
+          count   "TASK-104 un seul modèle de hauteur" 1           -n '^pub struct PitchScaleTracker \{$' crates/
+          require "TASK-104 Default écrit à la main"               -n '^impl Default for PitchScaleTracker \{$' "$PITCH"
+          require "TASK-104 valeurs d'ouverture"                   -U -n '^\s+base_pitch: 1\.0,\n\s+current_semitone: 0,\n\s+max_semitone: 24,$' "$PITCH"
+
+          # **Une seule formule dans tout le dépôt**, écrite une fois : aucun
+          # appelant ne la recalcule, et le modèle linéaire de la v1 n'existe
+          # nulle part. Ancrées sur l'acte : le `0.05` nu que réclamait le corpus
+          # mord deux bornes de ressort sans rapport avec le son.
+          require "TASK-104 le demi-ton tempéré"                   -n '^\s+self\.base_pitch \* 2\.0_f32\.powf\(self\.current_semitone as f32 / 12\.0\)$' "$PITCH"
+          count   "TASK-104 une seule puissance dans pitch.rs" 1   -n '^[^/]*powf' "$PITCH"
+          forbid  "TASK-104 formule de hauteur recopiée ailleurs"  -n '^[^/]*(2\.0_f32\.powf|as f32 / 12\.0)' crates/ -g '!**/audio_system/src/pitch.rs'
+          forbid  "TASK-104 modèle de hauteur linéaire"            -n '^[^/]*pitch\s*\+=' crates/
+
+          # Deux octaves, et le plafond est dans `advance()`, par le champ. Le
+          # reset est à l'**entrée** du décompte, sans garde de réentrance : il
+          # est idempotent.
+          require "TASK-104 plafond dans advance, par le champ"    -n '^\s+self\.current_semitone = \(self\.current_semitone \+ 1\)\.min\(self\.max_semitone\); // 24$' "$PITCH"
+          require "TASK-104 reset à l'entrée du décompte"          -n '^\s+\.add_systems\(OnEnter\(RunPhase::Scoring\), reset_pitch_on_scoring_entry\);$' "$PITCH"
+          forbid  "TASK-104 reset à la sortie du décompte"         -n '^[^/]*OnExit\(' "$PITCH"
+          forbid  "TASK-104 garde de réentrance"                   -n '^[^/]*(Local<bool>|already_reset)' "$PITCH"
+          require "TASK-104 build branche la hauteur"              -n '^\s+pitch::pitch_plugin\(app\);$' "$LIB"
+          require "TASK-104 le plafond s'écoute sur le son rendu"  -n '^fn test_the_capped_pitch_is_played\(\) \{$' "$AUDIO/tests/real_backend.rs"
+
+          # TASK-105 : le lecteur des paliers de score, seul point d'entrée de
+          # l'audio depuis la mise en scène. Le tampon est celui de `JuicePlugin`,
+          # que `build` exige ; l'audio le lit, il ne l'enregistre pas.
+          require "TASK-105 lecteur de paliers tamponnés"          -n '^\s+mut events: MessageReader<ScoreStepPlayed>,$' "$PITCH"
+          require "TASK-105 build exige le tampon des paliers"     -n '^\s+app\.world\(\)\.contains_resource::<Messages<ScoreStepPlayed>>\(\),$' "$LIB"
+          forbid  "TASK-105 lecteur optionnel, décompte muet"      -n '^[^/]*Option<MessageReader' "$AUDIO/src"
+
+          # **Lire la hauteur, jouer, puis avancer**, un demi-ton par palier,
+          # quelle que soit la source, en un seul site.
+          require "TASK-105 jouer, puis avancer"                   -U -n '^\s+backend\.0\.play\(clip, bus, volume, height\);\n\s+pitch\.advance\(\);$' "$PITCH"
+          count   "TASK-105 un seul site avance la hauteur" 1      -n '^[^/]*\.advance\(\)' "$AUDIO/src"
+
+          # L'arête d'ordre, écrite dans `pitch_plugin` : **après** le dépileur,
+          # dans la même image, jamais **dans** son ensemble, qui ferait hériter
+          # le lecteur de sa condition d'état.
+          require "TASK-105 après le dépileur, dans la même image" -n '^\s+app\.add_systems\(Update, play_score_steps\.after\(JuiceSet::TickQueue\)\);$' "$PITCH"
+          forbid  "TASK-105 lecteur placé dans un ensemble du juice" -n '^[^/]*in_set\(JuiceSet' "$AUDIO/"
+          forbid  "TASK-105 condition d'état sur le lecteur"       -n '^[^/]*(run_if\(|in_state\()' "$PITCH"
+          forbid  "TASK-105 combinateurs supprimés en 0.19"        -n '^[^/]*\.(run_in|run_after|run_before)\(' "$AUDIO/"
+
+          # Quatre sources, quatre clips, cités une fois chacun ; le coup
+          # multiplicatif change de clip **et** de routage. Les `match` sont
+          # exhaustifs, et l'identité d'une relique est ignorée : un `match` sur
+          # elle grossirait avec le catalogue de l'Étape 9.
+          count   "TASK-105 l'accord de la figure de base, une fois" 1 -n '^[^/]*bank\.hand_base_chord' "$PITCH"
+          count   "TASK-105 le tic de jeton, une fois" 1           -n '^[^/]*bank\.chip_tick' "$PITCH"
+          count   "TASK-105 l'accord de relique, une fois" 1       -n '^[^/]*bank\.relic_chord' "$PITCH"
+          count   "TASK-105 le tic de sceau, une fois" 1           -n '^[^/]*bank\.seal_tick' "$PITCH"
+          require "TASK-105 le coup multiplicatif"                 -n '^\s+ScoreAction::MultiplyMult\(_\) => bank\.mult_hit,$' "$PITCH"
+          require "TASK-105 le coup multiplicatif résonne"         -n '^\s+ScoreAction::MultiplyMult\(_\) => Bus::SfxReverb,$' "$PITCH"
+          forbid  "TASK-105 bras générique dans un match"          -n '^[^/]*\b_ =>' "$PITCH"
+          forbid  "TASK-105 identité de relique lue par l'audio"   -n '^[^/]*RelicId' "$AUDIO/src"
+          # Le nom proscrit de la variante de dé est tenu par le volet 1
+          # (« critère 10 noms proscrits »), ancré par `\b` : nu, il mordrait le
+          # déclencheur normatif `Hook::OnScoringDie`.
+
+          # La figure de base sonne au nominal ; un sceau à la hauteur courante
+          # teintée ; quatre teintes, écrites une fois, distinctes.
+          require "TASK-105 figure de base à la hauteur nominale"  -n '^\s+StepSource::HandBase \{ \.\. \} => tracker\.base_pitch,$' "$PITCH"
+          count   "TASK-105 quatre teintes de sceau" 4             -n '^\s+DieSeal::(Gold => 1\.02|Blue => 1\.01|Purple => 0\.99|Red => 0\.98),$' "$PITCH"
+
+          # L'intensité vient de l'action seule, chacune dans son unité, et ce
+          # qui part à la façade est la part locale : les curseurs sont sur les bus.
+          require "TASK-105 intensité tirée de l'action"           -n '^\s+let volume = local_gain\(step_intensity\(step\.action\)\);$' "$PITCH"
+          require "TASK-105 une perte sonne comme un gain"         -n '^\s+share\(hundredths\.unsigned_abs\(\), FULL_MULT_HUNDREDTHS\),$' "$PITCH"
+          forbid  "TASK-105 curseurs lus par le lecteur"           -n '^[^/]*(AudioBusVolumes|volumes\.)' "$PITCH"
+
+          # Le flux est à sens unique : rien de la mise en scène n'est lu ici
+          # hors du palier et de l'ensemble d'ordre.
+          forbid  "TASK-105 ressource de la mise en scène lue par l'audio" -n '^[^/]*(JuiceSettings|ScreenShake|AnimatedNumber|PunchScale)' "$AUDIO/src"
+          require "TASK-105 l'arête s'éprouve sur la chaîne réelle" -n '^fn test_reader_runs_after_the_drainer\(\) \{$' "$AUDIO/tests/audio_contract.rs"
+          require "TASK-105 le coup multiplicatif s'écoute"        -n '^fn test_a_multiplying_step_resonates\(\) \{$' "$AUDIO/tests/real_backend.rs"
+
+          # TASK-106 : **une seule définition de « blind battue » dans le dépôt**,
+          # à côté du type, et quatre lecteurs qui l'appellent : l'arbitre de fin
+          # de manche, la victoire finale, le harnais de simulation et l'audio.
+          # Aucun ne recopie la comparaison du score à la cible.
+          BLINDS=crates/core_engine/src/blinds/mod.rs
+          count   "TASK-106 une seule définition de la blind battue" 1 -n '^[^/]*fn blind_is_beaten\(' crates/
+          require "TASK-106 la règle, écrite une fois"             -U -n '^pub fn blind_is_beaten\(ctx: &BlindContext\) -> bool \{\n\s+ctx\.current_score >= ctx\.target_score\n\}$' "$BLINDS"
+          forbid  "TASK-106 règle de victoire recopiée"            -n '^[^/]*current_score\s*(>=|<)\s*[a-z_.]*target_score' crates/ -g '!**/core_engine/src/blinds/mod.rs'
+          require "TASK-106 l'arbitre de fin de manche l'appelle"  -n '^\s+if blind_is_beaten\(&blind\) \{$' crates/game_state/src/systems/round_end.rs
+          require "TASK-106 la victoire finale l'appelle"          -n '^\s+&& blind_is_beaten\(&blind\);$' crates/game_state/src/systems/setup.rs
+          require "TASK-106 le harnais l'appelle"                  -n '^\s+if blind_is_beaten\(ctx\) \{$' crates/sim_harness/src/run.rs
+          require "TASK-106 l'audio l'appelle"                     -n '^\s+if !blind_is_beaten\(&blind\) \|\| !manager\.duck_timer\.is_finished\(\) \{$' "$MUSIC"
+
+          # La fanfare : une fois par blind battue, par un seul système qui joue
+          # le jingle **et** arme l'enveloppe. La garde de réentrance est le
+          # minuteur lui-même, aucun témoin de plus ; le clip vient de la banque.
+          require "TASK-106 fanfare à l'entrée de la fin de manche" -n '^\s+app\.add_systems\(OnEnter\(RunPhase::RoundEnd\), on_blind_beaten\);$' "$MUSIC"
+          require "TASK-106 le jingle, à la part locale du volume" -n '^\s+backend\.0\.play\(fanfare, Bus::Sfx, local_gain\(1\.0\), 1\.0\);$' "$MUSIC"
+          count   "TASK-106 un seul lecteur de la fanfare" 1       -n '^[^/]*bank\.victory_fanfare' "$AUDIO/src"
+          count   "TASK-106 un seul site arme l'enveloppe" 1       -n '^[^/]*duck_timer\.reset\(\)' "$AUDIO/src"
+          forbid  "TASK-106 clip chargé hors de la banque"         -n '^[^/]*load_clip' "$MUSIC"
+          forbid  "TASK-106 second témoin de la fanfare"           -n '^[^/]*(fanfare_played|Local<bool>)' "$MUSIC"
+
+          # Le ducking : −6 dB, écrit une fois ; un plateau, maintenu en tête du
+          # système qui applique les gains, et qui ne touche que la sortie.
+          require "TASK-106 le gain du ducking, écrit une fois"    -n '^pub const FANFARE_DUCK_GAIN: f32 = 0\.501_187_2;$' "$MUSIC"
+          count   "TASK-106 le gain du ducking n'est pas recopié" 1 -n '^[^/]*0\.501' "$AUDIO/src"
+          forbid  "TASK-106 puissance calculée dans la musique"    -n '^[^/]*powf' "$MUSIC"
+          require "TASK-106 l'enveloppe avance avec les gains"     -n '^\s+manager\.duck_timer\.tick\(time\.delta\(\)\);$' "$MUSIC"
+          require "TASK-106 un plateau, pas une rampe"             -U -n '^\s+manager\.duck = if manager\.duck_timer\.is_finished\(\) \{\n\s+1\.0\n\s+\} else \{\n\s+FANFARE_DUCK_GAIN\n\s+\};$' "$MUSIC"
+          count   "TASK-106 un seul site écrit le ducking" 1       -n '^[^/]*\.duck = ' "$AUDIO/src"
+          require "TASK-106 le ducking s'écoute sur le son rendu"  -n '^fn test_the_fanfare_ducks_the_music_for_1_2_seconds\(\) \{$' "$AUDIO/tests/real_backend.rs"
+
+          # TASK-107 : **trois listes qui doivent dire la même chose**, les
+          # fichiers de `assets/audio/`, les lignes de `assets/CREDITS.md` et les
+          # chemins que le jeu charge. Les faits se tiennent par des tests, qui
+          # lisent le disque ; les gardes tiennent que ces tests existent, qu'ils
+          # lisent la racine de production et le journal du jeu, et qu'ils ne
+          # dépendent ni du répertoire courant ni d'un outil absent du runner.
+          ASSETS_CONTRACT="$AUDIO/tests/assets_contract.rs"
+          PRODUCTION="$AUDIO/tests/production_assets.rs"
+          for test in test_every_audio_asset_has_a_credit test_project_written_assets_are_credited \
+                      test_every_licence_is_allowed test_licence_rule_refuses_what_the_policy_refuses \
+                      test_all_audio_is_ogg test_no_placeholder_asset_ships \
+                      test_audio_fits_the_wasm_budget test_the_game_loads_exactly_the_shipped_audio; do
+            require "TASK-107 contrat des assets : $test" -n "^fn $test\\(\\) \\{\$" "$ASSETS_CONTRACT"
+          done
+          require "TASK-107 la durée des couches se mesure sur le décodeur du jeu" -n '^fn test_stems_have_identical_duration\(\) \{$' "$PRODUCTION"
+          require "TASK-107 le jeu démarre sur ses vrais fichiers sans un bip" -n '^fn test_production_assets_load_without_a_beep\(\) \{$' "$PRODUCTION"
+          require "TASK-107 la racine lue est celle de production" -n '^const PRODUCTION_ROOT: &str = "\.\./\.\./assets";$' "$PRODUCTION"
+          forbid  "TASK-107 application montée hors de la racine de production" -n '^[^/]*offline_app_at\("' "$PRODUCTION"
+
+          # Les chemins chargés se lisent **dans le jeu**, sur le journal du backend
+          # nul : une liste recopiée dans le test dériverait sans que rien tombe.
+          require "TASK-107 les clips chargés, lus sur le journal"   -n '^\s+let clips: Vec<&String> = journal\.loaded\(\)\.iter\(\)\.collect\(\);$' "$ASSETS_CONTRACT"
+          require "TASK-107 les couches chargées, lues sur le journal" -n '^\s+let layers: Vec<&String> = journal\.layer_loads\(\)\.iter\(\)\.map\(\|\(path, _\)\| path\)\.collect\(\);$' "$ASSETS_CONTRACT"
+
+          # Le plafond de poids : écrit une fois. La porte de taille compare le
+          # `.wasm` **plus `assets/`** à 25 Mo, et laisserait passer aujourd'hui
+          # six fois ce que le backend lié laissera.
+          require "TASK-107 le plafond du son, écrit une fois"     -n '^const AUDIO_BUDGET_BYTES: u64 = 500_000;$' "$ASSETS_CONTRACT"
+          count   "TASK-107 le plafond du son n'est pas recopié" 1 -n '^[^/]*500_000' "$AUDIO/tests"
+
+          # Ni répertoire courant, ni outil externe : `cargo test --workspace` part
+          # de la racine, `cargo test -p` de la crate, et le runner n'a pas `ffprobe`.
+          require "TASK-107 contrat : chemins depuis le manifeste"  -n '^\s+Path::new\(env!\("CARGO_MANIFEST_DIR"\)\)$' "$ASSETS_CONTRACT"
+          require "TASK-107 production : chemins depuis le manifeste" -n '^\s+let dir = Path::new\(env!\("CARGO_MANIFEST_DIR"\)\)$' "$PRODUCTION"
+          forbid  "TASK-107 chemin relatif au répertoire courant"  -n '^[^/]*current_dir' "$ASSETS_CONTRACT" "$PRODUCTION"
+          forbid  "TASK-107 outil externe dans un test d'assets"   -n '^[^/]*(Command::new|ffprobe|ffmpeg)' "$ASSETS_CONTRACT" "$PRODUCTION"
+
+          # Le registre : sa table, et la liste blanche lue dans la colonne.
+          require "TASK-107 le registre a son titre"               -n '^## Registre$' assets/CREDITS.md
+          require "TASK-107 le registre a ses cinq colonnes"       -n '^\| Fichier \| Source \| Auteur \| Licence \| Ajouté le \|$' assets/CREDITS.md
+          require "TASK-107 la licence se lit dans la colonne"     -n '^\s+let \(path, licence\) = \(&row\[0\], row\[3\]\.as_str\(\)\);$' "$ASSETS_CONTRACT"
+
+          # TASK-108 : **la mesure lie le son, sur son backend réel.** Le mode de
+          # défaillance n'est pas une panne : c'est un chiffre stable et faux.
+          # Deux gardiens, qui ne voient pas la même chose, mesuré au banc : le
+          # **texte** refuse le backend nul dans la cible, que la balance ne voit
+          # pas (même poids à l'octet près, le plugin choisit son backend à
+          # l'exécution, les deux sont liés) ; le **plancher du coût du son**, dans
+          # la porte de taille, voit un son qui ne serait plus lié du tout, ce
+          # qu'aucun motif ne voit.
+          MESURE=crates/wasm_size
+          require "TASK-108 la cible monte le son, sur son backend réel" -n '^\s+app\.add_plugins\(audio_system::GameAudioPlugin::new\(\)\);$' "$MESURE/src/main.rs"
+          count   "TASK-108 le son n'est monté qu'une fois par la cible" 1 -n '^[^/]*GameAudioPlugin' "$MESURE/src"
+          forbid  "TASK-108 backend nul ou hors ligne dans la cible" -n '^[^/]*(headless|offline)\(\)' "$MESURE/src"
+          require "TASK-108 le son se retire par une feature"      -U -n '^\s+#\[cfg\(feature = "audio"\)\]\n\s+app\.add_plugins\(audio_system::GameAudioPlugin::new\(\)\);$' "$MESURE/src/main.rs"
+          require "TASK-108 le son après les plugins de jeu"       -U -n '^\s+add_game_plugins\(&mut app\);\n\s+#\[cfg\(feature = "audio"\)\]$' "$MESURE/src/main.rs"
+          require "TASK-108 la feature audio, par défaut"          -n '^default = \["audio"\]$' "$MESURE/Cargo.toml"
+          require "TASK-108 la feature audio porte la dépendance"  -n '^audio = \["dep:audio_system"\]$' "$MESURE/Cargo.toml"
+          require "TASK-108 le son, dépendance optionnelle"        -n '^audio_system = \{ path = "\.\./audio_system", version = "0\.1\.0", optional = true \}$' "$MESURE/Cargo.toml"
+          require "TASK-108 le binaire reste derrière son verrou"  -n '^required-features = \["measure"\]$' "$MESURE/Cargo.toml"
+          require "TASK-108 la cible, dernier membre du workspace" -U -n '^  "crates/wasm_size",\n\]$' Cargo.toml
+          forbid  "TASK-108 backend déclaré par la cible"          -n '^\s*(kira|rodio|bevy_seedling|firewheel|cpal|symphonia|bevy_tweening)[a-z0-9_-]*\s*=' "$MESURE/Cargo.toml"
+
+          # De l'outillage, pas du code de jeu : une liste de plugins et une
+          # caméra d'observation. Branche A : ni le lecteur de Bevy, ni son décodeur.
+          forbid  "TASK-108 logique de jeu dans la cible"          -n '^[^/]*(derive\((Component|Resource|Message|Event)|impl Plugin for|fn .*\(.*(Query|Res|ResMut)<)' "$MESURE/src"
+          count   "TASK-108 un seul système dans la cible, la caméra" 1 -n '^[^/]*add_systems\(' "$MESURE/src"
+          forbid  "TASK-108 lecteur audio de Bevy dans le binaire" -n '^[^#]*"(bevy_audio|vorbis|symphonia-vorbis)"' "$MESURE/Cargo.toml"
+          forbid  "TASK-108 feature 3D dans le binaire"            -n '^[^#]*"(bevy_pbr|bevy_gltf|3d|bevy_animation)"' "$MESURE/Cargo.toml"
+          require "TASK-108 le jeu mesuré démarre"                 -n '^fn test_the_measured_game_boots\(\) \{$' "$MESURE/tests/boot.rs"
+          require "TASK-108 le test de démarrage monte la liste de la cible" -U -n '^\s+let mut app = headless_base\(\);\n\s+add_game_plugins\(&mut app\);$' "$MESURE/tests/boot.rs"
+
+          # Aucun cycle ouvert : seule la cible dépend du son. La boutique a perdu
+          # son binaire et son verrou.
+          forbid  "TASK-108 le son nommé sous la cible"            -n 'audio_system' crates/core_engine crates/game_state crates/ui_and_juice crates/shop_system crates/sim_harness
+          forbid  "TASK-108 verrou de mesure resté dans la boutique" -n '^measure = ' crates/shop_system/Cargo.toml
+
+          # La porte de taille : deux builds, le coût du son et son plancher, la
+          # marge restante. La référence ne s'écrit jamais depuis un script.
+          require "TASK-108 le jeu sans le son est mesuré"         -n '^sans_son=\$\(ci/measure-wasm\.sh "\$\{SORTIE\}-sans-audio" sans-audio\)$' ci/check-wasm-size.sh
+          require "TASK-108 le coût du son est une différence"     -n '^son=\$\(\( mesure - sans_son \)\)$' ci/check-wasm-size.sh
+          require "TASK-108 le plancher du coût du son"            -n '^PLANCHER_SON=1000000$' ci/check-wasm-size.sh
+          require "TASK-108 le plancher fait tomber la porte"      -n '^if \[ "\$\{son\}" -lt "\$\{PLANCHER_SON\}" \]; then$' ci/check-wasm-size.sh
+          require "TASK-108 le mode sans son retire la feature"    -n '^\s+sans-audio\) FEATURES=\(--no-default-features --features measure\) ;;$' ci/measure-wasm.sh
+          forbid  "TASK-108 référence écrite par un script"        -n '>\s*"?(\$\{REFERENCE_FICHIER\}|ci/wasm-size-baseline\.txt)' ci/ .github/workflows/ci.yml
+          require "TASK-108 l'arbre complet sans la feature proscrite" -n '^fn test_no_symphonia_vorbis_in_workspace_tree\(\) \{$' "$AUDIO/tests/audio_contract.rs"
+
+          # TASK-109 : **l'audit de clôture ne refait pas le travail des gardes, il
+          # vérifie qu'elles existent.** Sa concordance dit, critère par critère,
+          # quelles gardes et quels tests le tiennent, et tombe si l'un d'eux
+          # disparaît. Les recherches sur nom nu du ticket d'audit ne sont pas
+          # recopiées ici : plusieurs mordaient la prose qui explique l'interdit.
+          # Une seule manquait, l'énumération d'états de la v1.
+          forbid  "TASK-109 énumération d'états de la v1"          -n '^[^/]*\bGameState\b' crates/ assets/
+          require "TASK-109 l'audit de l'étape existe"             --files "$AUDIO/tests" -g 'step8_audit.rs'
+          require "TASK-109 la concordance est éprouvée"           -n '^fn test_every_criterion_keeps_its_guardians\(\) \{$' "$AUDIO/tests/step8_audit.rs"
+          require "TASK-109 le glossaire se compare au code"       -n '^fn test_glossary_block_matches_the_code_both_ways\(\) \{$' "$AUDIO/tests/step8_audit.rs"
+          forbid  "TASK-109 outil externe dans l'audit"            -n '^[^/]*(Command::new|current_dir)' "$AUDIO/tests/step8_audit.rs"
+          require "TASK-109 le bloc de glossaire livré"            -n '^## § 2\.6 — Types déclarés par les Étapes \(registre\) : lignes de l.Étape 8$' reports/glossaire-etape-8.md
+          require "TASK-109 un clip est un identifiant opaque"     -n '^\| `AudioClip` \| newtype de façade \| 8 \|' reports/glossaire-etape-8.md
+          require "TASK-109 une couche est un identifiant opaque"  -n '^\| `LayerHandle` \| newtype de façade \| 8 \|' reports/glossaire-etape-8.md
+
+          # Le banc d'écoute : de l'outillage, qui monte le vrai plugin sur les
+          # fichiers de production. Trois critères de l'étape ne s'automatisent
+          # pas, ils s'écoutent ; aucun build jouable n'existe avant l'Étape 11.
+          require "TASK-109 le banc d'écoute monte le vrai plugin" -n '^\s+app\.add_plugins\(GameAudioPlugin::new\(\)\);$' "$AUDIO/examples/listen.rs"
+          require "TASK-109 le banc d'écoute lit la racine de production" -n '^\s+file_path: concat!\(env!\("CARGO_MANIFEST_DIR"\), "/\.\./\.\./assets"\)\.to_string\(\),$' "$AUDIO/examples/listen.rs"
+          forbid  "TASK-109 lint éteint dans le banc d'écoute"     -n '^[^/]*#\[allow\(' "$AUDIO/examples"
 
           exit $status
 

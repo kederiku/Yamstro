@@ -3,3 +3,6 @@
 .DS_Store
 CLAUDE.md
 /dist
+/tools/audio_probe/target
+__pycache__/
+/dist-sans-audio

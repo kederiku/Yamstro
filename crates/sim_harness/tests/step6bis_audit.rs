@@ -518,6 +518,7 @@ fn test_ci_blocks_are_present_and_unamended() {
 
     // Les blocs amont sont là, et celui de l'étape aussi. L'Étape 7 a quitté
     // la liste des absentes le 15 septembre 2026, à TASK-82 : son bloc existe.
+    // L'Étape 8 l'a quittée le 17 septembre 2026, à TASK-95, par l'ADR-012.
     for bloc in [
         "---- Étape 3 :",
         "---- Étape 4 :",
@@ -525,11 +526,12 @@ fn test_ci_blocks_are_present_and_unamended() {
         "---- Étape 6 :",
         "---- Étape 6 bis :",
         "---- Étape 7 :",
+        "---- Étape 8 :",
     ] {
         assert!(ci.contains(bloc), "le bloc « {bloc} » a disparu");
     }
     // Et aucun bloc d'une étape non livrée n'est inventé.
-    for absente in ["---- Étape 8 :", "---- Étape 9 :"] {
+    for absente in ["---- Étape 9 :", "---- Étape 10 :", "---- Étape 11 :"] {
         assert!(!ci.contains(absente), "un bloc « {absente} » est inventé");
     }
 

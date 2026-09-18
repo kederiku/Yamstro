@@ -5,6 +5,22 @@ allow = [
   "MIT-0",
 ]
 private = { ignore = true }
+# TASK-95 a mesuré l'arbre du backend audio retenu : neuf crates sous MPL-2.0,
+# copyleft faible à l'échelle du fichier. Sur des crates non modifiées, l'obligation
+# est de laisser leur source accessible, ce que crates.io fait. La licence n'entre
+# pas dans la liste globale : neuf exceptions nommées, celles de l'addendum à
+# l'ADR-006, et rien d'autre. Jamais de copyleft fort.
+exceptions = [
+  { allow = ["MPL-2.0"], crate = "symphonia" },
+  { allow = ["MPL-2.0"], crate = "symphonia-codec-pcm" },
+  { allow = ["MPL-2.0"], crate = "symphonia-codec-vorbis" },
+  { allow = ["MPL-2.0"], crate = "symphonia-common" },
+  { allow = ["MPL-2.0"], crate = "symphonia-core" },
+  { allow = ["MPL-2.0"], crate = "symphonia-format-ogg" },
+  { allow = ["MPL-2.0"], crate = "symphonia-format-riff" },
+  { allow = ["MPL-2.0"], crate = "symphonia-metadata" },
+  { allow = ["MPL-2.0"], crate = "triple_buffer" },
+]
 
 [bans]
 multiple-versions = "warn"

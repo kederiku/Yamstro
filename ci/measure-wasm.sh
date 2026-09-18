@@ -12,14 +12,25 @@
 # `wc -c` et non `stat -c %s` : cette dernière est une option GNU, que darwin
 # rejette. La procédure doit tourner sur la machine de développement, sinon
 # personne ne la relance avant de pousser.
+#
+# **Deux modes, pour que le coût du son se mesure** (TASK-108). Sans second
+# argument, le jeu entier, son compris : c'est la grandeur de référence. Avec
+# `sans-audio`, le même jeu sans la feature `audio` de la cible ; la différence
+# des deux sorties est ce que le son coûte, et la porte de taille en tient un
+# plancher. Usage : measure-wasm.sh [dossier de sortie] [sans-audio]
 set -euo pipefail
 
 CIBLE=wasm_size
 SORTIE=${1:-dist}
+case "${2:-}" in
+  "")         FEATURES=(--features measure) ;;
+  sans-audio) FEATURES=(--no-default-features --features measure) ;;
+  *)          printf 'mode inconnu : %s\n' "$2" >&2; exit 2 ;;
+esac
 BRUT=target/wasm32-unknown-unknown/release/${CIBLE}.wasm
 
 cargo build --release --target wasm32-unknown-unknown \
-  -p shop_system --features measure --bin "${CIBLE}"
+  -p wasm_size "${FEATURES[@]}" --bin "${CIBLE}"
 
 rm -rf "${SORTIE}"
 wasm-bindgen --target web --out-dir "${SORTIE}" "${BRUT}"

@@ -58,7 +58,7 @@
 //! vit à TASK-29, sur une transition vers l'état courant.
 
 use bevy::prelude::*;
-use core_engine::blinds::BlindContext;
+use core_engine::blinds::{BlindContext, blind_is_beaten};
 
 use crate::plugin::{GameSet, InputSet};
 use crate::resources::ScoringStepQueue;
@@ -111,7 +111,7 @@ fn resolve_round_outcome(
     };
 
     // La cible d'abord. L'inversion est le défaut à ne pas commettre.
-    if blind.current_score >= blind.target_score {
+    if blind_is_beaten(&blind) {
         NextState::set_if_neq(&mut phase, RunPhase::Shop);
     } else if blind.hands_remaining == 0 {
         NextState::set_if_neq(&mut app_state, AppState::GameOver);

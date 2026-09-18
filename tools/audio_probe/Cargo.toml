@@ -1,0 +1,23 @@
+[workspace] # table vide : détache ce paquet du workspace parent
+
+[package]
+name = "audio_probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+default-run = "audio_probe"
+description = "Banc d'essai de TASK-95 : mesure des trois critères de la tâche 0 sur bevy_seedling."
+
+[dependencies]
+# `bevy_audio` reste désactivée : bevy_seedling la refuse (collisions de noms) et décode seul.
+bevy = { version = "=0.19.1", default-features = false, features = [
+    "bevy_asset", "bevy_log", "multi_threaded", "std",
+] }
+# Seule version compatible Bevy 0.19 ; `effects` expose le FreeverbNode de Firewheel.
+bevy_seedling = { version = "=0.8.0", features = ["effects"] }
+# Adaptateurs de tampons que `FirewheelProcessor::process` attend (le mock de la crate fait de même).
+audioadapter-buffers = "4"
+
+# Sur wasm32, la feature `rand` de bevy_seedling tire getrandom 0.4, qui exige `wasm_js`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
